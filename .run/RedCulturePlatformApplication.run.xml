@@ -1,0 +1,10 @@
+<component name="ProjectRunConfigurationManager">
+  <configuration default="false" name="RedCulturePlatformApplication" type="SpringBootApplicationConfigurationType" factoryName="Spring Boot">
+    <option name="SPRING_BOOT_MAIN_CLASS" value="com.redculture.platform.RedCulturePlatformApplication" />
+    <module name="springboot-entity-demo" />
+    <option name="WORKING_DIRECTORY" value="$PROJECT_DIR$/springboot-entity-demo" />
+    <method v="2">
+      <option name="Make" enabled="true" />
+    </method>
+  </configuration>
+</component>

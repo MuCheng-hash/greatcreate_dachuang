@@ -1,0 +1,162 @@
+﻿<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>乡村学校周边思政教育资源数字地图</title>
+    <meta name="description" content="以河北乡村学校为中心，展示周边可进入课堂和实践活动的思政教育资源。">
+    <link rel="stylesheet" href="/styles.css?v=20260617c">
+</head>
+<body>
+<div class="app-shell">
+    <header class="app-header">
+        <div class="brand-block">
+            <span class="brand-mark">R</span>
+            <div class="brand-text">
+                <strong>乡村学校思政资源地图</strong>
+                <small>定位后优先展示附近学校及周边教育资源</small>
+            </div>
+        </div>
+
+        <button class="header-search-shell" id="currentRegionTrigger" type="button">
+            <div class="search-indicator"></div>
+            <div class="search-copy">
+                <strong id="toolbarTownName">等待定位</strong>
+                <span id="townCenterLabel">中心点：--</span>
+            </div>
+        </button>
+
+        <div class="header-actions">
+            <button class="ghost-button" id="locateButton" type="button">定位我的位置</button>
+            <button class="ghost-button" id="refreshTownButton" type="button">刷新当前内容</button>
+        </div>
+    </header>
+
+    <section class="map-toolbar-row">
+        <div class="layer-toggle-group">
+            <button class="layer-toggle is-active" id="toggleBasemapDetail" type="button">精细底图</button>
+            <button class="layer-toggle is-active" id="toggleProvinceLayer" type="button">河北省</button>
+            <button class="layer-toggle is-active" id="toggleCityLayer" type="button">市级轮廓</button>
+            <button class="layer-toggle is-active" id="toggleTownshipLayer" type="button">区县轮廓</button>
+        </div>
+
+        <div class="toolbar-side">
+            <div class="legend-inline" aria-label="地图图例">
+                <span class="legend-row"><span class="legend-dot dot-school"></span>乡村学校</span>
+                <span class="legend-row"><span class="legend-dot dot-resource"></span>思政资源</span>
+                <span class="legend-row"><span class="legend-dot dot-practice"></span>实践场所</span>
+            </div>
+            <div class="toolbar-status">
+                <span id="graphStatus" class="tiny-tag">待命</span>
+                <span id="mapStatus">地图正在初始化。</span>
+            </div>
+        </div>
+    </section>
+
+    <main class="portal-layout">
+        <section class="map-panel">
+            <div class="map-stage">
+                <div id="mapCanvas" aria-label="乡村学校周边思政教育资源地图"></div>
+
+                <aside class="region-drawer" id="regionDrawer" aria-hidden="true">
+                    <div class="drawer-header">
+                        <div>
+                            <p class="eyebrow">学校详情</p>
+                            <h1 id="townName">等待定位附近学校</h1>
+                            <p id="townIntro" class="muted-copy">定位成功后，这里会优先展示附近乡村学校、周边思政教育资源和可落地的课堂活动建议。</p>
+                        </div>
+                        <button class="drawer-close" id="closeDrawerButton" type="button" aria-label="关闭侧边栏">收起</button>
+                    </div>
+
+                    <div class="drawer-stats">
+                        <article>
+                            <span class="meta-label">周边资源</span>
+                            <strong id="factMarkerCount">0</strong>
+                        </article>
+                        <article>
+                            <span class="meta-label">活动方案</span>
+                            <strong id="factHeroCount">0</strong>
+                        </article>
+                        <article>
+                            <span class="meta-label">附近学校</span>
+                            <strong id="factStoryCount">0</strong>
+                        </article>
+                        <article>
+                            <span class="meta-label">资源类别</span>
+                            <strong id="factEventCount">0</strong>
+                        </article>
+                    </div>
+
+                    <section class="drawer-section">
+                        <div class="section-title-row">
+                            <h2>附近学校</h2>
+                            <span id="eventCount" class="tiny-tag">0</span>
+                        </div>
+                        <div id="eventList" class="stack-list"></div>
+                    </section>
+
+                    <section class="drawer-section">
+                        <div class="section-title-row">
+                            <h2>周边思政资源</h2>
+                            <span id="markerCount" class="tiny-tag">0</span>
+                        </div>
+                        <div id="markerList" class="stack-list"></div>
+                    </section>
+
+                    <section class="drawer-section">
+                        <div class="section-title-row">
+                            <h2>教学活动建议</h2>
+                            <span id="heroCount" class="tiny-tag">0</span>
+                        </div>
+                        <div id="heroList" class="stack-list"></div>
+                    </section>
+
+                    <section class="drawer-section">
+                        <div class="section-title-row">
+                            <h2>资源主题摘要</h2>
+                            <span id="storyCount" class="tiny-tag">0</span>
+                        </div>
+                        <div id="storyList" class="stack-list"></div>
+                    </section>
+
+                    <section class="drawer-section">
+                        <div class="section-title-row">
+                            <h2>建议提问</h2>
+                            <span id="questionCount" class="tiny-tag">0</span>
+                        </div>
+                        <div id="questionList" class="question-list"></div>
+                    </section>
+
+                    <section class="drawer-section">
+                        <div class="section-title-row">
+                            <h2>智能讲解</h2>
+                            <span id="qaStatus" class="tiny-tag">待命</span>
+                        </div>
+                        <div class="qa-actions">
+                            <button class="primary-button" id="explainButton" type="button">生成讲解</button>
+                            <button class="ghost-button" id="clearQaButton" type="button">清空回答</button>
+                        </div>
+                        <label class="textarea-label" for="qaQuestionInput">继续追问</label>
+                        <textarea id="qaQuestionInput" placeholder="例如：这所学校可以怎样利用周边资源开展一节思政实践课？"></textarea>
+                        <button class="primary-button full-width" id="askButton" type="button">发送问题</button>
+                        <div id="qaAnswer" class="answer-box">
+                            <p>问答结果会显示在这里。</p>
+                        </div>
+                        <div id="qaCitations" class="citation-list"></div>
+                    </section>
+                </aside>
+            </div>
+        </section>
+    </main>
+</div>
+
+<template id="emptyStateTemplate">
+    <article class="empty-card">
+        <p>暂无可展示内容。</p>
+    </article>
+</template>
+
+<script src="/app.js?v=20260617c"></script>
+</body>
+</html>
+

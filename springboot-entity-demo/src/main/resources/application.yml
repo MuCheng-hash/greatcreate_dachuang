@@ -1,0 +1,36 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: red-culture-platform
+  datasource:
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    url: jdbc:mysql://localhost:3306/red_culture_platform?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai
+    username: root
+    password: 123456
+  neo4j:
+    uri: ${NEO4J_URI:bolt://127.0.0.1:7687}
+    authentication:
+      username: ${NEO4J_USERNAME:neo4j}
+      password: ${NEO4J_PASSWORD:12345678}
+
+mybatis-plus:
+  configuration:
+    map-underscore-to-camel-case: true
+    log-impl: org.apache.ibatis.logging.stdout.StdOutImpl
+  global-config:
+    db-config:
+      id-type: auto
+
+logging:
+  level:
+    com.redculture.platform.mapper: debug
+
+app:
+  map:
+    default-town-region-id: 4
+    generated-boundary-radius-km: 1.2
+    amap-key: ${AMAP_WEB_KEY:0b5095fedd1afcec744da426d736612a}
+    amap-security-js-code: ${AMAP_SECURITY_JS_CODE:}
+    qa-service-base-url: ${QA_SERVICE_BASE_URL:http://127.0.0.1:5050}
