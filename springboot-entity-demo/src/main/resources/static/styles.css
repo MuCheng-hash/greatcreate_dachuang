@@ -38,11 +38,13 @@ body {
 }
 
 button,
+a.ghost-button,
 textarea {
     font: inherit;
 }
 
-button {
+button,
+a.ghost-button {
     border: 0;
     cursor: pointer;
 }
@@ -537,6 +539,13 @@ button {
     color: var(--text);
 }
 
+.header-link {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    text-decoration: none;
+}
+
 .primary-button {
     border: 1px solid transparent;
     background: linear-gradient(135deg, #2789ff, #1a71ff);
@@ -815,6 +824,104 @@ textarea:focus {
     margin-top: 12px;
 }
 
+.auth-modal-shell[hidden] {
+    display: none;
+}
+
+.auth-modal-shell {
+    position: fixed;
+    inset: 0;
+    z-index: 80;
+}
+
+.auth-modal-backdrop {
+    position: absolute;
+    inset: 0;
+    background: rgba(16, 30, 49, 0.42);
+    backdrop-filter: blur(6px);
+}
+
+.auth-modal {
+    position: relative;
+    z-index: 1;
+    width: min(760px, calc(100vw - 24px));
+    max-height: calc(100vh - 32px);
+    overflow: auto;
+    margin: 16px auto;
+    padding: 22px;
+    border: 1px solid rgba(198, 212, 227, 0.94);
+    border-radius: 24px;
+    background: rgba(250, 252, 255, 0.98);
+    box-shadow: 0 24px 48px rgba(29, 54, 82, 0.22);
+}
+
+.auth-modal__header {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    align-items: start;
+    gap: 12px;
+}
+
+.auth-modal__header h2 {
+    margin: 0;
+    font-family: var(--headline-font);
+    font-size: 1.7rem;
+}
+
+.auth-mode-switch {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px;
+    margin-top: 16px;
+}
+
+.auth-status {
+    margin-top: 14px;
+    padding: 12px 14px;
+    border-radius: 16px;
+    background: rgba(45, 134, 255, 0.08);
+    color: var(--accent-strong);
+    line-height: 1.6;
+}
+
+.auth-form {
+    display: grid;
+    gap: 12px;
+    margin-top: 16px;
+}
+
+.auth-form.is-hidden {
+    display: none;
+}
+
+.auth-form label {
+    display: grid;
+    gap: 8px;
+}
+
+.auth-form input,
+.auth-form select,
+.auth-form textarea {
+    width: 100%;
+    padding: 12px 14px;
+    border: 1px solid rgba(201, 215, 231, 0.94);
+    border-radius: 16px;
+    background: rgba(255, 255, 255, 0.98);
+    color: var(--text);
+    outline: none;
+}
+
+.auth-form textarea {
+    min-height: 96px;
+    resize: vertical;
+}
+
+.auth-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px;
+}
+
 .empty-card p {
     margin: 0;
 }
@@ -862,6 +969,10 @@ textarea:focus {
     }
 
     .drawer-stats {
+        grid-template-columns: 1fr;
+    }
+
+    .auth-grid {
         grid-template-columns: 1fr;
     }
 }

@@ -1,0 +1,664 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>后台管理台 | 乡村学校思政资源地图</title>
+    <meta name="description" content="乡村学校周边思政教育资源数字地图平台后台管理台。">
+    <link rel="stylesheet" href="/admin.css?v=20260618a">
+</head>
+<body>
+<div class="admin-shell">
+    <header class="admin-header">
+        <div class="brand-cluster">
+            <span class="brand-mark">HB</span>
+            <div class="brand-copy">
+                <p class="eyebrow">Rural Civic Atlas</p>
+                <h1>乡村学校思政资源后台管理台</h1>
+                <p>围绕学校、资源、周边关联和活动方案，完成平台核心数据建设。</p>
+            </div>
+        </div>
+
+        <div class="header-actions">
+            <a class="ghost-link" href="/">返回地图首页</a>
+            <button class="accent-button" id="refreshDashboardButton" type="button">刷新全局数据</button>
+        </div>
+    </header>
+
+    <section class="overview-strip">
+        <article class="metric-card">
+            <span>学校总数</span>
+            <strong id="schoolTotalMetric">0</strong>
+            <small>后台可维护学校主数据</small>
+        </article>
+        <article class="metric-card">
+            <span>资源总数</span>
+            <strong id="resourceTotalMetric">0</strong>
+            <small>周边思政教育资源池</small>
+        </article>
+        <article class="metric-card">
+            <span>活动方案</span>
+            <strong id="planTotalMetric">0</strong>
+            <small>课堂与实践落地内容</small>
+        </article>
+        <article class="metric-card metric-card--status">
+            <span>系统状态</span>
+            <strong id="globalStatusText">待命</strong>
+            <small id="globalStatusHint">准备连接后台接口。</small>
+        </article>
+    </section>
+
+    <section class="tab-strip" aria-label="后台模块">
+        <button class="tab-chip" data-tab="registrations" type="button">注册审核</button>
+        <button class="tab-chip is-active" data-tab="schools" type="button">学校管理</button>
+        <button class="tab-chip" data-tab="resources" type="button">资源管理</button>
+        <button class="tab-chip" data-tab="relations" type="button">周边关联</button>
+        <button class="tab-chip" data-tab="plans" type="button">活动方案</button>
+    </section>
+
+    <main class="workspace-stack">
+        <section class="workspace-panel" data-panel="registrations">
+            <div class="panel-heading">
+                <div>
+                    <p class="eyebrow">Module 00</p>
+                    <h2>学校注册审核</h2>
+                </div>
+                <div class="panel-tools">
+                    <input id="registrationKeywordInput" class="line-input" type="search" placeholder="按学校名称、账号、电话搜索">
+                    <button class="ghost-button" id="registrationSearchButton" type="button">查询</button>
+                    <button class="ghost-button" id="registrationRefreshButton" type="button">刷新列表</button>
+                </div>
+            </div>
+
+            <div class="workspace-grid">
+                <article class="form-card">
+                    <div class="card-topline">
+                        <h3>注册申请详情</h3>
+                        <button class="ghost-button" id="registrationResetButton" type="button">清空</button>
+                    </div>
+
+                    <form id="registrationReviewForm" class="data-form">
+                        <input id="registrationIdInput" type="hidden">
+                        <label>
+                            <span>申请账号</span>
+                            <input id="registrationAccountInput" type="text" readonly>
+                        </label>
+                        <label>
+                            <span>学校名称</span>
+                            <input id="registrationSchoolNameInput" type="text" readonly>
+                        </label>
+                        <label>
+                            <span>联系人信息</span>
+                            <input id="registrationContactInput" type="text" readonly>
+                        </label>
+                        <label>
+                            <span>学校地址</span>
+                            <textarea id="registrationAddressInput" readonly></textarea>
+                        </label>
+                        <label>
+                            <span>学校简介</span>
+                            <textarea id="registrationIntroInput" readonly></textarea>
+                        </label>
+                        <label>
+                            <span>审核人</span>
+                            <input id="registrationReviewerInput" type="text" placeholder="例如：admin">
+                        </label>
+                        <label>
+                            <span>审核意见</span>
+                            <textarea id="registrationRemarkInput" placeholder="填写审核说明"></textarea>
+                        </label>
+                        <div class="form-actions">
+                            <button class="accent-button" id="registrationApproveButton" type="button">审核通过</button>
+                            <button class="ghost-button" id="registrationRejectButton" type="button">审核驳回</button>
+                        </div>
+                    </form>
+                </article>
+
+                <article class="table-card">
+                    <div class="card-topline">
+                        <h3>注册申请列表</h3>
+                        <span class="mini-stat" id="registrationListCount">0 条</span>
+                    </div>
+                    <div class="table-shell">
+                        <table>
+                            <thead>
+                            <tr>
+                                <th>账号</th>
+                                <th>学校</th>
+                                <th>联系人</th>
+                                <th>状态</th>
+                                <th>操作</th>
+                            </tr>
+                            </thead>
+                            <tbody id="registrationTableBody"></tbody>
+                        </table>
+                    </div>
+                </article>
+            </div>
+        </section>
+
+        <section class="workspace-panel is-active" data-panel="schools">
+            <div class="panel-heading">
+                <div>
+                    <p class="eyebrow">Module 01</p>
+                    <h2>学校管理</h2>
+                </div>
+                <div class="panel-tools">
+                    <input id="schoolKeywordInput" class="line-input" type="search" placeholder="按学校名称、编码、地址搜索">
+                    <button class="ghost-button" id="schoolSearchButton" type="button">查询</button>
+                    <button class="ghost-button" id="schoolRefreshButton" type="button">刷新列表</button>
+                </div>
+            </div>
+
+            <div class="workspace-grid">
+                <article class="form-card">
+                    <div class="card-topline">
+                        <h3>学校表单</h3>
+                        <button class="ghost-button" id="schoolResetButton" type="button">清空</button>
+                    </div>
+
+                    <form id="schoolForm" class="data-form">
+                        <input id="schoolIdInput" type="hidden">
+                        <div class="field-grid two-col">
+                            <label>
+                                <span>学校编码</span>
+                                <input id="schoolCodeInput" type="text" placeholder="SCH_HEB_0001">
+                            </label>
+                            <label>
+                                <span>学校名称</span>
+                                <input id="schoolNameInput" type="text" placeholder="输入学校名称">
+                            </label>
+                            <label>
+                                <span>学校别名</span>
+                                <input id="schoolAliasInput" type="text" placeholder="可选">
+                            </label>
+                            <label>
+                                <span>学校类型</span>
+                                <input id="schoolTypeInput" type="text" placeholder="村小 / 乡镇中心小学">
+                            </label>
+                            <label>
+                                <span>学段</span>
+                                <select id="schoolLevelInput">
+                                    <option value="primary">小学</option>
+                                    <option value="junior">初中</option>
+                                    <option value="senior">高中</option>
+                                    <option value="nine_year">九年一贯制</option>
+                                    <option value="kindergarten">幼儿园</option>
+                                    <option value="twelve_year">十二年一贯制</option>
+                                    <option value="vocational">职业教育</option>
+                                    <option value="special">特殊教育</option>
+                                    <option value="other">其他</option>
+                                </select>
+                            </label>
+                            <label>
+                                <span>办学性质</span>
+                                <select id="schoolNatureInput">
+                                    <option value="public">公办</option>
+                                    <option value="private">民办</option>
+                                    <option value="other">其他</option>
+                                </select>
+                            </label>
+                            <label>
+                                <span>县区 ID</span>
+                                <input id="schoolCountyRegionIdInput" type="number" placeholder="可选">
+                            </label>
+                            <label>
+                                <span>乡镇 ID</span>
+                                <input id="schoolTownshipRegionIdInput" type="number" placeholder="可选">
+                            </label>
+                            <label>
+                                <span>经度</span>
+                                <input id="schoolLongitudeInput" type="number" step="0.0000001" placeholder="114.9537180">
+                            </label>
+                            <label>
+                                <span>纬度</span>
+                                <input id="schoolLatitudeInput" type="number" step="0.0000001" placeholder="38.0271030">
+                            </label>
+                            <label>
+                                <span>坐标来源</span>
+                                <select id="schoolGeoSourceInput">
+                                    <option value="government_doc">政府资料</option>
+                                    <option value="amap_poi">高德 POI</option>
+                                    <option value="manual">人工修正</option>
+                                    <option value="school_official">学校官方</option>
+                                    <option value="satellite_fix">卫星校准</option>
+                                    <option value="other">其他</option>
+                                </select>
+                            </label>
+                            <label>
+                                <span>坐标置信度</span>
+                                <select id="schoolGeoConfidenceInput">
+                                    <option value="unknown">未知</option>
+                                    <option value="high">高</option>
+                                    <option value="medium">中</option>
+                                    <option value="low">低</option>
+                                </select>
+                            </label>
+                        </div>
+
+                        <label>
+                            <span>学校地址</span>
+                            <input id="schoolAddressInput" type="text" placeholder="输入学校地址">
+                        </label>
+
+                        <label>
+                            <span>学校简介</span>
+                            <textarea id="schoolIntroInput" placeholder="补充学校基本情况、办学特色等"></textarea>
+                        </label>
+
+                        <div class="switch-row">
+                            <label class="switch-field">
+                                <input id="schoolRuralInput" type="checkbox" checked>
+                                <span>乡村学校</span>
+                            </label>
+                            <label class="switch-field">
+                                <input id="schoolTeachingPointInput" type="checkbox">
+                                <span>教学点</span>
+                            </label>
+                            <label class="switch-field">
+                                <input id="schoolGeoVerifiedInput" type="checkbox">
+                                <span>坐标已核验</span>
+                            </label>
+                        </div>
+
+                        <div class="form-actions">
+                            <button class="accent-button" id="schoolSubmitButton" type="submit">保存学校</button>
+                        </div>
+                    </form>
+                </article>
+
+                <article class="table-card">
+                    <div class="card-topline">
+                        <h3>学校列表</h3>
+                        <span class="mini-stat" id="schoolListCount">0 条</span>
+                    </div>
+                    <div class="table-shell">
+                        <table>
+                            <thead>
+                            <tr>
+                                <th>编码</th>
+                                <th>学校</th>
+                                <th>学段</th>
+                                <th>状态</th>
+                                <th>操作</th>
+                            </tr>
+                            </thead>
+                            <tbody id="schoolTableBody"></tbody>
+                        </table>
+                    </div>
+                </article>
+            </div>
+        </section>
+
+        <section class="workspace-panel" data-panel="resources">
+            <div class="panel-heading">
+                <div>
+                    <p class="eyebrow">Module 02</p>
+                    <h2>资源管理</h2>
+                </div>
+                <div class="panel-tools">
+                    <input id="resourceKeywordInput" class="line-input" type="search" placeholder="按资源名称、编码、机构搜索">
+                    <button class="ghost-button" id="resourceSearchButton" type="button">查询</button>
+                    <button class="ghost-button" id="resourceRefreshButton" type="button">刷新列表</button>
+                </div>
+            </div>
+
+            <div class="workspace-grid">
+                <article class="form-card">
+                    <div class="card-topline">
+                        <h3>资源表单</h3>
+                        <button class="ghost-button" id="resourceResetButton" type="button">清空</button>
+                    </div>
+
+                    <form id="resourceForm" class="data-form">
+                        <input id="resourceIdInput" type="hidden">
+                        <div class="field-grid two-col">
+                            <label>
+                                <span>资源编码</span>
+                                <input id="resourceCodeInput" type="text" placeholder="RES_HEB_0001">
+                            </label>
+                            <label>
+                                <span>资源名称</span>
+                                <input id="resourceNameInput" type="text" placeholder="输入资源名称">
+                            </label>
+                            <label>
+                                <span>资源别名</span>
+                                <input id="resourceAliasInput" type="text" placeholder="可选">
+                            </label>
+                            <label>
+                                <span>资源类别</span>
+                                <select id="resourceCategoryInput">
+                                    <option value="red_culture">红色文化</option>
+                                    <option value="intangible_culture">非遗文化</option>
+                                    <option value="traditional_culture">传统文化</option>
+                                    <option value="local_history">地方历史</option>
+                                    <option value="public_culture">公共文化</option>
+                                    <option value="labor_education">劳动教育</option>
+                                    <option value="public_welfare">公益实践</option>
+                                    <option value="ecological_civilization">生态文明</option>
+                                    <option value="patriotism_base">爱国主义基地</option>
+                                    <option value="social_practice">社会实践</option>
+                                    <option value="other">其他</option>
+                                </select>
+                            </label>
+                            <label>
+                                <span>资源子类</span>
+                                <input id="resourceSubcategoryInput" type="text" placeholder="纪念馆 / 养老院 / 文化墙">
+                            </label>
+                            <label>
+                                <span>所属机构</span>
+                                <input id="resourceOrgInput" type="text" placeholder="可选">
+                            </label>
+                            <label>
+                                <span>经度</span>
+                                <input id="resourceLongitudeInput" type="number" step="0.0000001" placeholder="113.9783000">
+                            </label>
+                            <label>
+                                <span>纬度</span>
+                                <input id="resourceLatitudeInput" type="number" step="0.0000001" placeholder="38.3439000">
+                            </label>
+                            <label>
+                                <span>县区 ID</span>
+                                <input id="resourceCountyRegionIdInput" type="number" placeholder="可选">
+                            </label>
+                            <label>
+                                <span>乡镇 ID</span>
+                                <input id="resourceTownshipRegionIdInput" type="number" placeholder="可选">
+                            </label>
+                            <label>
+                                <span>联系电话</span>
+                                <input id="resourceContactPhoneInput" type="text" placeholder="可选">
+                            </label>
+                            <label>
+                                <span>建议时长</span>
+                                <input id="resourceVisitMinutesInput" type="number" placeholder="分钟">
+                            </label>
+                        </div>
+
+                        <label>
+                            <span>资源地址</span>
+                            <input id="resourceAddressInput" type="text" placeholder="输入资源地址">
+                        </label>
+
+                        <label>
+                            <span>资源简介</span>
+                            <textarea id="resourceIntroInput" placeholder="输入资源简介"></textarea>
+                        </label>
+
+                        <label>
+                            <span>教育价值</span>
+                            <textarea id="resourceEducationValueInput" placeholder="说明其思政教育价值"></textarea>
+                        </label>
+
+                        <label>
+                            <span>活动建议</span>
+                            <textarea id="resourceActivitySuggestionInput" placeholder="输入课堂或实践活动建议"></textarea>
+                        </label>
+
+                        <div class="switch-row">
+                            <label class="switch-field">
+                                <input id="resourceReservationRequiredInput" type="checkbox">
+                                <span>需要预约</span>
+                            </label>
+                        </div>
+
+                        <div class="form-actions">
+                            <button class="accent-button" id="resourceSubmitButton" type="submit">保存资源</button>
+                        </div>
+                    </form>
+                </article>
+
+                <article class="table-card">
+                    <div class="card-topline">
+                        <h3>资源列表</h3>
+                        <span class="mini-stat" id="resourceListCount">0 条</span>
+                    </div>
+                    <div class="table-shell">
+                        <table>
+                            <thead>
+                            <tr>
+                                <th>编码</th>
+                                <th>资源</th>
+                                <th>类别</th>
+                                <th>状态</th>
+                                <th>操作</th>
+                            </tr>
+                            </thead>
+                            <tbody id="resourceTableBody"></tbody>
+                        </table>
+                    </div>
+                </article>
+            </div>
+        </section>
+
+        <section class="workspace-panel" data-panel="relations">
+            <div class="panel-heading">
+                <div>
+                    <p class="eyebrow">Module 03</p>
+                    <h2>学校周边关联</h2>
+                </div>
+                <div class="panel-tools">
+                    <select id="relationFilterSchoolSelect" class="line-select"></select>
+                    <button class="ghost-button" id="relationRefreshButton" type="button">刷新关联</button>
+                </div>
+            </div>
+
+            <div class="workspace-grid">
+                <article class="form-card">
+                    <div class="card-topline">
+                        <h3>关联表单</h3>
+                        <button class="ghost-button" id="relationResetButton" type="button">清空</button>
+                    </div>
+
+                    <form id="relationForm" class="data-form">
+                        <input id="relationIdInput" type="hidden">
+                        <div class="field-grid two-col">
+                            <label>
+                                <span>学校</span>
+                                <select id="relationSchoolSelect"></select>
+                            </label>
+                            <label>
+                                <span>资源</span>
+                                <select id="relationResourceSelect"></select>
+                            </label>
+                            <label>
+                                <span>关系类型</span>
+                                <select id="relationTypeInput">
+                                    <option value="nearby">周边资源</option>
+                                    <option value="cooperation">合作资源</option>
+                                    <option value="practice">实践资源</option>
+                                    <option value="curriculum_support">课程支持</option>
+                                    <option value="volunteer_base">志愿服务基地</option>
+                                    <option value="research_route">研学路线</option>
+                                    <option value="other">其他</option>
+                                </select>
+                            </label>
+                            <label>
+                                <span>交通方式</span>
+                                <select id="relationTravelModeInput">
+                                    <option value="unknown">未知</option>
+                                    <option value="walk">步行</option>
+                                    <option value="bike">骑行</option>
+                                    <option value="bus">公交</option>
+                                    <option value="drive">驾车</option>
+                                    <option value="mixed">混合</option>
+                                </select>
+                            </label>
+                            <label>
+                                <span>距离（米）</span>
+                                <input id="relationDistanceInput" type="number" placeholder="1200">
+                            </label>
+                            <label>
+                                <span>预计时长（分钟）</span>
+                                <input id="relationDurationInput" type="number" placeholder="30">
+                            </label>
+                            <label>
+                                <span>可达性</span>
+                                <select id="relationReachabilityInput">
+                                    <option value="unknown">未知</option>
+                                    <option value="near">近</option>
+                                    <option value="medium">中</option>
+                                    <option value="far">远</option>
+                                    <option value="very_far">很远</option>
+                                </select>
+                            </label>
+                            <label>
+                                <span>优先级</span>
+                                <input id="relationPriorityInput" type="number" min="1" max="9" placeholder="3">
+                            </label>
+                        </div>
+
+                        <label>
+                            <span>主题摘要</span>
+                            <textarea id="relationThemeSummaryInput" placeholder="例如：适合开展敬老爱老与社会责任教育"></textarea>
+                        </label>
+
+                        <div class="form-actions">
+                            <button class="accent-button" id="relationSubmitButton" type="submit">保存关联</button>
+                        </div>
+                    </form>
+                </article>
+
+                <article class="table-card">
+                    <div class="card-topline">
+                        <h3>关联列表</h3>
+                        <span class="mini-stat" id="relationListCount">0 条</span>
+                    </div>
+                    <div class="table-shell">
+                        <table>
+                            <thead>
+                            <tr>
+                                <th>学校</th>
+                                <th>资源</th>
+                                <th>类型</th>
+                                <th>距离</th>
+                                <th>操作</th>
+                            </tr>
+                            </thead>
+                            <tbody id="relationTableBody"></tbody>
+                        </table>
+                    </div>
+                </article>
+            </div>
+        </section>
+
+        <section class="workspace-panel" data-panel="plans">
+            <div class="panel-heading">
+                <div>
+                    <p class="eyebrow">Module 04</p>
+                    <h2>教学活动方案</h2>
+                </div>
+                <div class="panel-tools">
+                    <select id="planFilterSchoolSelect" class="line-select"></select>
+                    <button class="ghost-button" id="planRefreshButton" type="button">刷新方案</button>
+                </div>
+            </div>
+
+            <div class="workspace-grid">
+                <article class="form-card">
+                    <div class="card-topline">
+                        <h3>活动方案表单</h3>
+                        <button class="ghost-button" id="planResetButton" type="button">清空</button>
+                    </div>
+
+                    <form id="planForm" class="data-form">
+                        <input id="planIdInput" type="hidden">
+                        <div class="field-grid two-col">
+                            <label>
+                                <span>方案编码</span>
+                                <input id="planCodeInput" type="text" placeholder="PLAN_HEB_0001">
+                            </label>
+                            <label>
+                                <span>所属学校</span>
+                                <select id="planSchoolSelect"></select>
+                            </label>
+                            <label>
+                                <span>关联资源</span>
+                                <select id="planResourceSelect"></select>
+                            </label>
+                            <label>
+                                <span>活动类型</span>
+                                <select id="planActivityTypeInput">
+                                    <option value="classroom">课堂活动</option>
+                                    <option value="field_trip">校外参访</option>
+                                    <option value="volunteer_service">志愿服务</option>
+                                    <option value="research_study">研学活动</option>
+                                    <option value="labor_practice">劳动实践</option>
+                                    <option value="club_activity">社团活动</option>
+                                    <option value="school_based_course">校本课程</option>
+                                    <option value="other">其他</option>
+                                </select>
+                            </label>
+                            <label>
+                                <span>主题</span>
+                                <input id="planThemeInput" type="text" placeholder="例如：西柏坡红色记忆主题研学">
+                            </label>
+                            <label>
+                                <span>适用年级</span>
+                                <input id="planSuitableGradeInput" type="text" placeholder="小学高年级 / 初中">
+                            </label>
+                            <label>
+                                <span>活动时长</span>
+                                <input id="planDurationInput" type="number" placeholder="120">
+                            </label>
+                        </div>
+
+                        <label>
+                            <span>教学目标</span>
+                            <textarea id="planObjectiveInput" placeholder="输入活动目标"></textarea>
+                        </label>
+
+                        <label>
+                            <span>活动内容</span>
+                            <textarea id="planContentInput" placeholder="输入活动流程与内容"></textarea>
+                        </label>
+
+                        <label>
+                            <span>前期准备</span>
+                            <textarea id="planPreparationInput" placeholder="输入准备事项"></textarea>
+                        </label>
+
+                        <label>
+                            <span>安全提示</span>
+                            <textarea id="planSafetyInput" placeholder="输入安全提示"></textarea>
+                        </label>
+
+                        <label>
+                            <span>预期成果</span>
+                            <textarea id="planOutcomeInput" placeholder="输入预期成果"></textarea>
+                        </label>
+
+                        <div class="form-actions">
+                            <button class="accent-button" id="planSubmitButton" type="submit">保存方案</button>
+                        </div>
+                    </form>
+                </article>
+
+                <article class="table-card">
+                    <div class="card-topline">
+                        <h3>方案列表</h3>
+                        <span class="mini-stat" id="planListCount">0 条</span>
+                    </div>
+                    <div class="table-shell">
+                        <table>
+                            <thead>
+                            <tr>
+                                <th>编码</th>
+                                <th>主题</th>
+                                <th>学校</th>
+                                <th>类型</th>
+                                <th>操作</th>
+                            </tr>
+                            </thead>
+                            <tbody id="planTableBody"></tbody>
+                        </table>
+                    </div>
+                </article>
+            </div>
+        </section>
+    </main>
+</div>
+
+<script src="/admin.js?v=20260618a"></script>
+</body>
+</html>

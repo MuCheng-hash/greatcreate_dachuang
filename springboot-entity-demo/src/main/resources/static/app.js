@@ -40,7 +40,9 @@ const state = {
     userLocationAccuracyCircle: null,
     activeInfoWindow: null,
     preserveUserLocationCenter: false,
-    drawerOpen: false
+    drawerOpen: false,
+    currentAccount: null,
+    authMode: "login"
 };
 
 const elements = {
@@ -72,6 +74,7 @@ const elements = {
     qaAnswer: document.querySelector("#qaAnswer"),
     qaCitations: document.querySelector("#qaCitations"),
     qaQuestionInput: document.querySelector("#qaQuestionInput"),
+    authEntryButton: document.querySelector("#authEntryButton"),
     locateButton: document.querySelector("#locateButton"),
     refreshTownButton: document.querySelector("#refreshTownButton"),
     explainButton: document.querySelector("#explainButton"),
@@ -81,7 +84,28 @@ const elements = {
     toggleProvinceLayer: document.querySelector("#toggleProvinceLayer"),
     toggleCityLayer: document.querySelector("#toggleCityLayer"),
     toggleTownshipLayer: document.querySelector("#toggleTownshipLayer"),
-    emptyStateTemplate: document.querySelector("#emptyStateTemplate")
+    emptyStateTemplate: document.querySelector("#emptyStateTemplate"),
+    authModalShell: document.querySelector("#authModalShell"),
+    authCloseButton: document.querySelector("#authCloseButton"),
+    showLoginModeButton: document.querySelector("#showLoginModeButton"),
+    showRegisterModeButton: document.querySelector("#showRegisterModeButton"),
+    authStatusText: document.querySelector("#authStatusText"),
+    loginForm: document.querySelector("#loginForm"),
+    loginUsernameInput: document.querySelector("#loginUsernameInput"),
+    loginPasswordInput: document.querySelector("#loginPasswordInput"),
+    registerForm: document.querySelector("#registerForm"),
+    registerUsernameInput: document.querySelector("#registerUsernameInput"),
+    registerPasswordInput: document.querySelector("#registerPasswordInput"),
+    registerContactNameInput: document.querySelector("#registerContactNameInput"),
+    registerContactPhoneInput: document.querySelector("#registerContactPhoneInput"),
+    registerSchoolNameInput: document.querySelector("#registerSchoolNameInput"),
+    registerSchoolLevelInput: document.querySelector("#registerSchoolLevelInput"),
+    registerSchoolTypeInput: document.querySelector("#registerSchoolTypeInput"),
+    registerSchoolNatureInput: document.querySelector("#registerSchoolNatureInput"),
+    registerLongitudeInput: document.querySelector("#registerLongitudeInput"),
+    registerLatitudeInput: document.querySelector("#registerLatitudeInput"),
+    registerAddressInput: document.querySelector("#registerAddressInput"),
+    registerIntroInput: document.querySelector("#registerIntroInput")
 };
 
 let mapInstance = null;
@@ -104,6 +128,39 @@ function bindEvents() {
         } else if (state.userLocation) {
             void loadNearbySchoolsByLocation(state.userLocation, true);
         }
+    });
+
+    elements.authEntryButton?.addEventListener("click", () => {
+        toggleAuthModal(true);
+    });
+
+    elements.authCloseButton?.addEventListener("click", () => {
+        toggleAuthModal(false);
+    });
+
+    elements.authModalShell?.addEventListener("click", (event) => {
+        const target = event.target;
+        if (target instanceof HTMLElement && target.dataset.authClose === "true") {
+            toggleAuthModal(false);
+        }
+    });
+
+    elements.showLoginModeButton?.addEventListener("click", () => {
+        setAuthMode("login");
+    });
+
+    elements.showRegisterModeButton?.addEventListener("click", () => {
+        setAuthMode("register");
+    });
+
+    elements.loginForm?.addEventListener("submit", (event) => {
+        event.preventDefault();
+        void submitLogin();
+    });
+
+    elements.registerForm?.addEventListener("submit", (event) => {
+        event.preventDefault();
+        void submitRegister();
     });
 
     elements.currentRegionTrigger?.addEventListener("click", () => {
@@ -164,6 +221,10 @@ async function bootstrap() {
     await renderHebeiAdministrativeLayer();
     await preloadRegionBoundaries();
     await waitForMapComplete();
+    const loggedIn = await tryLoadCurrentAccount();
+    if (loggedIn) {
+        return;
+    }
     await triggerLocateFlow(false);
 }
 
@@ -178,6 +239,121 @@ async function loadClientConfig() {
     } catch (error) {
         updateMapStatus("前端地图配置读取失败。");
     }
+}
+
+async function tryLoadCurrentAccount() {
+    try {
+        const currentUser = await requestJson("/api/auth/me");
+        if (!currentUser?.schoolId) {
+            updateAuthEntryLabel(null);
+            return false;
+        }
+        state.currentAccount = currentUser;
+        updateAuthEntryLabel(currentUser);
+        updateMapStatus(`已识别学校账号：${currentUser.schoolName || currentUser.username}，正在进入本校地图。`);
+        await loadSchoolDetail(currentUser.schoolId, true, false);
+        return true;
+    } catch (error) {
+        updateAuthEntryLabel(null);
+        return false;
+    }
+}
+
+function updateAuthEntryLabel(currentUser) {
+    if (!elements.authEntryButton) {
+        return;
+    }
+    elements.authEntryButton.textContent = currentUser?.schoolName
+        ? `当前学校：${currentUser.schoolName}`
+        : "学校登录 / 注册";
+}
+
+function toggleAuthModal(open) {
+    if (!elements.authModalShell) {
+        return;
+    }
+    elements.authModalShell.hidden = !open;
+}
+
+function setAuthMode(mode) {
+    state.authMode = mode;
+    elements.showLoginModeButton?.classList.toggle("is-active", mode === "login");
+    elements.showRegisterModeButton?.classList.toggle("is-active", mode === "register");
+    elements.loginForm?.classList.toggle("is-hidden", mode !== "login");
+    elements.registerForm?.classList.toggle("is-hidden", mode !== "register");
+}
+
+function setAuthStatus(text) {
+    if (elements.authStatusText) {
+        elements.authStatusText.textContent = text;
+    }
+}
+
+async function submitLogin() {
+    const username = firstText(elements.loginUsernameInput?.value);
+    const password = String(elements.loginPasswordInput?.value || "");
+    if (!username || !password) {
+        setAuthStatus("请输入学校账号和密码。");
+        return;
+    }
+
+    try {
+        const currentUser = await requestJson("/api/auth/login", {
+            method: "POST",
+            body: JSON.stringify({ username, password })
+        });
+        state.currentAccount = currentUser;
+        updateAuthEntryLabel(currentUser);
+        setAuthStatus(`登录成功，正在进入 ${currentUser.schoolName || currentUser.username} 的学校地图。`);
+        toggleAuthModal(false);
+        await loadSchoolDetail(currentUser.schoolId, true, false);
+    } catch (error) {
+        setAuthStatus(error.message || "登录失败，请重试。");
+    }
+}
+
+async function submitRegister() {
+    const payload = {
+        username: firstText(elements.registerUsernameInput?.value),
+        password: String(elements.registerPasswordInput?.value || ""),
+        contactName: firstText(elements.registerContactNameInput?.value),
+        contactPhone: firstText(elements.registerContactPhoneInput?.value),
+        schoolName: firstText(elements.registerSchoolNameInput?.value),
+        schoolLevel: elements.registerSchoolLevelInput?.value || "primary",
+        schoolType: firstText(elements.registerSchoolTypeInput?.value),
+        schoolNature: elements.registerSchoolNatureInput?.value || "public",
+        longitude: parseCoordinate(elements.registerLongitudeInput?.value),
+        latitude: parseCoordinate(elements.registerLatitudeInput?.value),
+        address: firstText(elements.registerAddressInput?.value),
+        intro: firstText(elements.registerIntroInput?.value),
+        geoSourceType: "manual",
+        geoConfidence: "medium"
+    };
+
+    if (!payload.username || !payload.password || !payload.schoolName) {
+        setAuthStatus("请至少填写账号、密码和学校名称。");
+        return;
+    }
+
+    try {
+        const result = await requestJson("/api/auth/school-register", {
+            method: "POST",
+            body: JSON.stringify(payload)
+        });
+        setAuthStatus(`注册申请已提交，申请编号 ${result.registrationId}，请等待管理员审核。`);
+        elements.registerForm?.reset();
+        setAuthMode("login");
+    } catch (error) {
+        setAuthStatus(error.message || "注册提交失败，请重试。");
+    }
+}
+
+function parseCoordinate(value) {
+    if (value == null || value === "") {
+        return null;
+    }
+    const numberValue = Number(value);
+    return Number.isFinite(numberValue) ? numberValue : null;
 }
 
 async function ensureMapReady() {

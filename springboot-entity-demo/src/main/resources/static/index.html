@@ -27,6 +27,8 @@
         </button>
 
         <div class="header-actions">
+            <button class="ghost-button" id="authEntryButton" type="button">学校登录 / 注册</button>
+            <a class="ghost-button header-link" href="/admin.html">进入后台管理</a>
             <button class="ghost-button" id="locateButton" type="button">定位我的位置</button>
             <button class="ghost-button" id="refreshTownButton" type="button">刷新当前内容</button>
         </div>
@@ -155,6 +157,106 @@
         <p>暂无可展示内容。</p>
     </article>
 </template>
+
+<div class="auth-modal-shell" id="authModalShell" hidden>
+    <div class="auth-modal-backdrop" data-auth-close="true"></div>
+    <section class="auth-modal" aria-label="学校登录与注册">
+        <div class="auth-modal__header">
+            <div>
+                <p class="eyebrow">School Access</p>
+                <h2>学校登录与注册</h2>
+            </div>
+            <button class="drawer-close" id="authCloseButton" type="button">关闭</button>
+        </div>
+
+        <div class="auth-mode-switch">
+            <button class="layer-toggle is-active" id="showLoginModeButton" type="button">学校登录</button>
+            <button class="layer-toggle" id="showRegisterModeButton" type="button">学校注册</button>
+        </div>
+
+        <div class="auth-status" id="authStatusText">学校账号登录后，系统会自动定位到该账号对应的学校。</div>
+
+        <form id="loginForm" class="auth-form">
+            <label>
+                <span>账号</span>
+                <input id="loginUsernameInput" type="text" placeholder="输入学校账号">
+            </label>
+            <label>
+                <span>密码</span>
+                <input id="loginPasswordInput" type="password" placeholder="输入密码">
+            </label>
+            <button class="primary-button full-width" type="submit">登录并进入学校地图</button>
+        </form>
+
+        <form id="registerForm" class="auth-form is-hidden">
+            <div class="auth-grid">
+                <label>
+                    <span>申请账号</span>
+                    <input id="registerUsernameInput" type="text" placeholder="建议使用学校简称">
+                </label>
+                <label>
+                    <span>登录密码</span>
+                    <input id="registerPasswordInput" type="password" placeholder="至少 6 位">
+                </label>
+                <label>
+                    <span>联系人</span>
+                    <input id="registerContactNameInput" type="text" placeholder="联系人姓名">
+                </label>
+                <label>
+                    <span>联系电话</span>
+                    <input id="registerContactPhoneInput" type="text" placeholder="输入联系电话">
+                </label>
+                <label>
+                    <span>学校名称</span>
+                    <input id="registerSchoolNameInput" type="text" placeholder="输入学校名称">
+                </label>
+                <label>
+                    <span>学段</span>
+                    <select id="registerSchoolLevelInput">
+                        <option value="primary">小学</option>
+                        <option value="junior">初中</option>
+                        <option value="senior">高中</option>
+                        <option value="nine_year">九年一贯制</option>
+                        <option value="kindergarten">幼儿园</option>
+                        <option value="twelve_year">十二年一贯制</option>
+                        <option value="vocational">职业教育</option>
+                        <option value="special">特殊教育</option>
+                        <option value="other">其他</option>
+                    </select>
+                </label>
+                <label>
+                    <span>学校类型</span>
+                    <input id="registerSchoolTypeInput" type="text" placeholder="村小 / 乡镇中心小学">
+                </label>
+                <label>
+                    <span>办学性质</span>
+                    <select id="registerSchoolNatureInput">
+                        <option value="public">公办</option>
+                        <option value="private">民办</option>
+                        <option value="other">其他</option>
+                    </select>
+                </label>
+                <label>
+                    <span>经度</span>
+                    <input id="registerLongitudeInput" type="number" step="0.0000001" placeholder="114.9537180">
+                </label>
+                <label>
+                    <span>纬度</span>
+                    <input id="registerLatitudeInput" type="number" step="0.0000001" placeholder="38.0271030">
+                </label>
+            </div>
+            <label>
+                <span>学校地址</span>
+                <input id="registerAddressInput" type="text" placeholder="输入学校详细地址">
+            </label>
+            <label>
+                <span>学校简介</span>
+                <textarea id="registerIntroInput" placeholder="补充学校情况与说明"></textarea>
+            </label>
+            <button class="primary-button full-width" type="submit">提交注册申请</button>
+        </form>
+    </section>
+</div>
 
 <script src="/app.js?v=20260617c"></script>
 </body>
