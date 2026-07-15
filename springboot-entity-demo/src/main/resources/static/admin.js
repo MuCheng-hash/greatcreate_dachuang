@@ -187,6 +187,14 @@ function bindAdminEvents() {
 async function bootstrapAdmin() {
     setGlobalStatus("加载中", "正在同步学校、资源、关联和活动方案数据。");
     try {
+        const currentUser = await requestJson("/api/auth/me");
+        if (!currentUser?.accountId) {
+            window.location.href = "/";
+            return;
+        }
+        if (currentUser.roleCode !== "platform_admin") {
+            throw new Error("当前账号无后台管理权限，请使用管理员账号登录。");
+        }
         await Promise.all([
             loadRegistrations(),
             loadSchools(),
@@ -303,6 +311,9 @@ async function requestJson(url, options = {}) {
     const response = await fetch(url, config);
     const data = await response.json();
     if (!response.ok || data.code !== 200) {
+        if (response.status === 403) {
+            throw new Error(data.message || "当前账号无权限访问后台。");
+        }
         throw new Error(data.message || "请求失败");
     }
     return data.data;

@@ -36,6 +36,17 @@ const state = {
     markerIndex: new Map(),
     geolocationPlugin: null,
     geocoderPlugin: null,
+    districtSearchPluginReady: false,
+    registerRegionOptions: {
+        province: [],
+        city: [],
+        district: [],
+        township: [],
+        village: []
+    },
+    registerGeoLookupTimer: null,
+    registerGeoLastQuery: "",
+    registerGeoResolvedBy: "",
     userLocationMarker: null,
     userLocationAccuracyCircle: null,
     activeInfoWindow: null,
@@ -75,6 +86,7 @@ const elements = {
     qaCitations: document.querySelector("#qaCitations"),
     qaQuestionInput: document.querySelector("#qaQuestionInput"),
     authEntryButton: document.querySelector("#authEntryButton"),
+    adminEntryLink: document.querySelector("#adminEntryLink"),
     locateButton: document.querySelector("#locateButton"),
     refreshTownButton: document.querySelector("#refreshTownButton"),
     explainButton: document.querySelector("#explainButton"),
@@ -104,7 +116,12 @@ const elements = {
     registerSchoolNatureInput: document.querySelector("#registerSchoolNatureInput"),
     registerLongitudeInput: document.querySelector("#registerLongitudeInput"),
     registerLatitudeInput: document.querySelector("#registerLatitudeInput"),
-    registerAddressInput: document.querySelector("#registerAddressInput"),
+    registerProvinceInput: document.querySelector("#registerProvinceInput"),
+    registerCityInput: document.querySelector("#registerCityInput"),
+    registerDistrictInput: document.querySelector("#registerDistrictInput"),
+    registerTownshipInput: document.querySelector("#registerTownshipInput"),
+    registerVillageInput: document.querySelector("#registerVillageInput"),
+    registerAddressDetailInput: document.querySelector("#registerAddressDetailInput"),
     registerIntroInput: document.querySelector("#registerIntroInput")
 };
 
@@ -151,6 +168,22 @@ function bindEvents() {
 
     elements.showRegisterModeButton?.addEventListener("click", () => {
         setAuthMode("register");
+    });
+
+    elements.registerSchoolNameInput?.addEventListener("input", scheduleRegisterGeoResolve);
+    elements.registerProvinceInput?.addEventListener("change", () => void handleRegisterRegionChange("province"));
+    elements.registerCityInput?.addEventListener("change", () => void handleRegisterRegionChange("city"));
+    elements.registerDistrictInput?.addEventListener("change", () => void handleRegisterRegionChange("district"));
+    elements.registerTownshipInput?.addEventListener("change", () => void handleRegisterRegionChange("township"));
+    elements.registerVillageInput?.addEventListener("change", () => handleRegisterRegionChange("village"));
+    elements.registerAddressDetailInput?.addEventListener("input", () => {
+        scheduleRegisterGeoResolve();
+    });
+    elements.registerLongitudeInput?.addEventListener("input", () => {
+        state.registerGeoResolvedBy = "manual";
+    });
+    elements.registerLatitudeInput?.addEventListener("input", () => {
+        state.registerGeoResolvedBy = "manual";
     });
 
     elements.loginForm?.addEventListener("submit", (event) => {
@@ -225,6 +258,9 @@ async function bootstrap() {
     if (loggedIn) {
         return;
     }
+    setAuthMode("login");
+    toggleAuthModal(true);
+    setAuthStatus("请先登录；如果还没有账号，可以切换到“学校注册”提交申请。");
     await triggerLocateFlow(false);
 }
 
@@ -244,17 +280,24 @@ async function loadClientConfig() {
 async function tryLoadCurrentAccount() {
     try {
         const currentUser = await requestJson("/api/auth/me");
-        if (!currentUser?.schoolId) {
+        if (!currentUser?.accountId) {
             updateAuthEntryLabel(null);
+            syncAdminEntry(null);
             return false;
         }
         state.currentAccount = currentUser;
         updateAuthEntryLabel(currentUser);
+        syncAdminEntry(currentUser);
+        if (currentUser.roleCode === "platform_admin") {
+            window.location.href = "/admin.html";
+            return true;
+        }
         updateMapStatus(`已识别学校账号：${currentUser.schoolName || currentUser.username}，正在进入本校地图。`);
         await loadSchoolDetail(currentUser.schoolId, true, false);
         return true;
     } catch (error) {
         updateAuthEntryLabel(null);
+        syncAdminEntry(null);
         return false;
     }
 }
@@ -265,7 +308,27 @@ function updateAuthEntryLabel(currentUser) {
     }
     elements.authEntryButton.textContent = currentUser?.schoolName
         ? `当前学校：${currentUser.schoolName}`
-        : "学校登录 / 注册";
+        : currentUser?.roleCode === "platform_admin"
+            ? `当前管理员：${currentUser.displayName || currentUser.username}`
+            : "学校登录 / 注册";
+}
+
+function syncAdminEntry(currentUser) {
+    if (!elements.adminEntryLink) {
+        return;
+    }
+    const isAdmin = currentUser?.roleCode === "platform_admin";
+    elements.adminEntryLink.classList.toggle("is-active", isAdmin);
+    elements.adminEntryLink.textContent = isAdmin ? "进入后台管理" : "管理员登录";
+    elements.adminEntryLink.href = isAdmin ? "/admin.html" : "#";
+    elements.adminEntryLink.onclick = isAdmin
+        ? null
+        : (event) => {
+            event.preventDefault();
+            setAuthMode("login");
+            toggleAuthModal(true);
+            setAuthStatus("请使用管理员账号登录后进入后台管理页面。");
+        };
 }
 
 function toggleAuthModal(open) {
@@ -281,6 +344,10 @@ function setAuthMode(mode) {
     elements.showRegisterModeButton?.classList.toggle("is-active", mode === "register");
     elements.loginForm?.classList.toggle("is-hidden", mode !== "login");
     elements.registerForm?.classList.toggle("is-hidden", mode !== "register");
+    if (mode === "register") {
+        void initRegisterRegionCascade();
+        void autofillRegisterCoordinates();
+    }
 }
 
 function setAuthStatus(text) {
@@ -304,6 +371,12 @@ async function submitLogin() {
         });
         state.currentAccount = currentUser;
         updateAuthEntryLabel(currentUser);
+        syncAdminEntry(currentUser);
+        if (currentUser.roleCode === "platform_admin") {
+            setAuthStatus("管理员登录成功，正在进入后台管理页面。");
+            window.location.href = "/admin.html";
+            return;
+        }
         setAuthStatus(`登录成功，正在进入 ${currentUser.schoolName || currentUser.username} 的学校地图。`);
         toggleAuthModal(false);
         await loadSchoolDetail(currentUser.schoolId, true, false);
@@ -313,6 +386,7 @@ async function submitLogin() {
 }
 
 async function submitRegister() {
+    const registerCoordinates = await ensureRegisterCoordinates();
     const payload = {
         username: firstText(elements.registerUsernameInput?.value),
         password: String(elements.registerPasswordInput?.value || ""),
@@ -322,12 +396,12 @@ async function submitRegister() {
         schoolLevel: elements.registerSchoolLevelInput?.value || "primary",
         schoolType: firstText(elements.registerSchoolTypeInput?.value),
         schoolNature: elements.registerSchoolNatureInput?.value || "public",
-        longitude: parseCoordinate(elements.registerLongitudeInput?.value),
-        latitude: parseCoordinate(elements.registerLatitudeInput?.value),
-        address: firstText(elements.registerAddressInput?.value),
+        longitude: registerCoordinates.longitude,
+        latitude: registerCoordinates.latitude,
+        address: buildRegisterAddressText(),
         intro: firstText(elements.registerIntroInput?.value),
-        geoSourceType: "manual",
-        geoConfidence: "medium"
+        geoSourceType: registerCoordinates.geoSourceType,
+        geoConfidence: registerCoordinates.geoConfidence
     };
 
     if (!payload.username || !payload.password || !payload.schoolName) {
@@ -342,6 +416,10 @@ async function submitRegister() {
         });
         setAuthStatus(`注册申请已提交，申请编号 ${result.registrationId}，请等待管理员审核。`);
         elements.registerForm?.reset();
+        state.registerGeoLastQuery = "";
+        state.registerGeoResolvedBy = "";
+        resetRegisterRegionLevels("province");
+        applyRegisterRegionVisibility();
         setAuthMode("login");
     } catch (error) {
         setAuthStatus(error.message || "注册提交失败，请重试。");
@@ -354,6 +432,497 @@ function parseCoordinate(value) {
     }
     const numberValue = Number(value);
     return Number.isFinite(numberValue) ? numberValue : null;
+}
+
+async function ensureRegisterCoordinates() {
+    let longitude = parseCoordinate(elements.registerLongitudeInput?.value);
+    let latitude = parseCoordinate(elements.registerLatitudeInput?.value);
+
+    if (Number.isFinite(longitude) && Number.isFinite(latitude)) {
+        return buildRegisterCoordinatePayload(longitude, latitude);
+    }
+
+    const resolved = await resolveRegisterCoordinates();
+    if (resolved) {
+        return buildRegisterCoordinatePayload(resolved.longitude, resolved.latitude, resolved.resolvedBy);
+    }
+
+    return buildRegisterCoordinatePayload(longitude, latitude);
+}
+
+function buildRegisterCoordinatePayload(longitude, latitude, resolvedBy = state.registerGeoResolvedBy) {
+    const hasCoordinates = Number.isFinite(longitude) && Number.isFinite(latitude);
+    if (!hasCoordinates) {
+        return {
+            longitude: null,
+            latitude: null,
+            geoSourceType: "manual",
+            geoConfidence: "unknown"
+        };
+    }
+
+    if (resolvedBy === "geocode") {
+        return {
+            longitude,
+            latitude,
+            geoSourceType: "amap_poi",
+            geoConfidence: "high"
+        };
+    }
+
+    if (resolvedBy === "locate") {
+        return {
+            longitude,
+            latitude,
+            geoSourceType: "amap_poi",
+            geoConfidence: "medium"
+        };
+    }
+
+    return {
+        longitude,
+        latitude,
+        geoSourceType: "manual",
+        geoConfidence: "medium"
+    };
+}
+
+function scheduleRegisterGeoResolve() {
+    if (state.authMode !== "register") {
+        return;
+    }
+    if (state.registerGeoLookupTimer) {
+        window.clearTimeout(state.registerGeoLookupTimer);
+    }
+    state.registerGeoLookupTimer = window.setTimeout(() => {
+        void resolveRegisterCoordinates();
+    }, 500);
+}
+
+async function initRegisterRegionCascade() {
+    if (!elements.registerProvinceInput) {
+        return;
+    }
+    if (state.registerRegionOptions.province.length > 0) {
+        fillRegisterRegionSelect(elements.registerProvinceInput, state.registerRegionOptions.province, "选择省份");
+        applyRegisterRegionVisibility();
+        return;
+    }
+
+    state.registerRegionOptions.province = getFallbackProvinceOptions();
+    fillRegisterRegionSelect(elements.registerProvinceInput, state.registerRegionOptions.province, "选择省份");
+    resetRegisterRegionLevels("province");
+    applyRegisterRegionVisibility();
+
+    const provinces = await loadRegisterRegionChildren("100000", "province");
+    if (provinces.length > 0 && !elements.registerProvinceInput.value) {
+        state.registerRegionOptions.province = mergeRegionOptions(provinces, getFallbackProvinceOptions());
+        fillRegisterRegionSelect(elements.registerProvinceInput, state.registerRegionOptions.province, "选择省份");
+        applyRegisterRegionVisibility();
+    }
+}
+
+async function handleRegisterRegionChange(level) {
+    const nextLevel = getNextRegisterRegionLevel(level);
+    resetRegisterRegionLevels(level);
+
+    if (!nextLevel) {
+        scheduleRegisterGeoResolve();
+        return;
+    }
+
+    const currentSelect = getRegisterRegionSelect(level);
+    const selectedOption = findRegisterRegionOption(level, currentSelect?.value);
+    const nextSelect = getRegisterRegionSelect(nextLevel);
+    if (!selectedOption || !nextSelect) {
+        applyRegisterRegionVisibility();
+        scheduleRegisterGeoResolve();
+        return;
+    }
+
+    setRegionSelectLoading(nextSelect, getRegisterRegionPlaceholder(nextLevel, true));
+    let children = await loadRegisterRegionChildren(selectedOption.adcode || selectedOption.name, nextLevel);
+    if (children.length === 0) {
+        children = await loadLocalRegisterRegionChildren(selectedOption, nextLevel);
+    }
+    state.registerRegionOptions[nextLevel] = children;
+    fillRegisterRegionSelect(nextSelect, children, getRegisterRegionPlaceholder(nextLevel));
+    applyRegisterRegionVisibility();
+    scheduleRegisterGeoResolve();
+}
+
+function resetRegisterRegionLevels(changedLevel) {
+    const levels = ["province", "city", "district", "township", "village"];
+    const changedIndex = levels.indexOf(changedLevel);
+    levels.slice(changedIndex + 1).forEach((level) => {
+        state.registerRegionOptions[level] = [];
+        const select = getRegisterRegionSelect(level);
+        if (select) {
+            fillRegisterRegionSelect(select, [], getRegisterRegionPlaceholder(level));
+        }
+    });
+}
+
+async function loadRegisterRegionChildren(keyword, targetLevel) {
+    const ready = await ensureAmapDistrictSearchPlugin();
+    if (!ready || !window.AMap?.DistrictSearch) {
+        return [];
+    }
+
+    const config = createDistrictSearchConfig(targetLevel);
+    return new Promise((resolve) => {
+        let settled = false;
+        const finish = (items) => {
+            if (settled) {
+                return;
+            }
+            settled = true;
+            resolve(items);
+        };
+        const timer = window.setTimeout(() => finish([]), 3500);
+
+        try {
+            const search = new window.AMap.DistrictSearch(config);
+            search.search(keyword, (status, result) => {
+                window.clearTimeout(timer);
+                if (status !== "complete" || !result?.districtList?.length) {
+                    finish([]);
+                    return;
+                }
+
+                const parent = result.districtList[0];
+                const children = Array.isArray(parent.districtList) ? parent.districtList : [];
+                const sourceList = children.length ? children : result.districtList;
+                finish(sourceList.map(normalizeDistrictOption).filter((item) => item && item.level === targetLevel));
+            });
+        } catch (error) {
+            window.clearTimeout(timer);
+            finish([]);
+        }
+    });
+}
+
+async function loadLocalRegisterRegionChildren(parentOption, targetLevel) {
+    const parentName = firstText(parentOption?.name);
+    if (!isHebeiRegisterSelection() && parentName !== "河北省") {
+        return [];
+    }
+
+    try {
+        const params = new URLSearchParams();
+        params.set("regionLevel", normalizeLocalRegionLevel(targetLevel));
+        const parentRegionId = await resolveLocalRegisterRegionId(parentOption);
+        if (parentRegionId != null) {
+            params.set("parentRegionId", String(parentRegionId));
+        } else if (parentName) {
+            params.set("regionName", parentName);
+        }
+        const records = await requestJson(`/api/regions?${params.toString()}`);
+        return Array.isArray(records)
+            ? records.map((record) => ({
+                name: record.regionName,
+                adcode: firstText(record.adcode, `local-${record.regionId}`),
+                level: normalizeDistrictLevel(record.regionLevel),
+                localRegionId: record.regionId,
+                center: Number.isFinite(Number(record.centerLongitude)) && Number.isFinite(Number(record.centerLatitude))
+                    ? { longitude: Number(record.centerLongitude), latitude: Number(record.centerLatitude) }
+                    : null
+            })).filter((item) => item.name)
+            : [];
+    } catch (error) {
+        return [];
+    }
+}
+
+async function resolveLocalRegisterRegionId(option) {
+    const directId = Number(option?.localRegionId);
+    if (Number.isFinite(directId) && directId > 0) {
+        return directId;
+    }
+
+    const regionName = firstText(option?.name);
+    const regionLevel = normalizeLocalRegionLevel(option?.level);
+    if (!regionName || !regionLevel) {
+        return null;
+    }
+
+    try {
+        const params = new URLSearchParams();
+        params.set("regionName", regionName);
+        params.set("regionLevel", regionLevel);
+        const records = await requestJson(`/api/regions?${params.toString()}`);
+        if (!Array.isArray(records)) {
+            return null;
+        }
+        const matchedRecord = records.find((record) => firstText(record.regionName) === regionName);
+        return matchedRecord?.regionId ?? null;
+    } catch (error) {
+        return null;
+    }
+}
+
+function createDistrictSearchConfig(targetLevel) {
+    const subdistrict = targetLevel === "province" ? 1 : 1;
+    return {
+        subdistrict,
+        extensions: "base",
+        showbiz: false
+    };
+}
+
+async function ensureAmapDistrictSearchPlugin() {
+    const ready = await ensureMapReady();
+    if (!ready || !window.AMap?.plugin) {
+        return false;
+    }
+    if (state.districtSearchPluginReady && window.AMap?.DistrictSearch) {
+        return true;
+    }
+
+    return new Promise((resolve) => {
+        window.AMap.plugin("AMap.DistrictSearch", () => {
+            state.districtSearchPluginReady = Boolean(window.AMap?.DistrictSearch);
+            resolve(state.districtSearchPluginReady);
+        });
+    });
+}
+
+function normalizeDistrictOption(item) {
+    const name = firstText(item?.name);
+    if (!name) {
+        return null;
+    }
+    return {
+        name,
+        adcode: firstText(item.adcode),
+        level: normalizeDistrictLevel(item.level),
+        center: normalizeLngLat(item.center)
+    };
+}
+
+function normalizeDistrictLevel(level) {
+    switch (String(level || "").toLowerCase()) {
+        case "country":
+            return "country";
+        case "province":
+            return "province";
+        case "city":
+            return "city";
+        case "district":
+        case "county":
+            return "district";
+        case "street":
+        case "township":
+            return "township";
+        case "village":
+            return "village";
+        default:
+            return "";
+    }
+}
+
+function normalizeLocalRegionLevel(level) {
+    if (level === "district") {
+        return "county";
+    }
+    return level;
+}
+
+function fillRegisterRegionSelect(select, options, placeholder) {
+    if (!select) {
+        return;
+    }
+    select.innerHTML = [
+        `<option value="">${escapeHtml(placeholder)}</option>`,
+        ...options.map((item) => `<option value="${escapeHtml(item.adcode || item.name)}">${escapeHtml(item.name)}</option>`)
+    ].join("");
+    select.disabled = options.length === 0;
+}
+
+function mergeRegionOptions(primaryOptions, fallbackOptions) {
+    const seen = new Set();
+    return [...primaryOptions, ...fallbackOptions].filter((item) => {
+        const key = item.adcode || item.name;
+        if (!key || seen.has(key)) {
+            return false;
+        }
+        seen.add(key);
+        return true;
+    });
+}
+
+function setRegionSelectLoading(select, text) {
+    if (!select) {
+        return;
+    }
+    select.hidden = false;
+    select.disabled = true;
+    select.innerHTML = `<option value="">${escapeHtml(text)}</option>`;
+}
+
+function applyRegisterRegionVisibility() {
+    const levels = ["province", "city", "district", "township", "village"];
+    let shouldShow = true;
+    levels.forEach((level) => {
+        const select = getRegisterRegionSelect(level);
+        if (!select) {
+            return;
+        }
+        const hasOptions = state.registerRegionOptions[level]?.length > 0;
+        select.hidden = !shouldShow && !hasOptions;
+        if (level !== "province" && !hasOptions) {
+            select.hidden = true;
+        }
+        shouldShow = Boolean(select.value) && hasOptions;
+    });
+}
+
+function buildRegisterAddressText() {
+    const names = ["province", "city", "district", "township", "village"]
+        .map((level) => findRegisterRegionOption(level, getRegisterRegionSelect(level)?.value)?.name)
+        .filter(Boolean);
+    const detail = firstText(elements.registerAddressDetailInput?.value);
+    return firstText([...names, detail].join(""));
+}
+
+function getRegisterRegionSelect(level) {
+    switch (level) {
+        case "province":
+            return elements.registerProvinceInput;
+        case "city":
+            return elements.registerCityInput;
+        case "district":
+            return elements.registerDistrictInput;
+        case "township":
+            return elements.registerTownshipInput;
+        case "village":
+            return elements.registerVillageInput;
+        default:
+            return null;
+    }
+}
+
+function findRegisterRegionOption(level, value) {
+    const normalizedValue = firstText(value);
+    if (!normalizedValue) {
+        return null;
+    }
+    return state.registerRegionOptions[level]?.find((item) => item.adcode === normalizedValue || item.name === normalizedValue) || null;
+}
+
+function isHebeiRegisterSelection() {
+    return ["province", "city", "district", "township", "village"]
+        .some((level) => findRegisterRegionOption(level, getRegisterRegionSelect(level)?.value)?.name === "河北省");
+}
+
+function getNextRegisterRegionLevel(level) {
+    const levels = ["province", "city", "district", "township", "village"];
+    const index = levels.indexOf(level);
+    return index >= 0 ? levels[index + 1] : null;
+}
+
+function getRegisterRegionPlaceholder(level, loading = false) {
+    const labels = {
+        province: "省份",
+        city: "城市",
+        district: "区县",
+        township: "乡镇/街道",
+        village: "村/社区"
+    };
+    return loading ? `正在加载${labels[level]}` : `选择${labels[level]}`;
+}
+
+function getFallbackProvinceOptions() {
+    return [
+        ["北京市", "110000"], ["天津市", "120000"], ["河北省", "130000"], ["山西省", "140000"],
+        ["内蒙古自治区", "150000"], ["辽宁省", "210000"], ["吉林省", "220000"], ["黑龙江省", "230000"],
+        ["上海市", "310000"], ["江苏省", "320000"], ["浙江省", "330000"], ["安徽省", "340000"],
+        ["福建省", "350000"], ["江西省", "360000"], ["山东省", "370000"], ["河南省", "410000"],
+        ["湖北省", "420000"], ["湖南省", "430000"], ["广东省", "440000"], ["广西壮族自治区", "450000"],
+        ["海南省", "460000"], ["重庆市", "500000"], ["四川省", "510000"], ["贵州省", "520000"],
+        ["云南省", "530000"], ["西藏自治区", "540000"], ["陕西省", "610000"], ["甘肃省", "620000"],
+        ["青海省", "630000"], ["宁夏回族自治区", "640000"], ["新疆维吾尔自治区", "650000"],
+        ["香港特别行政区", "810000"], ["澳门特别行政区", "820000"], ["台湾省", "710000"]
+    ].map(([name, adcode]) => ({ name, adcode, level: "province", center: null }));
+}
+
+async function autofillRegisterCoordinates() {
+    const hasCoordinates = Number.isFinite(parseCoordinate(elements.registerLongitudeInput?.value))
+        && Number.isFinite(parseCoordinate(elements.registerLatitudeInput?.value));
+    if (hasCoordinates || state.registerGeoResolvedBy === "manual") {
+        return;
+    }
+    await resolveRegisterCoordinates();
+}
+
+async function resolveRegisterCoordinates() {
+    const schoolName = firstText(elements.registerSchoolNameInput?.value);
+    const address = buildRegisterAddressText();
+    const geocodeQuery = firstText([schoolName, address].filter(Boolean).join(" "));
+
+    if (geocodeQuery && geocodeQuery === state.registerGeoLastQuery && state.registerGeoResolvedBy === "geocode") {
+        return readRegisterCoordinateValues("geocode");
+    }
+
+    if (geocodeQuery) {
+        const geocodeResult = await geocodeRegisterAddress(geocodeQuery);
+        if (geocodeResult) {
+            applyRegisterCoordinates(geocodeResult.longitude, geocodeResult.latitude, "geocode");
+            state.registerGeoLastQuery = geocodeQuery;
+            setAuthStatus("已根据学校名称和地址自动解析经纬度，可继续手动修正。");
+            return geocodeResult;
+        }
+    }
+
+    if (state.userLocation) {
+        applyRegisterCoordinates(state.userLocation.longitude, state.userLocation.latitude, "locate");
+        setAuthStatus("已自动填入当前位置经纬度；若学校不在当前位置，请补充学校地址后系统会重新解析。");
+        return readRegisterCoordinateValues("locate");
+    }
+
+    const located = await locateWithAmap();
+    if (located) {
+        state.userLocation = {
+            longitude: Number(located.longitude),
+            latitude: Number(located.latitude),
+            source: "gcj02",
+            accuracy: Number.isFinite(Number(located.accuracy)) ? Number(located.accuracy) : null
+        };
+        state.userLocationAccuracy = state.userLocation.accuracy;
+        state.userLocationAddress = await reverseGeocodeLocation(state.userLocation);
+        applyRegisterCoordinates(state.userLocation.longitude, state.userLocation.latitude, "locate");
+        setAuthStatus("已自动填入当前位置经纬度；若学校不在当前位置，请补充学校地址后系统会重新解析。");
+        return readRegisterCoordinateValues("locate");
+    }
+
+    setAuthStatus("暂时无法自动定位，请继续填写信息，或手动补充学校地址 / 经纬度。");
+    return null;
+}
+
+function applyRegisterCoordinates(longitude, latitude, resolvedBy) {
+    if (!Number.isFinite(Number(longitude)) || !Number.isFinite(Number(latitude))) {
+        return;
+    }
+    if (elements.registerLongitudeInput) {
+        elements.registerLongitudeInput.value = Number(longitude).toFixed(7);
+    }
+    if (elements.registerLatitudeInput) {
+        elements.registerLatitudeInput.value = Number(latitude).toFixed(7);
+    }
+    state.registerGeoResolvedBy = resolvedBy;
+}
+
+function readRegisterCoordinateValues(resolvedBy) {
+    const longitude = parseCoordinate(elements.registerLongitudeInput?.value);
+    const latitude = parseCoordinate(elements.registerLatitudeInput?.value);
+    if (!Number.isFinite(longitude) || !Number.isFinite(latitude)) {
+        return null;
+    }
+    return {
+        longitude,
+        latitude,
+        resolvedBy
+    };
 }
 
 async function ensureMapReady() {
@@ -800,6 +1369,36 @@ async function reverseGeocodeLocation(location) {
             resolve({
                 displayName,
                 formattedAddress
+            });
+        });
+    });
+}
+
+async function geocodeRegisterAddress(address) {
+    const keyword = firstText(address);
+    if (!keyword) {
+        return null;
+    }
+
+    const geocoder = await ensureAmapGeocoderPlugin();
+    if (!geocoder) {
+        return null;
+    }
+
+    return new Promise((resolve) => {
+        geocoder.getLocation(keyword, (status, result) => {
+            const geocodes = status === "complete" ? result?.geocodes : null;
+            const firstGeocode = Array.isArray(geocodes) ? geocodes[0] : null;
+            const location = normalizeLngLat(firstGeocode?.location);
+            if (!location) {
+                resolve(null);
+                return;
+            }
+
+            resolve({
+                longitude: location.longitude,
+                latitude: location.latitude,
+                formattedAddress: firstText(firstGeocode.formattedAddress, keyword)
             });
         });
     });

@@ -46,7 +46,7 @@ CREATE TABLE IF NOT EXISTS school_user_account (
   username               VARCHAR(100) NOT NULL,
   password_hash          VARCHAR(255) NOT NULL,
   role_code              VARCHAR(50) NOT NULL DEFAULT 'school_admin',
-  school_id              BIGINT NOT NULL,
+  school_id              BIGINT NULL,
   registration_id        BIGINT NULL,
   display_name           VARCHAR(120) NULL,
   contact_name           VARCHAR(100) NULL,

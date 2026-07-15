@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>乡村学校周边思政教育资源数字地图</title>
     <meta name="description" content="以河北乡村学校为中心，展示周边可进入课堂和实践活动的思政教育资源。">
-    <link rel="stylesheet" href="/styles.css?v=20260617c">
+    <link rel="stylesheet" href="/styles.css?v=20260625a">
 </head>
 <body>
 <div class="app-shell">
@@ -28,7 +28,7 @@
 
         <div class="header-actions">
             <button class="ghost-button" id="authEntryButton" type="button">学校登录 / 注册</button>
-            <a class="ghost-button header-link" href="/admin.html">进入后台管理</a>
+            <a class="ghost-button header-link" id="adminEntryLink" href="/admin.html">进入后台管理</a>
             <button class="ghost-button" id="locateButton" type="button">定位我的位置</button>
             <button class="ghost-button" id="refreshTownButton" type="button">刷新当前内容</button>
         </div>
@@ -213,20 +213,24 @@
                 <label>
                     <span>学段</span>
                     <select id="registerSchoolLevelInput">
+                        <option value="kindergarten">幼儿园</option>
                         <option value="primary">小学</option>
                         <option value="junior">初中</option>
-                        <option value="senior">高中</option>
                         <option value="nine_year">九年一贯制</option>
-                        <option value="kindergarten">幼儿园</option>
-                        <option value="twelve_year">十二年一贯制</option>
-                        <option value="vocational">职业教育</option>
-                        <option value="special">特殊教育</option>
-                        <option value="other">其他</option>
                     </select>
                 </label>
                 <label>
                     <span>学校类型</span>
-                    <input id="registerSchoolTypeInput" type="text" placeholder="村小 / 乡镇中心小学">
+                    <select id="registerSchoolTypeInput">
+                        <option value="幼儿园">幼儿园</option>
+                        <option value="村小">村小</option>
+                        <option value="乡镇中心小学">乡镇中心小学</option>
+                        <option value="完全小学">完全小学</option>
+                        <option value="教学点">教学点</option>
+                        <option value="小学">小学</option>
+                        <option value="初级中学">初级中学</option>
+                        <option value="九年一贯制学校">九年一贯制学校</option>
+                    </select>
                 </label>
                 <label>
                     <span>办学性质</span>
@@ -238,16 +242,34 @@
                 </label>
                 <label>
                     <span>经度</span>
-                    <input id="registerLongitudeInput" type="number" step="0.0000001" placeholder="114.9537180">
+                    <input id="registerLongitudeInput" type="number" step="0.0000001" placeholder="系统自动定位，可手动修正">
                 </label>
                 <label>
                     <span>纬度</span>
-                    <input id="registerLatitudeInput" type="number" step="0.0000001" placeholder="38.0271030">
+                    <input id="registerLatitudeInput" type="number" step="0.0000001" placeholder="系统自动定位，可手动修正">
                 </label>
             </div>
             <label>
                 <span>学校地址</span>
-                <input id="registerAddressInput" type="text" placeholder="输入学校详细地址">
+                <div class="region-cascade">
+                    <select id="registerProvinceInput" data-region-level="province">
+                        <option value="">选择省份</option>
+                        <option value="130000">河北省</option>
+                    </select>
+                    <select id="registerCityInput" data-region-level="city" disabled hidden>
+                        <option value="">选择城市</option>
+                    </select>
+                    <select id="registerDistrictInput" data-region-level="district" disabled hidden>
+                        <option value="">选择区县</option>
+                    </select>
+                    <select id="registerTownshipInput" data-region-level="township" disabled hidden>
+                        <option value="">选择乡镇/街道</option>
+                    </select>
+                    <select id="registerVillageInput" data-region-level="village" disabled hidden>
+                        <option value="">选择村/社区</option>
+                    </select>
+                    <input id="registerAddressDetailInput" type="text" placeholder="请输入详细地址，如门牌号、校区、村组等">
+                </div>
             </label>
             <label>
                 <span>学校简介</span>
@@ -258,7 +280,7 @@
     </section>
 </div>
 
-<script src="/app.js?v=20260617c"></script>
+<script src="/app.js?v=20260625a"></script>
 </body>
 </html>
 

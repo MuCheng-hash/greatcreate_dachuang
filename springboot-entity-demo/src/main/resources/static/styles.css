@@ -916,6 +916,79 @@ textarea:focus {
     resize: vertical;
 }
 
+.search-field {
+    position: relative;
+}
+
+.search-suggestion-list {
+    position: absolute;
+    top: calc(100% + 8px);
+    left: 0;
+    right: 0;
+    z-index: 12;
+    display: grid;
+    gap: 6px;
+    padding: 10px;
+    border: 1px solid rgba(198, 212, 227, 0.94);
+    border-radius: 18px;
+    background: rgba(255, 255, 255, 0.98);
+    box-shadow: 0 18px 42px rgba(29, 54, 82, 0.16);
+    max-height: 240px;
+    overflow: auto;
+}
+
+.search-suggestion-list[hidden] {
+    display: none;
+}
+
+.search-suggestion-item {
+    display: grid;
+    gap: 4px;
+    width: 100%;
+    padding: 10px 12px;
+    border: 0;
+    border-radius: 14px;
+    background: rgba(244, 248, 253, 0.92);
+    color: var(--text);
+    text-align: left;
+    cursor: pointer;
+}
+
+.search-suggestion-item:hover,
+.search-suggestion-item:focus-visible {
+    background: rgba(45, 134, 255, 0.1);
+    outline: none;
+}
+
+.search-suggestion-item strong {
+    font-size: 0.96rem;
+}
+
+.search-suggestion-item span {
+    color: var(--muted);
+    font-size: 0.84rem;
+    line-height: 1.5;
+}
+
+.region-cascade {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 10px;
+}
+
+.region-cascade select,
+.region-cascade input {
+    min-width: 0;
+}
+
+.region-cascade select[hidden] {
+    display: none;
+}
+
+.region-cascade #registerAddressDetailInput {
+    grid-column: 1 / -1;
+}
+
 .auth-grid {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -973,6 +1046,10 @@ textarea:focus {
     }
 
     .auth-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .region-cascade {
         grid-template-columns: 1fr;
     }
 }

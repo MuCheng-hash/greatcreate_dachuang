@@ -28,6 +28,10 @@ logging:
     com.redculture.platform.mapper: debug
 
 app:
+  admin:
+    username: ${APP_ADMIN_USERNAME:admin}
+    password: ${APP_ADMIN_PASSWORD:admin123456}
+    display-name: ${APP_ADMIN_DISPLAY_NAME:平台管理员}
   map:
     default-town-region-id: 4
     generated-boundary-radius-km: 1.2
