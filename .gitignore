@@ -5,6 +5,10 @@ Thumbs.db
 # IDE
 .idea/
 *.iml
+.run/
+.vs/
+META-INF/
+**/local-maven-settings.xml
 
 # Java / Maven
 **/target/
