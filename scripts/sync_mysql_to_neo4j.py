@@ -12,6 +12,7 @@ Usage:
 from __future__ import annotations
 
 from dataclasses import dataclass
+from decimal import Decimal
 from typing import Any
 
 import pymysql
@@ -226,7 +227,18 @@ class SyncStats:
 def fetch_rows(conn: pymysql.Connection, sql: str) -> list[dict[str, Any]]:
     with conn.cursor() as cursor:
         cursor.execute(sql)
-        return list(cursor.fetchall())
+        rows = cursor.fetchall()
+        return [
+            {key: to_neo4j_value(value) for key, value in row.items()}
+            for row in rows
+        ]
+
+
+def to_neo4j_value(value: Any) -> Any:
+    """Convert MySQL values that the Neo4j driver cannot serialize directly."""
+    if isinstance(value, Decimal):
+        return float(value)
+    return value
 
 
 def to_iso_date(value: Any) -> str | None:
