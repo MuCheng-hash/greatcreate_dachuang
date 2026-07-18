@@ -6,6 +6,7 @@ import com.redculture.platform.entity.SchoolRegistration;
 import com.redculture.platform.entity.SchoolUserAccount;
 import com.redculture.platform.enums.AccountStatus;
 import com.redculture.platform.enums.RegistrationReviewStatus;
+import com.redculture.platform.exception.AuthConflictException;
 import com.redculture.platform.mapper.SchoolRegistrationMapper;
 import com.redculture.platform.service.AuthService;
 import com.redculture.platform.service.SchoolService;
@@ -19,8 +20,6 @@ import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
-
-import java.util.Objects;
 
 @Service
 public class AuthServiceImpl implements AuthService {
@@ -43,7 +42,7 @@ public class AuthServiceImpl implements AuthService {
     }
 
     @Override
-    @Transactional
+    @Transactional(transactionManager = "mysqlTransactionManager")
     public SchoolRegistrationSubmitVO registerSchool(SchoolRegisterRequest request) {
         validateRegisterRequest(request);
         ensureUsernameAvailable(request.getUsername());
@@ -73,23 +72,23 @@ public class AuthServiceImpl implements AuthService {
     }
 
     @Override
-    @Transactional
+    @Transactional(transactionManager = "mysqlTransactionManager")
     public AuthCurrentUserVO login(AuthLoginRequest request, HttpSession session) {
         if (request == null || !StringUtils.hasText(request.getUsername()) || !StringUtils.hasText(request.getPassword())) {
-            throw new IllegalArgumentException("username and password are required");
+            throw new IllegalArgumentException("账号和密码不能为空");
         }
 
         SchoolUserAccount account = schoolUserAccountService.getOne(new LambdaQueryWrapper<SchoolUserAccount>()
                 .eq(SchoolUserAccount::getUsername, request.getUsername().trim())
                 .last("LIMIT 1"));
         if (account == null) {
-            throw new IllegalArgumentException("account not found");
+            throw new IllegalArgumentException("账号不存在");
         }
         if (account.getStatus() != AccountStatus.ACTIVE) {
-            throw new IllegalArgumentException("account is not active");
+            throw new IllegalArgumentException("账号尚未激活或已被停用");
         }
         if (!passwordEncoder.matches(request.getPassword(), account.getPasswordHash())) {
-            throw new IllegalArgumentException("password is incorrect");
+            throw new IllegalArgumentException("密码错误");
         }
 
         account.setLastLoginAt(java.time.LocalDateTime.now());
@@ -119,7 +118,7 @@ public class AuthServiceImpl implements AuthService {
     }
 
     private AuthCurrentUserVO buildCurrentUser(SchoolUserAccount account) {
-        School school = schoolService.getById(account.getSchoolId());
+        School school = account.getSchoolId() == null ? null : schoolService.getById(account.getSchoolId());
         AuthCurrentUserVO vo = new AuthCurrentUserVO();
         vo.setAccountId(account.getAccountId());
         vo.setUsername(account.getUsername());
@@ -136,16 +135,16 @@ public class AuthServiceImpl implements AuthService {
 
     private void validateRegisterRequest(SchoolRegisterRequest request) {
         if (request == null) {
-            throw new IllegalArgumentException("request cannot be null");
+            throw new IllegalArgumentException("请求不能为空");
         }
         if (!StringUtils.hasText(request.getUsername())) {
-            throw new IllegalArgumentException("username is required");
+            throw new IllegalArgumentException("账号不能为空");
         }
         if (!StringUtils.hasText(request.getPassword())) {
-            throw new IllegalArgumentException("password is required");
+            throw new IllegalArgumentException("密码不能为空");
         }
         if (!StringUtils.hasText(request.getSchoolName())) {
-            throw new IllegalArgumentException("schoolName is required");
+            throw new IllegalArgumentException("学校名称不能为空");
         }
     }
 
@@ -153,12 +152,12 @@ public class AuthServiceImpl implements AuthService {
         String cleanUsername = username.trim();
         if (schoolUserAccountService.count(new LambdaQueryWrapper<SchoolUserAccount>()
                 .eq(SchoolUserAccount::getUsername, cleanUsername)) > 0) {
-            throw new IllegalArgumentException("username already exists");
+            throw new AuthConflictException("账号已存在");
         }
         if (schoolRegistrationMapper.selectCount(new LambdaQueryWrapper<SchoolRegistration>()
                 .eq(SchoolRegistration::getApplyAccount, cleanUsername)
                 .in(SchoolRegistration::getReviewStatus, RegistrationReviewStatus.PENDING, RegistrationReviewStatus.APPROVED)) > 0) {
-            throw new IllegalArgumentException("username already submitted");
+            throw new AuthConflictException("账号已提交注册申请");
         }
     }
 

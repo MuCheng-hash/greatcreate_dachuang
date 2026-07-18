@@ -8,7 +8,7 @@ spring:
     driver-class-name: com.mysql.cj.jdbc.Driver
     url: jdbc:mysql://localhost:3306/red_culture_platform?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai
     username: root
-    password: root
+    password: 123456
   neo4j:
     uri: ${NEO4J_URI:bolt://127.0.0.1:7687}
     authentication:

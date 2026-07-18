@@ -3,6 +3,7 @@ package com.redculture.platform.controller;
 import com.redculture.platform.common.ApiResponse;
 import com.redculture.platform.common.PageResult;
 import com.redculture.platform.enums.RegistrationReviewStatus;
+import com.redculture.platform.exception.AuthNotFoundException;
 import com.redculture.platform.service.SchoolRegistrationService;
 import com.redculture.platform.vo.SchoolRegistrationAdminVO;
 import com.redculture.platform.vo.request.RegistrationReviewRequest;
@@ -36,7 +37,7 @@ public class SchoolRegistrationAdminController {
     public ApiResponse<SchoolRegistrationAdminVO> detail(@PathVariable Long registrationId) {
         SchoolRegistrationAdminVO data = schoolRegistrationService.getRegistrationDetail(registrationId);
         if (data == null) {
-            return ApiResponse.fail("registration not found");
+            throw new AuthNotFoundException("注册申请不存在");
         }
         return ApiResponse.success(data);
     }
@@ -44,20 +45,12 @@ public class SchoolRegistrationAdminController {
     @PostMapping("/{registrationId}/approve")
     public ApiResponse<SchoolRegistrationAdminVO> approve(@PathVariable Long registrationId,
                                                           @RequestBody(required = false) RegistrationReviewRequest request) {
-        try {
-            return ApiResponse.success("registration approved", schoolRegistrationService.approveRegistration(registrationId, request));
-        } catch (IllegalArgumentException exception) {
-            return ApiResponse.fail(exception.getMessage());
-        }
+        return ApiResponse.success("registration approved", schoolRegistrationService.approveRegistration(registrationId, request));
     }
 
     @PostMapping("/{registrationId}/reject")
     public ApiResponse<SchoolRegistrationAdminVO> reject(@PathVariable Long registrationId,
                                                          @RequestBody(required = false) RegistrationReviewRequest request) {
-        try {
-            return ApiResponse.success("registration rejected", schoolRegistrationService.rejectRegistration(registrationId, request));
-        } catch (IllegalArgumentException exception) {
-            return ApiResponse.fail(exception.getMessage());
-        }
+        return ApiResponse.success("registration rejected", schoolRegistrationService.rejectRegistration(registrationId, request));
     }
 }
