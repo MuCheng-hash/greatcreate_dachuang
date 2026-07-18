@@ -2877,21 +2877,29 @@ function geoJsonToPathList(geoJson) {
 }
 
 async function requestJson(url, options = {}) {
-    const response = await fetch(url, {
-        headers: {
-            Accept: "application/json",
-            ...(options.method === "POST" ? { "Content-Type": "application/json" } : {})
-        },
-        ...options
-    });
+    const method = String(options.method || "GET").toUpperCase();
+    const headers = {
+        Accept: "application/json",
+        ...(method === "POST" ? { "Content-Type": "application/json" } : {}),
+        ...(options.headers || {})
+    };
 
-    if (!response.ok) {
-        throw new Error(`request failed: ${response.status}`);
+    let response;
+    try {
+        response = await fetch(url, { ...options, headers });
+    } catch (error) {
+        throw new Error("业务服务不可达，请从 http://localhost:8080/ 打开页面，并确认业务服务已启动。");
     }
 
-    const json = await response.json();
-    if (json?.code !== 200) {
-        throw new Error(json?.message || "api error");
+    let json;
+    try {
+        json = await response.json();
+    } catch (error) {
+        throw new Error(`业务服务返回了无法解析的响应（HTTP ${response.status}）。`);
+    }
+
+    if (!response.ok || json?.code !== 200) {
+        throw new Error(json?.message || `请求失败（HTTP ${response.status}）。`);
     }
     return json.data;
 }

@@ -15,11 +15,14 @@
 
 ## 运行顺序
 
-1. 导入 `data/sql/` 中的 MySQL 脚本。
-2. 如需图谱能力，运行 `scripts/sync_mysql_to_neo4j.py` 同步 Neo4j。
-3. 启动 `llm-service/`，默认监听 `http://127.0.0.1:5050`。
-4. 启动 `business-service/`，默认监听 `http://localhost:8080`。
-5. 访问业务服务提供的静态前端页面。
+1. 启动 MySQL，并导入 `data/sql/` 中的建表和初始化脚本。
+2. 启动 `business-service/`，默认监听 `http://localhost:8080`。
+3. 打开 `http://localhost:8080/`，不要直接打开本地 `file://` 页面，也不要使用 `5173`、`5500` 等其他前端端口访问认证页面。
+4. 用浏览器访问 `http://localhost:8080/api/auth/me` 做健康检查；返回 JSON 即表示业务服务已响应，未登录时 `data` 为 `null` 是正常的。
+5. 如需图谱能力，再运行 `scripts/sync_mysql_to_neo4j.py` 同步 Neo4j；Neo4j 不启动时，学校注册、审核和登录仍使用 MySQL，可独立工作。
+6. 如需问答或教学方案，再启动 `llm-service/`，默认监听 `http://127.0.0.1:5050`。
+
+学校注册成功后，管理员从同源地址 `http://localhost:8080/admin.html` 登录并审核申请。认证请求使用 `/api/...` 相对路径和浏览器 Session，因此页面必须从业务服务的 8080 地址打开。
 
 ## 服务边界
 

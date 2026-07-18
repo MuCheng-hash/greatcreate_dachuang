@@ -75,7 +75,7 @@ public class SchoolRegistrationServiceImpl extends ServiceImpl<SchoolRegistratio
     }
 
     @Override
-    @Transactional
+    @Transactional(transactionManager = "mysqlTransactionManager")
     public SchoolRegistrationAdminVO approveRegistration(Long registrationId, RegistrationReviewRequest request) {
         SchoolRegistration registration = requireRegistration(registrationId);
         Long schoolId = request != null ? request.getLinkedSchoolId() : null;
@@ -93,7 +93,7 @@ public class SchoolRegistrationServiceImpl extends ServiceImpl<SchoolRegistratio
     }
 
     @Override
-    @Transactional
+    @Transactional(transactionManager = "mysqlTransactionManager")
     public SchoolRegistrationAdminVO rejectRegistration(Long registrationId, RegistrationReviewRequest request) {
         SchoolRegistration registration = requireRegistration(registrationId);
         registration.setReviewStatus(RegistrationReviewStatus.REJECTED);
@@ -106,11 +106,11 @@ public class SchoolRegistrationServiceImpl extends ServiceImpl<SchoolRegistratio
 
     private SchoolRegistration requireRegistration(Long registrationId) {
         if (registrationId == null) {
-            throw new IllegalArgumentException("registrationId is required");
+            throw new IllegalArgumentException("注册申请编号不能为空");
         }
         SchoolRegistration registration = getById(registrationId);
         if (registration == null) {
-            throw new IllegalArgumentException("registration not found");
+            throw new IllegalArgumentException("注册申请不存在");
         }
         return registration;
     }
@@ -118,7 +118,7 @@ public class SchoolRegistrationServiceImpl extends ServiceImpl<SchoolRegistratio
     private School requireSchool(Long schoolId) {
         School school = schoolService.getById(schoolId);
         if (school == null) {
-            throw new IllegalArgumentException("linked school not found");
+            throw new IllegalArgumentException("关联学校不存在");
         }
         return school;
     }
@@ -187,7 +187,7 @@ public class SchoolRegistrationServiceImpl extends ServiceImpl<SchoolRegistratio
                 .eq(SchoolUserAccount::getSchoolId, schoolId)
                 .last("LIMIT 1"));
         if (existing != null && !java.util.Objects.equals(existing.getRegistrationId(), registrationId)) {
-            throw new IllegalArgumentException("the school already has an account");
+            throw new IllegalArgumentException("该学校已经存在账号");
         }
     }
 

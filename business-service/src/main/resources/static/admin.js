@@ -301,20 +301,32 @@ function setGlobalStatus(title, hint) {
 
 async function requestJson(url, options = {}) {
     const config = { ...options };
-    const headers = { ...(config.headers || {}) };
+    const headers = { Accept: "application/json", ...(config.headers || {}) };
     if (config.body !== undefined) {
         headers["Content-Type"] = "application/json";
         config.body = JSON.stringify(config.body);
     }
     config.headers = headers;
 
-    const response = await fetch(url, config);
-    const data = await response.json();
+    let response;
+    try {
+        response = await fetch(url, config);
+    } catch (error) {
+        throw new Error("后台服务不可达，请从 http://localhost:8080/admin.html 打开页面，并确认业务服务已启动。");
+    }
+
+    let data;
+    try {
+        data = await response.json();
+    } catch (error) {
+        throw new Error(`后台服务返回了无法解析的响应（HTTP ${response.status}）。`);
+    }
+
     if (!response.ok || data.code !== 200) {
         if (response.status === 403) {
             throw new Error(data.message || "当前账号无权限访问后台。");
         }
-        throw new Error(data.message || "请求失败");
+        throw new Error(data.message || `请求失败（HTTP ${response.status}）。`);
     }
     return data.data;
 }
