@@ -2,6 +2,7 @@ package com.redculture.platform.vo.request;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.redculture.platform.enums.ActivityType;
 import com.redculture.platform.enums.GeoConfidenceLevel;
 import com.redculture.platform.enums.GeoSourceType;
 import com.redculture.platform.enums.SchoolLevel;
@@ -67,5 +68,22 @@ class SchoolRegisterRequestJsonTest {
                   "schoolLevel": "not-a-school-level"
                 }
                 """, SchoolRegisterRequest.class));
+    }
+
+    @Test
+    void acceptsTeachingPlanActivityDatabaseValue() throws Exception {
+        TeachingPlanGenerateRequest request = objectMapper.readValue("""
+                {
+                  "schoolId": 1,
+                  "grade": "四年级",
+                  "theme": "敬老志愿服务",
+                  "activityType": "volunteer_service",
+                  "durationMinutes": 120,
+                  "practiceRequired": true
+                }
+                """, TeachingPlanGenerateRequest.class);
+
+        assertEquals(ActivityType.VOLUNTEER_SERVICE, request.getActivityType());
+        assertEquals("\"volunteer_service\"", objectMapper.writeValueAsString(request.getActivityType()));
     }
 }
