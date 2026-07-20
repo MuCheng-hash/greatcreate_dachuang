@@ -17,9 +17,9 @@ VALUES
    NULL, 114.9537180, 38.0271030, 'amap_poi', '石家庄市藁城区常安镇里庄小学', '河北省石家庄市藁城区常安镇里庄村振兴大街西220号', '科教文化服务;学校;小学', 'high',
    0, '可作为样例乡村小学，用于验证学校周边本土思政资源地图平台。', NULL, 'approved', 1),
   ('SCH_SJZ_PS_0001', '平山县西柏坡希望小学', NULL, NULL, NULL, NULL, NULL,
-   'primary', '乡镇中心小学', 'public', 1, 0, '河北省石家庄市平山县西柏坡镇示例地址', NULL, NULL,
-   NULL, 113.9815000, 38.3452000, 'manual', '平山县西柏坡希望小学', '河北省石家庄市平山县西柏坡镇示例地址', '科教文化服务;学校;小学', 'medium',
-   0, '用于红色文化资源密集区域学校试点。', NULL, 'approved', 1),
+   'primary', '乡镇中心小学', 'public', 1, 0, '河北省石家庄市平山县西柏坡镇迎宾路7号', NULL, NULL,
+   NULL, 113.9390000, 38.3484380, 'amap_poi', '西柏坡希望小学', '迎宾路7号', '科教文化服务;学校;小学', 'high',
+   1, '用于红色文化资源密集区域学校试点。', NULL, 'approved', 1),
   ('SCH_BD_YX_0001', '易县狼牙山镇中心小学', NULL, NULL, NULL, NULL, NULL,
    'primary', '乡镇中心小学', 'public', 1, 0, '河北省保定市易县狼牙山镇示例地址', NULL, NULL,
    NULL, 115.4419000, 39.4018000, 'manual', '易县狼牙山镇中心小学', '河北省保定市易县狼牙山镇示例地址', '科教文化服务;学校;小学', 'medium',
@@ -59,7 +59,12 @@ INSERT INTO school_geo_record
   (school_id, longitude, latitude, source_type, poi_name, poi_address, poi_type, confidence_level,
    is_manual_reviewed, review_result, reviewer_name, reviewed_at, is_current, remark)
 SELECT school_id, longitude, latitude, geo_source_type, poi_name, poi_address, poi_type, geo_confidence,
-       0, 'pending', NULL, NULL, 1, '初始化样例坐标'
+       CASE WHEN school_code = 'SCH_SJZ_PS_0001' THEN 1 ELSE 0 END,
+       CASE WHEN school_code = 'SCH_SJZ_PS_0001' THEN 'confirmed' ELSE 'pending' END,
+       CASE WHEN school_code = 'SCH_SJZ_PS_0001' THEN 'system_amap_verification' ELSE NULL END,
+       CASE WHEN school_code = 'SCH_SJZ_PS_0001' THEN CURRENT_TIMESTAMP ELSE NULL END,
+       1,
+       CASE WHEN school_code = 'SCH_SJZ_PS_0001' THEN '高德 POI B01370VWBV' ELSE '初始化样例坐标' END
 FROM school
 WHERE school_code IN ('SCH_SJZ_GC_0001', 'SCH_SJZ_PS_0001', 'SCH_BD_YX_0001');
 
@@ -70,11 +75,11 @@ INSERT INTO local_edu_resource
    review_status, is_active)
 VALUES
   ('RES_SJZ_XBP_0001', '西柏坡中共中央旧址', '西柏坡旧址', 'red_culture', '革命旧址', NULL, NULL,
-   NULL, '河北省石家庄市平山县西柏坡镇', 113.9783000, 38.3439000, '西柏坡景区', '08:30-17:00', 0,
+   NULL, '河北省石家庄市平山县西柏坡镇西柏坡村', 113.9407980, 38.3410770, '西柏坡景区', '08:30-17:00', 0,
    120, '西柏坡中共中央旧址是河北红色文化的重要代表。', '可用于爱国主义教育、党史教育、理想信念教育。', '开展红色故事讲解、研学路线设计、主题班会。', '小学高年级/初中/高中', '山区活动需注意集体组织与交通安全。', NULL,
    'approved', 1),
   ('RES_SJZ_XBP_0002', '西柏坡纪念馆', NULL, 'patriotism_base', '纪念馆', NULL, NULL,
-   NULL, '河北省石家庄市平山县西柏坡镇', 113.9791000, 38.3445000, '西柏坡纪念馆', '09:00-17:00', 0,
+   NULL, '河北省石家庄市平山县西柏坡镇', 113.9448620, 38.3398480, '西柏坡纪念馆', '09:00-17:00', 0,
    90, '西柏坡纪念馆是开展红色文化教育的重要场馆。', '适合开展场馆式思政教育、图片文献教学和主题研学。', '可组织讲解参观、研学打卡、展陈观察记录。', '小学高年级/初中/高中', '集体参观需提前确认开放安排。', NULL,
    'approved', 1),
   ('RES_BD_LYS_0001', '狼牙山五壮士纪念地', '狼牙山纪念地', 'red_culture', '抗战遗址', NULL, NULL,
@@ -128,10 +133,10 @@ JOIN (
            250, 'walk', 10, 'near', 5, '适合开展乡贤文化与家风教育微课程'
     UNION ALL
     SELECT 'SCH_SJZ_PS_0001', 'RES_SJZ_XBP_0001', 'research_route',
-           400, 'walk', 15, 'near', 5, '适合开展西柏坡红色文化研学与党史教育'
+           834, 'walk', 15, 'near', 5, '适合开展西柏坡红色文化研学与党史教育'
     UNION ALL
     SELECT 'SCH_SJZ_PS_0001', 'RES_SJZ_XBP_0002', 'practice',
-           600, 'walk', 20, 'near', 4, '适合开展纪念馆参观与主题讲解活动'
+           1084, 'walk', 20, 'near', 4, '适合开展纪念馆参观与主题讲解活动'
     UNION ALL
     SELECT 'SCH_BD_YX_0001', 'RES_BD_LYS_0001', 'research_route',
            1200, 'walk', 35, 'medium', 5, '适合开展抗战精神、英雄故事与集体主义教育'

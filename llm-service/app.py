@@ -300,6 +300,52 @@ def build_structured_teaching_plan(payload: dict[str, Any]) -> dict[str, Any]:
     return build_teaching_plan_fallback(payload)
 
 
+def build_resource_discovery_prompt(payload: dict[str, Any]) -> str:
+    school = payload.get("school") or {}
+    candidates = (payload.get("candidates") or [])[:20]
+    context = {"school": school, "candidates": candidates}
+    categories = [
+        "red_culture", "intangible_culture", "traditional_culture", "local_history",
+        "public_culture", "labor_education", "public_welfare", "ecological_civilization",
+        "patriotism_base", "social_practice", "other",
+    ]
+    return (
+        "你是乡村学校思政教育资源审核助手。只能分析输入 candidates 中已有的地点，"
+        "不得新增地点、修改名称、地址或坐标。请根据地点名称、地图分类、地址和距离判断其是否可能具有思政教育价值。"
+        "输出严格 JSON，不要 Markdown。顶层字段为 analysisStatus、message、results。"
+        "results 每项必须包含 providerPlaceId、ideologicalRelevant、resourceCategory、resourceSubcategory、"
+        "confidence、rationale、educationThemes、targetGrades、activitySuggestion、verificationNotes。"
+        f"resourceCategory 只能取 {categories}；confidence 必须在 0 到 1 之间。"
+        "地图信息只是候选线索，verificationNotes 必须说明需要人工核实的真实性、开放时间、联系方式或接待条件。\n\n"
+        f"上下文：{json.dumps(context, ensure_ascii=False)}"
+    )
+
+
+def build_resource_discovery_classification(payload: dict[str, Any]) -> dict[str, Any]:
+    candidates = (payload.get("candidates") or [])[:20]
+    if not candidates:
+        return {"analysisStatus": "completed", "message": "没有待分析地点。", "results": []}
+    generated = call_openai_compatible(build_resource_discovery_prompt(payload))
+    if not isinstance(generated, dict) or not isinstance(generated.get("results"), list):
+        return {
+            "analysisStatus": "unavailable",
+            "message": "LLM 未配置或暂时不可用，保留高德原始地点等待分析。",
+            "results": [],
+        }
+    allowed_ids = {
+        item.get("providerPlaceId")
+        for item in candidates
+        if isinstance(item, dict) and item.get("providerPlaceId")
+    }
+    generated["results"] = [
+        item for item in generated["results"]
+        if isinstance(item, dict) and item.get("providerPlaceId") in allowed_ids
+    ]
+    generated.setdefault("analysisStatus", "completed")
+    generated.setdefault("message", "已完成候选思政资源识别。")
+    return generated
+
+
 @app.post("/llm/town/explain")
 def explain_town() -> Any:
     payload = request.get_json(silent=True) or {}
@@ -328,6 +374,12 @@ def ask_school() -> Any:
 def generate_teaching_plan() -> Any:
     payload = request.get_json(silent=True) or {}
     return jsonify(build_structured_teaching_plan(payload))
+
+
+@app.post("/llm/resource-discovery/classify")
+def classify_resource_discovery() -> Any:
+    payload = request.get_json(silent=True) or {}
+    return jsonify(build_resource_discovery_classification(payload))
 
 
 if __name__ == "__main__":
