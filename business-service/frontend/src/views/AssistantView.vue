@@ -4,6 +4,7 @@ import { Bot, MessageCircleQuestion, Send, Sparkles, Trash2, UserRound } from "@
 import AppShell from "@/components/AppShell.vue";
 import InlineNotice from "@/components/InlineNotice.vue";
 import LoadingBlock from "@/components/LoadingBlock.vue";
+import { api } from "@/services/api";
 import { useSchoolStore } from "@/stores/school";
 import { useAuthStore } from "@/stores/auth";
 
@@ -25,7 +26,7 @@ const suggestions = computed(() => {
 });
 
 onMounted(async () => {
-  await Promise.all([schoolStore.load(), schoolStore.loadConfig()]);
+  await schoolStore.load();
   if (!messages.value.length) {
     messages.value.push({ role: "assistant", answer: `你好，我可以结合${schoolStore.school?.schoolName || "本校"}的周边资源，协助你进行教学讲解和活动设计。`, citations: [] });
   }
@@ -41,44 +42,28 @@ function loadMessages() {
   try { return JSON.parse(sessionStorage.getItem(storageKey()) || "[]"); } catch { return []; }
 }
 
-function buildPayload(extra = {}) {
-  return {
-    school: schoolStore.school || {},
-    resources: schoolStore.resources.map((item) => ({
-      relationType: item.relationType, distanceMeters: item.distanceMeters,
-      recommendedTravelMode: item.recommendedTravelMode, reachabilityLevel: item.reachabilityLevel,
-      educationThemeSummary: item.educationThemeSummary, resource: item.resource
-    })),
-    activityPlans: schoolStore.activityPlans,
-    ...extra
-  };
-}
-
 async function explain() {
-  await requestAssistant("/llm/school/explain", "请介绍本校周边可用于思政教学的资源。", false);
+  await requestAssistant("请介绍本校周边可用于思政教学的资源。");
 }
 
 async function ask(text = question.value) {
   const clean = text.trim();
   if (!clean || loading.value) return;
   question.value = "";
-  await requestAssistant("/llm/school/ask", clean, true);
+  await requestAssistant(clean);
 }
 
-async function requestAssistant(path, userText, includeQuestion) {
+async function requestAssistant(userText) {
   error.value = "";
   messages.value.push({ role: "user", text: userText });
   loading.value = true;
   await scrollToBottom();
   try {
-    const base = schoolStore.config?.llmServiceBaseUrl?.replace(/\/$/, "");
-    if (!base) throw new Error("智能问答服务尚未配置");
-    const response = await fetch(`${base}${path}`, {
-      method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json" },
-      body: JSON.stringify(buildPayload(includeQuestion ? { question: userText } : {}))
+    const result = await api.post("/api/ai/qa/ask", {
+      question: userText,
+      scopeType: "SCHOOL",
+      scopeId: schoolStore.school?.schoolId || auth.user?.schoolId || null
     });
-    if (!response.ok) throw new Error("智能问答服务暂时不可用");
-    const result = await response.json();
     messages.value.push({
       role: "assistant", answer: result.answer || "服务未返回回答。",
       relatedResources: result.relatedResources || [], citations: result.citations || [],
