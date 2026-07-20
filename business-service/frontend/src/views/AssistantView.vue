@@ -42,6 +42,18 @@ function loadMessages() {
   try { return JSON.parse(sessionStorage.getItem(storageKey()) || "[]"); } catch { return []; }
 }
 
+function retrievalStatusLabel(status) {
+  return {
+    ok: "已结合知识检索证据",
+    empty: "未检索到直接匹配的知识证据",
+    degraded: "知识检索部分不可用，当前回答基于可用业务数据"
+  }[status] || "知识检索状态未知";
+}
+
+function retrievalStatusClass(status) {
+  return `retrieval-${status || "unknown"}`;
+}
+
 async function explain() {
   await requestAssistant("请介绍本校周边可用于思政教学的资源。");
 }
@@ -67,14 +79,16 @@ async function requestAssistant(userText) {
     messages.value.push({
       role: "assistant", answer: result.answer || "服务未返回回答。",
       relatedResources: result.relatedResources || [], citations: result.citations || [],
-      followUpQuestions: result.followUpQuestions || []
+      followUpQuestions: result.followUpQuestions || [],
+      retrievalStatus: result.retrievalStatus || null
     });
   } catch (requestError) {
     const resourceCount = schoolStore.resources.length;
     messages.value.push({
       role: "assistant",
       answer: `${schoolStore.school?.schoolName || "当前学校"}现有 ${resourceCount} 个已关联周边资源。围绕“${userText}”，建议优先选择距离近、可达性高的资源，并按课堂导入、现场观察、实践反思三个阶段组织活动。`,
-      citations: ["当前为本地兜底回答，智能问答服务恢复后可获得更完整的引用结果。"]
+      citations: ["当前为本地兜底回答，智能问答服务恢复后可获得更完整的引用结果。"],
+      retrievalStatus: "degraded"
     });
     error.value = requestError.message;
   } finally {
@@ -111,6 +125,7 @@ function clearChat() {
             <span class="chat-avatar"><UserRound v-if="message.role === 'user'" :size="17" /><Bot v-else :size="17" /></span>
             <div>
               <p>{{ message.text || message.answer }}</p>
+              <p v-if="message.retrievalStatus" class="retrieval-status" :class="retrievalStatusClass(message.retrievalStatus)">{{ retrievalStatusLabel(message.retrievalStatus) }}</p>
               <p v-if="message.relatedResources?.length" class="related"><strong>关联资源：</strong>{{ message.relatedResources.join("、") }}</p>
               <div v-if="message.citations?.length" class="chat-citations"><span v-for="(citation,citationIndex) in message.citations" :key="citationIndex">{{ typeof citation === "string" ? citation : citation.title || citation.excerpt }}</span></div>
               <div v-if="message.followUpQuestions?.length" class="follow-ups"><button v-for="item in message.followUpQuestions" :key="item" type="button" @click="ask(item)">{{ item }}</button></div>
@@ -139,8 +154,8 @@ function clearChat() {
 .suggestion-list button { padding: 10px; border: 1px solid var(--line); border-radius: 6px; background: #fff; color: #445047; font-size: 13px; line-height: 1.5; text-align: left; }
 .suggestion-list button:hover { border-color: #a9b9ad; background: var(--green-soft); }
 .clear-button { justify-content: flex-start; margin-top: auto; color: var(--muted); }
-.chat-area { min-width: 0; display: grid; grid-template-rows: minmax(0,1fr) auto; }
-.chat-scroll { overflow-y: auto; display: grid; align-content: start; gap: 18px; padding: 24px; }
+.chat-area { min-width: 0; min-height: 0; display: grid; grid-template-rows: minmax(0,1fr) auto; overflow: hidden; }
+.chat-scroll { min-height: 0; overflow-y: auto; display: grid; align-content: start; gap: 18px; padding: 24px; overscroll-behavior: contain; }
 .chat-message { display: grid; grid-template-columns: 34px minmax(0,1fr); gap: 10px; max-width: 820px; }
 .chat-message.user { justify-self: end; grid-template-columns: minmax(0,1fr) 34px; }
 .chat-message.user .chat-avatar { grid-column: 2; grid-row: 1; background: var(--red); }
@@ -148,6 +163,11 @@ function clearChat() {
 .chat-avatar { display: grid; place-items: center; width: 34px; height: 34px; border-radius: 50%; background: var(--green); color: #fff; }
 .chat-message > div { padding: 13px 15px; border-radius: 8px; background: var(--surface-muted); }
 .chat-message p { margin: 0; line-height: 1.8; white-space: pre-wrap; }
+.retrieval-status { margin-top: 8px !important; font-size: 12px; }
+.retrieval-ok { color: var(--green); }
+.retrieval-empty { color: var(--muted); }
+.retrieval-degraded { color: var(--red); }
+.retrieval-unknown { color: var(--muted); }
 .related { margin-top: 10px !important; color: var(--muted); font-size: 13px; }
 .chat-citations { display: grid; gap: 5px; margin-top: 12px; padding-top: 10px; border-top: 1px solid #d3dbd5; color: var(--muted); font-size: 12px; }
 .follow-ups { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 11px; }
