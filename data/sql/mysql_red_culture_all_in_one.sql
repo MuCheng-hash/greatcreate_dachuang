@@ -373,6 +373,7 @@ CREATE TABLE entity_source_rel (
   source_excerpt       TEXT NULL,
   credibility_score    TINYINT NOT NULL DEFAULT 3,
   created_at           DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at           DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   CONSTRAINT fk_entity_source_rel_source
     FOREIGN KEY (source_id) REFERENCES data_source(source_id),
   CONSTRAINT uk_entity_source UNIQUE (entity_type, entity_id, source_id, source_url(255)),

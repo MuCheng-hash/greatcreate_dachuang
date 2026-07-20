@@ -13,11 +13,12 @@ import com.redculture.platform.service.SchoolUserAccountService;
 import com.redculture.platform.vo.AuthCurrentUserVO;
 import com.redculture.platform.vo.SchoolRegistrationSubmitVO;
 import com.redculture.platform.vo.request.AuthLoginRequest;
+import com.redculture.platform.vo.request.AuthPasswordChangeRequest;
+import com.redculture.platform.vo.request.AuthProfileUpdateRequest;
 import com.redculture.platform.vo.request.SchoolRegisterRequest;
 import jakarta.servlet.http.HttpSession;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
 
 import java.util.Objects;
@@ -43,7 +44,6 @@ public class AuthServiceImpl implements AuthService {
     }
 
     @Override
-    @Transactional
     public SchoolRegistrationSubmitVO registerSchool(SchoolRegisterRequest request) {
         validateRegisterRequest(request);
         ensureUsernameAvailable(request.getUsername());
@@ -73,7 +73,6 @@ public class AuthServiceImpl implements AuthService {
     }
 
     @Override
-    @Transactional
     public AuthCurrentUserVO login(AuthLoginRequest request, HttpSession session) {
         if (request == null || !StringUtils.hasText(request.getUsername()) || !StringUtils.hasText(request.getPassword())) {
             throw new IllegalArgumentException("username and password are required");
@@ -100,17 +99,62 @@ public class AuthServiceImpl implements AuthService {
 
     @Override
     public AuthCurrentUserVO currentUser(HttpSession session) {
+        SchoolUserAccount account = findCurrentAccount(session);
+        if (account == null) {
+            return null;
+        }
+        return buildCurrentUser(account);
+    }
+
+    @Override
+    public AuthCurrentUserVO updateProfile(AuthProfileUpdateRequest request, HttpSession session) {
+        SchoolUserAccount account = requireCurrentAccount(session);
+        if (request == null) {
+            throw new IllegalArgumentException("profile request is required");
+        }
+        account.setDisplayName(cleanWithLimit(request.getDisplayName(), 120, "displayName"));
+        account.setContactName(cleanWithLimit(request.getContactName(), 100, "contactName"));
+        account.setContactPhone(cleanWithLimit(request.getContactPhone(), 50, "contactPhone"));
+        schoolUserAccountService.updateById(account);
+        return buildCurrentUser(account);
+    }
+
+    @Override
+    public void changePassword(AuthPasswordChangeRequest request, HttpSession session) {
+        SchoolUserAccount account = requireCurrentAccount(session);
+        if (request == null || !StringUtils.hasText(request.getCurrentPassword())
+                || !StringUtils.hasText(request.getNewPassword())) {
+            throw new IllegalArgumentException("currentPassword and newPassword are required");
+        }
+        if (!passwordEncoder.matches(request.getCurrentPassword(), account.getPasswordHash())) {
+            throw new IllegalArgumentException("current password is incorrect");
+        }
+        if (request.getNewPassword().length() < 6 || request.getNewPassword().length() > 128) {
+            throw new IllegalArgumentException("new password must be between 6 and 128 characters");
+        }
+        account.setPasswordHash(passwordEncoder.encode(request.getNewPassword()));
+        schoolUserAccountService.updateById(account);
+    }
+
+    private SchoolUserAccount findCurrentAccount(HttpSession session) {
         Object accountId = session.getAttribute(AUTH_SESSION_KEY);
         if (!(accountId instanceof Long)) {
             return null;
         }
-        Long id = (Long) accountId;
-        SchoolUserAccount account = schoolUserAccountService.getById(id);
+        SchoolUserAccount account = schoolUserAccountService.getById((Long) accountId);
         if (account == null || account.getStatus() != AccountStatus.ACTIVE) {
             session.removeAttribute(AUTH_SESSION_KEY);
             return null;
         }
-        return buildCurrentUser(account);
+        return account;
+    }
+
+    private SchoolUserAccount requireCurrentAccount(HttpSession session) {
+        SchoolUserAccount account = findCurrentAccount(session);
+        if (account == null) {
+            throw new IllegalArgumentException("authentication required");
+        }
+        return account;
     }
 
     @Override
@@ -126,6 +170,9 @@ public class AuthServiceImpl implements AuthService {
         vo.setRoleCode(account.getRoleCode());
         vo.setSchoolId(account.getSchoolId());
         vo.setDisplayName(account.getDisplayName());
+        vo.setContactName(account.getContactName());
+        vo.setContactPhone(account.getContactPhone());
+        vo.setLastLoginAt(account.getLastLoginAt());
         if (school != null) {
             vo.setSchoolName(school.getSchoolName());
             vo.setSchoolLongitude(school.getLongitude());
@@ -143,6 +190,9 @@ public class AuthServiceImpl implements AuthService {
         }
         if (!StringUtils.hasText(request.getPassword())) {
             throw new IllegalArgumentException("password is required");
+        }
+        if (request.getPassword().length() < 6 || request.getPassword().length() > 128) {
+            throw new IllegalArgumentException("password must be between 6 and 128 characters");
         }
         if (!StringUtils.hasText(request.getSchoolName())) {
             throw new IllegalArgumentException("schoolName is required");
@@ -164,5 +214,13 @@ public class AuthServiceImpl implements AuthService {
 
     private String clean(String value) {
         return value == null ? null : value.trim();
+    }
+
+    private String cleanWithLimit(String value, int maxLength, String fieldName) {
+        String cleaned = clean(value);
+        if (cleaned != null && cleaned.length() > maxLength) {
+            throw new IllegalArgumentException(fieldName + " must not exceed " + maxLength + " characters");
+        }
+        return StringUtils.hasText(cleaned) ? cleaned : null;
     }
 }

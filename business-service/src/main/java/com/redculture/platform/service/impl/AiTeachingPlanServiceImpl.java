@@ -26,7 +26,6 @@ import com.redculture.platform.vo.request.TeachingPlanGenerateRequest;
 import org.springframework.data.neo4j.core.Neo4jClient;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
 import org.springframework.web.client.RestClient;
 
@@ -89,7 +88,6 @@ public class AiTeachingPlanServiceImpl implements AiTeachingPlanService {
     }
 
     @Override
-    @Transactional
     public TeachingActivityPlanAdminVO saveDraft(GeneratedTeachingPlanSaveRequest request) {
         validateSaveRequest(request);
         SchoolMapDetailVO detail = requireApprovedSchool(request.getSchoolId());

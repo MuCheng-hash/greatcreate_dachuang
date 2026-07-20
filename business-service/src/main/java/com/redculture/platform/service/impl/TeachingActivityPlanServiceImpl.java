@@ -17,7 +17,6 @@ import com.redculture.platform.vo.TeachingActivityPlanAdminVO;
 import com.redculture.platform.vo.request.TeachingActivityPlanCreateRequest;
 import com.redculture.platform.vo.request.TeachingActivityPlanUpdateRequest;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
 
 @Service
@@ -38,7 +37,6 @@ public class TeachingActivityPlanServiceImpl extends ServiceImpl<TeachingActivit
     }
 
     @Override
-    @Transactional
     public TeachingActivityPlanAdminVO createPlan(TeachingActivityPlanCreateRequest request) {
         validateCreateRequest(request);
         ensurePlanCodeUnique(request.getPlanCode(), null);
@@ -66,7 +64,6 @@ public class TeachingActivityPlanServiceImpl extends ServiceImpl<TeachingActivit
     }
 
     @Override
-    @Transactional
     public TeachingActivityPlanAdminVO updatePlan(Long planId, TeachingActivityPlanUpdateRequest request) {
         if (request == null) {
             throw new IllegalArgumentException("request cannot be null");

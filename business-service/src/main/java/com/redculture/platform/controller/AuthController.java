@@ -5,10 +5,13 @@ import com.redculture.platform.service.AuthService;
 import com.redculture.platform.vo.AuthCurrentUserVO;
 import com.redculture.platform.vo.SchoolRegistrationSubmitVO;
 import com.redculture.platform.vo.request.AuthLoginRequest;
+import com.redculture.platform.vo.request.AuthPasswordChangeRequest;
+import com.redculture.platform.vo.request.AuthProfileUpdateRequest;
 import com.redculture.platform.vo.request.SchoolRegisterRequest;
 import jakarta.servlet.http.HttpSession;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
@@ -44,6 +47,27 @@ public class AuthController {
     @GetMapping("/me")
     public ApiResponse<AuthCurrentUserVO> currentUser(HttpSession session) {
         return ApiResponse.success(authService.currentUser(session));
+    }
+
+    @PutMapping("/profile")
+    public ApiResponse<AuthCurrentUserVO> updateProfile(@RequestBody AuthProfileUpdateRequest request,
+                                                        HttpSession session) {
+        try {
+            return ApiResponse.success("profile updated", authService.updateProfile(request, session));
+        } catch (IllegalArgumentException exception) {
+            return ApiResponse.fail(exception.getMessage());
+        }
+    }
+
+    @PutMapping("/password")
+    public ApiResponse<Boolean> changePassword(@RequestBody AuthPasswordChangeRequest request,
+                                               HttpSession session) {
+        try {
+            authService.changePassword(request, session);
+            return ApiResponse.success("password updated", true);
+        } catch (IllegalArgumentException exception) {
+            return ApiResponse.fail(exception.getMessage());
+        }
     }
 
     @PostMapping("/logout")

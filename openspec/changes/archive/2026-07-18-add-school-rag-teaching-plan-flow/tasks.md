@@ -45,4 +45,4 @@
 - [x] 6.3 Verify the flow works when Neo4j is available and when Neo4j is unavailable.
 - [x] 6.4 Verify the flow works when real LLM credentials are configured and when only local fallback is available.
 - [x] 6.5 Add focused backend tests for request validation, context assembly, citation validation, and degraded LLM behavior.
-- [ ] 6.6 Manually verify the frontend flow from school detail to generated plan and visible citations.
+- [x] 6.6 Manually verify the frontend flow from school detail to generated plan and visible citations.

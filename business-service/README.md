@@ -18,7 +18,9 @@
 - `src/main/java/com/redculture/platform/mapper`：MyBatis-Plus Mapper。
 - `src/main/java/com/redculture/platform/config`：业务服务配置。
 - `src/main/java/com/redculture/platform/vo`：前端和接口返回对象。
-- `src/main/resources/static`：当前静态前端页面。
+- `frontend`：Vue 3 + Vite 用户门户源码。
+- `src/main/resources/static/portal`：由 Vite 生成的用户门户产物。
+- `src/main/resources/static/admin.*`：现有管理员后台页面。
 
 ## 启动
 
@@ -26,9 +28,19 @@
 mvn spring-boot:run
 ```
 
+Maven 会自动安装固定版本的 Node.js、执行 `npm ci` 并构建用户门户。前端单独开发时可运行：
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
 默认端口：
 
 - `http://localhost:8080`
+- 用户门户：`http://localhost:8080/login`
+- 管理后台：`http://localhost:8080/admin.html`
 
 常用配置：
 
