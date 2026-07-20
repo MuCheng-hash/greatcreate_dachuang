@@ -24,6 +24,10 @@ public class ApiResponse<T> {
     }
 
     public static <T> ApiResponse<T> fail(String message) {
-        return new ApiResponse<>(500, message, null);
+        return fail(500, message);
+    }
+
+    public static <T> ApiResponse<T> fail(Integer code, String message) {
+        return new ApiResponse<>(code, message, null);
     }
 }

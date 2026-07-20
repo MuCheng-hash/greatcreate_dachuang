@@ -28,20 +28,12 @@ public class AuthController {
 
     @PostMapping("/school-register")
     public ApiResponse<SchoolRegistrationSubmitVO> schoolRegister(@RequestBody SchoolRegisterRequest request) {
-        try {
-            return ApiResponse.success("registration submitted", authService.registerSchool(request));
-        } catch (IllegalArgumentException exception) {
-            return ApiResponse.fail(exception.getMessage());
-        }
+        return ApiResponse.success("registration submitted", authService.registerSchool(request));
     }
 
     @PostMapping("/login")
     public ApiResponse<AuthCurrentUserVO> login(@RequestBody AuthLoginRequest request, HttpSession session) {
-        try {
-            return ApiResponse.success("login success", authService.login(request, session));
-        } catch (IllegalArgumentException exception) {
-            return ApiResponse.fail(exception.getMessage());
-        }
+        return ApiResponse.success("login success", authService.login(request, session));
     }
 
     @GetMapping("/me")
