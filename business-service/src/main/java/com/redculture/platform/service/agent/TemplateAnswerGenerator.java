@@ -8,7 +8,6 @@ import com.redculture.platform.vo.TeachingActivityPlanVO;
 import com.redculture.platform.vo.TownMapDetailVO;
 import com.redculture.platform.vo.ai.KnowledgeGraphFactVO;
 import com.redculture.platform.vo.ai.KnowledgeRetrieveResult;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
@@ -16,7 +15,6 @@ import java.util.List;
 import java.util.stream.Collectors;
 
 @Component
-@ConditionalOnMissingBean(AnswerGenerator.class)
 public class TemplateAnswerGenerator implements AnswerGenerator {
 
     @Override
