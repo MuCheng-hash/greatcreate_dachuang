@@ -6,21 +6,38 @@ import urllib.error
 import urllib.request
 from typing import Any, Optional
 
-from flask import Flask, jsonify, request
-from flask_cors import CORS
+from fastapi import Body, FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
+from pydantic import ValidationError
 
+from agent.config import AgentSettings
+from agent.runtime import AgentRuntime
 
-app = Flask(__name__)
-CORS(app)
+settings = AgentSettings.from_env()
+app = FastAPI(title="Red Culture LLM Service", version="2.0.0")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=list(settings.allowed_origins),
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+agent_runtime = AgentRuntime(settings)
 
 
 LLM_API_URL = os.getenv("LLM_API_URL", "").strip()
+LLM_BASE_URL = os.getenv("LLM_BASE_URL", "").strip()
 LLM_API_KEY = os.getenv("LLM_API_KEY", "").strip()
 LLM_MODEL = os.getenv("LLM_MODEL", "qwen-plus").strip()
 LLM_TIMEOUT_SECONDS = float(os.getenv("LLM_TIMEOUT_SECONDS", "20"))
 
 
-def compact_list(values: list[Any], limit: int = 6) -> list[str]:
+def compact_list(values: Any, limit: int = 6) -> list[str]:
+    if isinstance(values, str):
+        values = [values]
+    if not isinstance(values, (list, tuple)):
+        return []
     result: list[str] = []
     for value in values:
         if value is None:
@@ -37,7 +54,11 @@ def resource_names(payload: dict[str, Any]) -> list[str]:
     resources = payload.get("resources") or []
     names: list[str] = []
     for item in resources:
+        if not isinstance(item, dict):
+            continue
         resource = item.get("resource") or {}
+        if not isinstance(resource, dict):
+            continue
         name = resource.get("resourceName")
         if name:
             names.append(str(name))
@@ -46,7 +67,10 @@ def resource_names(payload: dict[str, Any]) -> list[str]:
 
 def citation_ids(payload: dict[str, Any]) -> list[str]:
     candidates = payload.get("citationCandidates") or []
-    return compact_list([item.get("citationId") for item in candidates if isinstance(item, dict)], 6)
+    return compact_list(
+        [item.get("citationId") for item in candidates if isinstance(item, dict)],
+        6,
+    )
 
 
 def build_teaching_plan_fallback(payload: dict[str, Any], status: str = "degraded", message: Optional[str] = None) -> dict[str, Any]:
@@ -132,8 +156,34 @@ def build_teaching_plan_prompt(payload: dict[str, Any]) -> str:
     )
 
 
+def resolve_llm_api_url() -> Optional[str]:
+    configured_url = (LLM_API_URL or LLM_BASE_URL).strip()
+    if not configured_url:
+        return None
+    normalized = configured_url.rstrip("/")
+    return normalized if normalized.endswith("/chat/completions") else normalized + "/chat/completions"
+
+
+def parse_model_json(content: Any) -> Optional[dict[str, Any]]:
+    if isinstance(content, dict):
+        return content
+    if not isinstance(content, str):
+        return None
+    normalized = content.strip()
+    if normalized.startswith("```"):
+        normalized = normalized.split("\n", 1)[1] if "\n" in normalized else normalized
+        if normalized.endswith("```"):
+            normalized = normalized[:-3].rstrip()
+    try:
+        parsed = json.loads(normalized)
+    except (TypeError, json.JSONDecodeError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
 def call_openai_compatible(prompt: str) -> Optional[dict[str, Any]]:
-    if not LLM_API_URL or not LLM_API_KEY:
+    api_url = resolve_llm_api_url()
+    if not api_url or not LLM_API_KEY:
         return None
 
     body = {
@@ -146,7 +196,7 @@ def call_openai_compatible(prompt: str) -> Optional[dict[str, Any]]:
     }
     request_data = json.dumps(body).encode("utf-8")
     req = urllib.request.Request(
-        LLM_API_URL,
+        api_url,
         data=request_data,
         headers={
             "Content-Type": "application/json",
@@ -158,11 +208,15 @@ def call_openai_compatible(prompt: str) -> Optional[dict[str, Any]]:
         with urllib.request.urlopen(req, timeout=LLM_TIMEOUT_SECONDS) as response:
             raw = response.read().decode("utf-8")
         data = json.loads(raw)
-        content = data.get("choices", [{}])[0].get("message", {}).get("content")
+        choices = data.get("choices") if isinstance(data, dict) else None
+        if not isinstance(choices, list) or not choices:
+            return None
+        message = choices[0].get("message") if isinstance(choices[0], dict) else None
+        content = message.get("content") if isinstance(message, dict) else None
         if not content:
             return None
-        return json.loads(content)
-    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, KeyError, IndexError):
+        return parse_model_json(content)
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError, TypeError):
         return None
 
 
@@ -290,6 +344,122 @@ def build_school_ask_answer(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def agent_evidence_citation_ids(payload: dict[str, Any]) -> list[str]:
+    retrieval = payload.get("retrievalResult") or {}
+    values: list[str] = []
+    for key in ("citationCandidates", "chunks", "graphFacts"):
+        items = retrieval.get(key) or []
+        values.extend(
+            item.get("citationId")
+            for item in items
+            if isinstance(item, dict) and item.get("citationId")
+        )
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        citation_id = str(value).strip()
+        if citation_id and citation_id not in seen:
+            result.append(citation_id)
+            seen.add(citation_id)
+        if len(result) >= 8:
+            break
+    return result
+
+
+def build_agent_answer_prompt(payload: dict[str, Any]) -> str:
+    scope = payload.get("scope") or {}
+    business = payload.get("businessContext") or {}
+    retrieval = payload.get("retrievalResult") or {}
+    evidence = {
+        "chunks": (retrieval.get("chunks") or [])[:8],
+        "graphFacts": (retrieval.get("graphFacts") or [])[:8],
+        "citationCandidateIds": agent_evidence_citation_ids(payload),
+    }
+    context = {
+        "question": payload.get("question") or "",
+        "intent": payload.get("intent") or "UNKNOWN",
+        "scope": scope,
+        "grade": payload.get("grade"),
+        "theme": payload.get("theme"),
+        "businessContext": {
+            "school": business.get("school"),
+            "resources": (business.get("resources") or [])[:8],
+            "activityPlans": (business.get("activityPlans") or [])[:6],
+            "resource": business.get("resource"),
+            "matchedResource": business.get("matchedResource"),
+        },
+        "evidence": evidence,
+    }
+    return (
+        "你是学校本土思政教育 Agent 的答案生成器。只能依据给定的业务上下文和检索证据回答，"
+        "不能生成或执行 SQL、Cypher，也不能编造学校、资源、人物、来源或引用。"
+        "请只输出严格 JSON，字段必须包含 answer、citationIds、followUpQuestions。"
+        "citationIds 只能使用 evidence.citationCandidateIds 中出现的值；没有依据时返回空数组。"
+        f"上下文：{json.dumps(context, ensure_ascii=False)}"
+    )
+
+
+def build_agent_answer_fallback(payload: dict[str, Any], message: Optional[str] = None) -> dict[str, Any]:
+    scope = payload.get("scope") or {}
+    business = payload.get("businessContext") or {}
+    question = payload.get("question") or "当前问题"
+    school = business.get("school") or {}
+    school_name = school.get("schoolName") or scope.get("name") or "当前学校"
+    resources = business.get("resources") or []
+    names = [
+        (item.get("resource") or {}).get("resourceName")
+        for item in resources
+        if isinstance(item, dict) and isinstance(item.get("resource"), dict)
+        and (item.get("resource") or {}).get("resourceName")
+    ]
+    intent = payload.get("intent") or "UNKNOWN"
+    if intent == "NEARBY_RESOURCE":
+        answer = (
+            f"围绕“{question}”，{school_name}当前查询到 {len(names)} 个已关联周边资源。"
+            f"可以优先从{('、'.join(names[:5]) if names else '已审核的本土教育资源')}中，"
+            "结合学生年级、距离和活动主题进行选择。"
+        )
+    elif intent == "TEACHING_SUGGESTION":
+        answer = f"可以围绕{school_name}周边资源设计“课堂导入、现场观察、实践体验、反思展示”的活动闭环。"
+    elif intent == "RESOURCE_EXPLANATION":
+        answer = f"当前可以结合{school_name}的周边资源和检索证据，进一步说明资源背景、教育价值及适用年级。"
+    elif intent == "RELATION_QUERY":
+        answer = f"当前可以依据{school_name}的学校、资源和图谱关系证据，回答具体人物、学校与资源之间的关联。"
+    else:
+        answer = "请补充具体学校、资源或教学问题，我会结合已授权的业务数据进行回答。"
+
+    return {
+        "answer": answer,
+        "citationIds": agent_evidence_citation_ids(payload)[:5],
+        "followUpQuestions": [
+            f"{school_name}有哪些资源适合四年级学生？",
+            f"如何利用{school_name}周边资源设计一次实践活动？",
+        ],
+        "generationStatus": "degraded",
+        "message": message or "当前使用 LLM 服务本地结构化兜底结果。",
+    }
+
+
+def build_agent_answer(payload: dict[str, Any]) -> dict[str, Any]:
+    generated = call_openai_compatible(build_agent_answer_prompt(payload))
+    available_ids = set(agent_evidence_citation_ids(payload))
+    if isinstance(generated, dict) and generated.get("answer"):
+        raw_ids = generated.get("citationIds") or []
+        citation_ids = [
+            str(item) for item in raw_ids
+            if item is not None and str(item) in available_ids
+        ] if isinstance(raw_ids, list) else []
+        follow_ups = generated.get("followUpQuestions") or []
+        return {
+            "answer": str(generated.get("answer")),
+            "citationIds": compact_list(citation_ids, 5),
+            "followUpQuestions": compact_list(follow_ups, 4),
+            "generationStatus": "completed",
+            "message": "已根据受控业务上下文和检索证据生成回答。",
+        }
+    return build_agent_answer_fallback(payload, "真实 LLM 未配置或响应不可用，已使用本地兜底回答。")
+
+
 def build_structured_teaching_plan(payload: dict[str, Any]) -> dict[str, Any]:
     prompt = build_teaching_plan_prompt(payload)
     generated = call_openai_compatible(prompt)
@@ -301,34 +471,81 @@ def build_structured_teaching_plan(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 @app.post("/llm/town/explain")
-def explain_town() -> Any:
-    payload = request.get_json(silent=True) or {}
-    return jsonify(build_explain_answer(payload))
+def explain_town(payload: dict[str, Any] | None = Body(default=None)) -> Any:
+    return build_explain_answer(payload or {})
 
 
 @app.post("/llm/town/ask")
-def ask_town() -> Any:
-    payload = request.get_json(silent=True) or {}
-    return jsonify(build_ask_answer(payload))
+def ask_town(payload: dict[str, Any] | None = Body(default=None)) -> Any:
+    return build_ask_answer(payload or {})
 
 
 @app.post("/llm/school/explain")
-def explain_school() -> Any:
-    payload = request.get_json(silent=True) or {}
-    return jsonify(build_school_explain_answer(payload))
+def explain_school(payload: dict[str, Any] | None = Body(default=None)) -> Any:
+    return build_school_explain_answer(payload or {})
 
 
 @app.post("/llm/school/ask")
-def ask_school() -> Any:
-    payload = request.get_json(silent=True) or {}
-    return jsonify(build_school_ask_answer(payload))
+def ask_school(payload: dict[str, Any] | None = Body(default=None)) -> Any:
+    return build_school_ask_answer(payload or {})
+
+
+@app.post("/llm/agent/answer")
+def answer_agent(payload: dict[str, Any] | None = Body(default=None)) -> Any:
+    return build_agent_answer(payload or {})
+
+
+@app.post("/llm/agent/run")
+def run_agent(payload: dict[str, Any] | None = Body(default=None)) -> Any:
+    try:
+        return agent_runtime.run(payload or {})
+    except ValidationError as exception:
+        raise HTTPException(status_code=422, detail=exception.errors()) from exception
+    except ValueError as exception:
+        raise HTTPException(status_code=409, detail=str(exception)) from exception
+
+
+@app.post("/llm/agent/stream")
+def stream_agent(payload: dict[str, Any] | None = Body(default=None)) -> StreamingResponse:
+    return StreamingResponse(
+        agent_runtime.stream_events(payload or {}),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @app.post("/llm/teaching-plan/generate")
-def generate_teaching_plan() -> Any:
-    payload = request.get_json(silent=True) or {}
-    return jsonify(build_structured_teaching_plan(payload))
+def generate_teaching_plan(payload: dict[str, Any] | None = Body(default=None)) -> Any:
+    return build_structured_teaching_plan(payload or {})
+
+
+@app.get("/health/live")
+def health_live() -> dict[str, str]:
+    return {"status": "ok"}
+
+
+@app.get("/health/ready")
+def health_ready() -> dict[str, Any]:
+    model_chain = settings.model_chain()
+    primary = model_chain[0]
+    fallback = model_chain[1] if len(model_chain) > 1 else None
+    return {
+        "status": "ready" if settings.ready() else "not_ready",
+        "businessServiceBaseUrl": settings.internal_business_base_url,
+        "agentModelConfigured": settings.primary_model_configured(),
+        "primaryProvider": primary.provider,
+        "primaryModel": primary.model,
+        "fallbackModelConfigured": settings.fallback_model_configured(),
+        "fallbackProvider": fallback.provider if fallback else None,
+        "fallbackModel": fallback.model if fallback else None,
+    }
 
 
 if __name__ == "__main__":
-    app.run(host="127.0.0.1", port=5050, debug=True)
+    import uvicorn
+
+    uvicorn.run(app, host=settings.host, port=settings.port, workers=1)
