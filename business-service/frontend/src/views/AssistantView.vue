@@ -17,6 +17,7 @@ const chatScroll = ref(null);
 const messages = ref(loadMessages());
 const conversationId = ref(loadConversationId());
 const activeAbortController = ref(null);
+const threadId = ref(loadThreadId());
 
 const suggestions = computed(() => {
   const resourceName = schoolStore.resources[0]?.resource?.resourceName;
@@ -30,6 +31,7 @@ const suggestions = computed(() => {
 onMounted(async () => {
   await schoolStore.load();
   sessionStorage.setItem(conversationStorageKey(), conversationId.value);
+  if (threadId.value) sessionStorage.setItem(threadStorageKey(), threadId.value);
   if (!messages.value.length) {
     messages.value.push({ role: "assistant", answer: `你好，我可以结合${schoolStore.school?.schoolName || "本校"}的周边资源，协助你进行教学讲解和活动设计。`, citations: [] });
   }
@@ -37,6 +39,10 @@ onMounted(async () => {
 
 watch(messages, (value) => sessionStorage.setItem(storageKey(), JSON.stringify(value)), { deep: true });
 watch(conversationId, (value) => sessionStorage.setItem(conversationStorageKey(), value));
+watch(threadId, (value) => {
+  if (value) sessionStorage.setItem(threadStorageKey(), value);
+  else sessionStorage.removeItem(threadStorageKey());
+});
 
 function storageKey() {
   return `school-portal-assistant-session:${auth.user?.schoolId || "unknown"}`;
@@ -82,6 +88,14 @@ function generationStatusClass(status) {
   return `generation-${status || "unknown"}`;
 }
 
+function threadStorageKey() {
+  return `school-portal-assistant-thread:${auth.user?.schoolId || "unknown"}`;
+}
+
+function loadThreadId() {
+  return sessionStorage.getItem(threadStorageKey()) || "";
+}
+
 async function explain() {
   await requestAssistant("请介绍本校周边可用于思政教学的资源。");
 }
@@ -108,10 +122,11 @@ async function requestAssistant(userText) {
   try {
     const requestBody = {
       question: userText,
-      conversationId: conversationId.value,
+      threadId: threadId.value || null,
       scopeType: "SCHOOL",
       scopeId: schoolStore.school?.schoolId || auth.user?.schoolId || null
     };
+    if (!threadId.value) requestBody.conversationId = conversationId.value;
     let finalReceived = false;
     let streamError = null;
 
@@ -122,6 +137,7 @@ async function requestAssistant(userText) {
         signal: abortController.signal,
         onEvent(eventName, data) {
           if (data?.conversationId) conversationId.value = data.conversationId;
+          if (data?.threadId) threadId.value = data.threadId;
           if (eventName === "run.started") {
             assistantMessage.runId = data.runId;
             assistantMessage.streamStatus = "Agent 已启动";
@@ -140,6 +156,7 @@ async function requestAssistant(userText) {
             finalReceived = true;
             applyAssistantResult(assistantMessage, data.response || {});
             if (data.response?.conversationId) conversationId.value = data.response.conversationId;
+            if (data.response?.threadId) threadId.value = data.response.threadId;
             assistantMessage.streamStatus = "回答完成";
           } else if (eventName === "error") {
             streamError = new Error(data.message || "Agent 流式服务异常");
@@ -159,6 +176,7 @@ async function requestAssistant(userText) {
       const result = await api.post("/api/ai/qa/ask", {
         question: userText,
         conversationId: conversationId.value,
+        threadId: threadId.value || null,
         scopeType: "SCHOOL",
         scopeId: schoolStore.school?.schoolId || auth.user?.schoolId || null
       });
@@ -192,11 +210,13 @@ function applyAssistantResult(message, result) {
     clarificationMessage: result?.clarificationMessage || "",
     clarificationOptions: result?.clarificationOptions || [],
     conversationId: result?.conversationId || message.conversationId,
+    threadId: result?.threadId || message.threadId,
     runId: result?.runId || message.runId,
     fallbackLevel: result?.fallbackLevel || null,
     streamStatus: result?.generationStatus === "degraded" ? "已使用降级回答" : "回答完成"
   });
   if (result?.conversationId) conversationId.value = result.conversationId;
+  if (result?.threadId) threadId.value = result.threadId;
 }
 
 function toolLabel(toolName) {
@@ -219,9 +239,11 @@ async function scrollToBottom() {
 
 function clearChat() {
   messages.value = [];
+  threadId.value = "";
   sessionStorage.removeItem(storageKey());
   sessionStorage.removeItem(conversationStorageKey());
   conversationId.value = makeConversationId();
+  sessionStorage.removeItem(threadStorageKey());
 }
 </script>
 

@@ -2,28 +2,22 @@ from __future__ import annotations
 
 import json
 import os
+import uvicorn
 import urllib.error
 import urllib.request
 from typing import Any, Optional
 
 from fastapi import Body, FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import ValidationError
+from llm_service.api import create_app
 
 from agent.config import AgentSettings
 from agent.runtime import AgentRuntime
 
 settings = AgentSettings.from_env()
-app = FastAPI(title="Red Culture LLM Service", version="2.0.0")
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=list(settings.allowed_origins),
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 agent_runtime = AgentRuntime(settings)
+app = create_app()
 
 
 LLM_API_URL = os.getenv("LLM_API_URL", "").strip()
@@ -546,6 +540,4 @@ def health_ready() -> dict[str, Any]:
 
 
 if __name__ == "__main__":
-    import uvicorn
-
     uvicorn.run(app, host=settings.host, port=settings.port, workers=1)

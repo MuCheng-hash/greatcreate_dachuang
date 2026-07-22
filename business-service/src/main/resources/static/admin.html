@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>后台管理台 | 乡村学校思政资源地图</title>
     <meta name="description" content="乡村学校周边思政教育资源数字地图平台后台管理台。">
-    <link rel="stylesheet" href="/admin.css?v=20260618a">
+    <link rel="stylesheet" href="/admin.css?v=20260720b">
 </head>
 <body>
 <div class="admin-shell">
@@ -53,6 +53,7 @@
         <button class="tab-chip" data-tab="registrations" type="button">注册审核</button>
         <button class="tab-chip is-active" data-tab="schools" type="button">学校管理</button>
         <button class="tab-chip" data-tab="resources" type="button">资源管理</button>
+        <button class="tab-chip" data-tab="discovery" type="button">AI 候选审核</button>
         <button class="tab-chip" data-tab="relations" type="button">周边关联</button>
         <button class="tab-chip" data-tab="plans" type="button">活动方案</button>
     </section>
@@ -426,6 +427,94 @@
                             </tr>
                             </thead>
                             <tbody id="resourceTableBody"></tbody>
+                        </table>
+                    </div>
+                </article>
+            </div>
+        </section>
+
+        <section class="workspace-panel" data-panel="discovery">
+            <div class="panel-heading">
+                <div>
+                    <p class="eyebrow">Module AI</p>
+                    <h2>周边候选资源审核</h2>
+                </div>
+                <div class="panel-tools">
+                    <select id="discoveryFilterSchoolSelect" class="line-input"><option value="">全部学校</option></select>
+                    <select id="discoveryAnalysisFilter" class="line-input">
+                        <option value="">全部分析状态</option>
+                        <option value="unanalyzed">待分析</option>
+                        <option value="completed">已分析</option>
+                        <option value="failed">分析失败</option>
+                    </select>
+                    <select id="discoveryDecisionFilter" class="line-input">
+                        <option value="">全部审核状态</option>
+                        <option value="pending">待审核</option>
+                        <option value="approved">已通过</option>
+                        <option value="rejected">已驳回</option>
+                    </select>
+                    <button class="ghost-button" id="discoverySearchButton" type="button">查询</button>
+                </div>
+            </div>
+
+            <div class="discovery-refresh-bar">
+                <strong>重新挖掘</strong>
+                <select id="discoveryRefreshSchoolSelect"><option value="">选择学校</option></select>
+                <select id="discoveryRadiusInput">
+                    <option value="1">1 公里</option><option value="3">3 公里</option>
+                    <option value="5" selected>5 公里</option><option value="10">10 公里</option>
+                </select>
+                <button class="accent-button" id="discoveryForceRefreshButton" type="button">强制刷新</button>
+                <span class="status-box" id="discoveryRunStatus">选择学校后可重新调用高德与 LLM。</span>
+            </div>
+
+            <div class="workspace-grid discovery-grid">
+                <article class="form-card">
+                    <div class="card-topline">
+                        <h3>候选详情</h3>
+                        <span class="status-box" id="discoveryVerificationText">未经审核</span>
+                    </div>
+                    <form id="discoveryReviewForm" class="data-form">
+                        <input id="discoveryCandidateIdInput" type="hidden">
+                        <label><span>学校</span><input id="discoverySchoolNameInput" type="text" readonly></label>
+                        <label><span>高德场所 ID</span><input id="discoveryProviderIdInput" type="text" readonly></label>
+                        <label><span>资源名称</span><input id="discoveryResourceNameInput" type="text"></label>
+                        <div class="field-grid two-col">
+                            <label><span>资源分类</span>
+                                <select id="discoveryCategoryInput">
+                                    <option value="red_culture">红色文化</option><option value="intangible_culture">非遗文化</option>
+                                    <option value="traditional_culture">传统文化</option><option value="local_history">地方历史</option>
+                                    <option value="public_culture">公共文化</option><option value="labor_education">劳动教育</option>
+                                    <option value="public_welfare">公益实践</option><option value="ecological_civilization">生态文明</option>
+                                    <option value="patriotism_base">爱国主义基地</option><option value="social_practice">社会实践</option>
+                                    <option value="other">其他</option>
+                                </select>
+                            </label>
+                            <label><span>资源子类</span><input id="discoverySubcategoryInput" type="text"></label>
+                        </div>
+                        <label><span>地址与距离</span><input id="discoveryAddressInput" type="text" readonly></label>
+                        <label><span>AI 推荐理由 / 教育价值</span><textarea id="discoveryEducationValueInput"></textarea></label>
+                        <label><span>适用年级</span><input id="discoveryTargetGradeInput" type="text"></label>
+                        <label><span>活动建议</span><textarea id="discoveryActivitySuggestionInput"></textarea></label>
+                        <label><span>人工核验事项</span><textarea id="discoveryVerificationNotesInput" readonly></textarea></label>
+                        <div class="field-grid two-col">
+                            <label><span>审核人</span><input id="discoveryReviewerInput" type="text" placeholder="例如：admin"></label>
+                            <label><span>审核意见</span><input id="discoveryReviewRemarkInput" type="text"></label>
+                        </div>
+                        <div class="form-actions">
+                            <button class="accent-button" id="discoveryApproveButton" type="button">批准入库</button>
+                            <button class="ghost-button" id="discoveryRejectButton" type="button">驳回</button>
+                            <button class="ghost-button" id="discoveryReopenButton" type="button">重新打开</button>
+                        </div>
+                    </form>
+                </article>
+
+                <article class="table-card">
+                    <div class="card-topline"><h3>候选列表</h3><span class="mini-stat" id="discoveryListCount">0 条</span></div>
+                    <div class="table-shell">
+                        <table>
+                            <thead><tr><th>场所</th><th>地图分类</th><th>AI 判断</th><th>状态</th><th>操作</th></tr></thead>
+                            <tbody id="discoveryTableBody"></tbody>
                         </table>
                     </div>
                 </article>

@@ -7,6 +7,7 @@ import com.redculture.platform.service.TownMapService;
 import com.redculture.platform.service.agent.AnswerGenerator;
 import com.redculture.platform.service.agent.AgentAccessGuard;
 import com.redculture.platform.service.agent.AgentRuntimeClient;
+import com.redculture.platform.service.agent.AgentRuntimeResult;
 import com.redculture.platform.service.agent.CitationValidator;
 import com.redculture.platform.service.agent.GeneratedAnswer;
 import com.redculture.platform.service.agent.KeywordIntentRecognizer;
@@ -210,6 +211,27 @@ class AgentQaServiceImplTest {
         verify(retriever, never()).retrieve(any());
     }
 
+    @Test
+    void exposesStatefulRuntimeMetadataWhenFastApiAgentResponds() {
+        KnowledgeRetriever retriever = mock(KnowledgeRetriever.class);
+        when(retriever.retrieve(any(KnowledgeRetrieveRequest.class))).thenReturn(okResult());
+        AgentRuntimeClient runtime = mock(AgentRuntimeClient.class);
+        when(runtime.generate(any(), any(), any())).thenReturn(new AgentRuntimeResult(
+                new GeneratedAnswer("Agent 回答", List.of("chunk:1"), List.of("继续追问")),
+                "thread-1", "completed", List.of("retrieve_knowledge")
+        ));
+        AgentQaServiceImpl service = newRuntimeService(retriever, runtime);
+        AgentQaRequest request = request("请介绍这个资源的教育价值。");
+        request.setThreadId("thread-1");
+
+        AgentQaResponse response = service.ask(request, schoolUser());
+
+        assertEquals("thread-1", response.getThreadId());
+        assertEquals("completed", response.getStatus());
+        assertEquals(List.of("retrieve_knowledge"), response.getToolExecutions());
+        assertEquals("Agent 回答", response.getAnswer());
+    }
+
     private AgentQaServiceImpl newService(KnowledgeRetriever retriever, GeneratedAnswer answer) {
         SchoolMapService schoolMapService = mock(SchoolMapService.class);
         when(schoolMapService.getSchoolDetail(1L)).thenReturn(schoolDetail());
@@ -226,6 +248,21 @@ class AgentQaServiceImplTest {
                 new KeywordIntentRecognizer(),
                 answerGenerator,
                 new CitationValidator()
+        );
+    }
+
+    private AgentQaServiceImpl newRuntimeService(KnowledgeRetriever retriever, AgentRuntimeClient runtime) {
+        SchoolMapService schoolMapService = mock(SchoolMapService.class);
+        when(schoolMapService.getSchoolDetail(1L)).thenReturn(schoolDetail());
+        return new AgentQaServiceImpl(
+                schoolMapService,
+                mock(TownMapService.class),
+                mock(LocalEduResourceService.class),
+                retriever,
+                new KeywordIntentRecognizer(),
+                context -> new GeneratedAnswer("fallback", List.of(), List.of()),
+                new CitationValidator(),
+                runtime
         );
     }
 

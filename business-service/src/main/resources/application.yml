@@ -37,9 +37,16 @@ app:
     generated-boundary-radius-km: 1.2
     amap-key: ${AMAP_WEB_KEY:0b5095fedd1afcec744da426d736612a}
     amap-security-js-code: ${AMAP_SECURITY_JS_CODE:}
+    amap-web-service-key: ${AMAP_WEB_SERVICE_KEY:}
+    amap-web-service-base-url: ${AMAP_WEB_SERVICE_BASE_URL:https://restapi.amap.com}
     llm-service-base-url: ${LLM_SERVICE_BASE_URL:http://127.0.0.1:5050}
   agent:
     internal-service-token: ${AGENT_INTERNAL_SERVICE_TOKEN:}
     connect-timeout-ms: ${AGENT_CONNECT_TIMEOUT_MS:3000}
     read-timeout-ms: ${AGENT_READ_TIMEOUT_MS:30000}
     stream-timeout-ms: ${AGENT_STREAM_TIMEOUT_MS:65000}
+    agent-runtime-enabled: ${AGENT_RUNTIME_ENABLED:true}
+    discovery-cache-hours: ${DISCOVERY_CACHE_HOURS:24}
+    discovery-max-candidates: ${DISCOVERY_MAX_CANDIDATES:50}
+    discovery-llm-batch-size: ${DISCOVERY_LLM_BATCH_SIZE:20}
+    discovery-min-confidence: ${DISCOVERY_MIN_CONFIDENCE:0.60}

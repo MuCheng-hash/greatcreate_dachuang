@@ -1,6 +1,8 @@
 package com.redculture.platform.enums;
 
 import com.baomidou.mybatisplus.annotation.EnumValue;
+import com.fasterxml.jackson.annotation.JsonCreator;
+import com.fasterxml.jackson.annotation.JsonValue;
 import lombok.Getter;
 import lombok.RequiredArgsConstructor;
 
@@ -21,4 +23,23 @@ public enum ResourceCategory {
 
     @EnumValue
     private final String value;
+
+    @JsonCreator
+    public static ResourceCategory fromValue(String value) {
+        if (value == null) {
+            return null;
+        }
+        String normalized = value.trim();
+        for (ResourceCategory category : values()) {
+            if (category.value.equalsIgnoreCase(normalized) || category.name().equalsIgnoreCase(normalized)) {
+                return category;
+            }
+        }
+        throw new IllegalArgumentException("unsupported resourceCategory: " + value);
+    }
+
+    @JsonValue
+    public String getValue() {
+        return value;
+    }
 }

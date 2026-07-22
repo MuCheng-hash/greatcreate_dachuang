@@ -10,6 +10,7 @@ import lombok.Data;
 import lombok.EqualsAndHashCode;
 
 import java.math.BigDecimal;
+import java.time.LocalDateTime;
 
 @Data
 @EqualsAndHashCode(callSuper = true)
@@ -84,6 +85,15 @@ public class LocalEduResource extends BaseAuditEntity {
 
     @TableField("source_id")
     private Long sourceId;
+
+    @TableField("external_provider")
+    private String externalProvider;
+
+    @TableField("external_place_id")
+    private String externalPlaceId;
+
+    @TableField("source_checked_at")
+    private LocalDateTime sourceCheckedAt;
 
     @TableField("review_status")
     private ReviewStatus reviewStatus;

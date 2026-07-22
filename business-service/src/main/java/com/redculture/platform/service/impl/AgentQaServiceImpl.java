@@ -11,6 +11,7 @@ import com.redculture.platform.service.TownMapService;
 import com.redculture.platform.service.agent.AgentAnswerContext;
 import com.redculture.platform.service.agent.AgentAccessGuard;
 import com.redculture.platform.service.agent.AgentRuntimeClient;
+import com.redculture.platform.service.agent.AgentRuntimeResult;
 import com.redculture.platform.service.agent.AnswerGenerator;
 import com.redculture.platform.service.agent.CitationValidator;
 import com.redculture.platform.service.agent.GeneratedAnswer;
@@ -114,6 +115,20 @@ public class AgentQaServiceImpl implements AgentQaService {
         this(schoolMapService, townMapService, localEduResourceService, knowledgeRetriever,
                 intentRecognizer, answerGenerator, citationValidator,
                 new AgentAccessGuard(schoolMapService), null, new AgentProperties());
+    }
+
+    /** Compatibility constructor for the stateful runtime path. */
+    public AgentQaServiceImpl(SchoolMapService schoolMapService,
+                              TownMapService townMapService,
+                              LocalEduResourceService localEduResourceService,
+                              KnowledgeRetriever knowledgeRetriever,
+                              IntentRecognizer intentRecognizer,
+                               AnswerGenerator answerGenerator,
+                               CitationValidator citationValidator,
+                               AgentRuntimeClient agentRuntimeClient) {
+        this(schoolMapService, townMapService, localEduResourceService, knowledgeRetriever,
+                intentRecognizer, answerGenerator, citationValidator,
+                new AgentAccessGuard(schoolMapService), agentRuntimeClient, new AgentProperties());
     }
 
     @Override
@@ -405,16 +420,19 @@ public class AgentQaServiceImpl implements AgentQaService {
         KnowledgeRetrieveResult retrieval = retrieve(context, request.getTopK());
         context.setRetrieval(retrieval);
 
-        GeneratedAnswer generated;
-        try {
-            generated = answerGenerator.generate(context);
-        } catch (RuntimeException exception) {
-            generated = new GeneratedAnswer(
-                    "暂时无法生成完整回答，请稍后重试。",
-                    List.of(),
-                    List.of(),
-                    AgentGenerationStatus.DEGRADED
-            );
+        AgentRuntimeResult remote = agentRuntimeClient == null ? null : agentRuntimeClient.generate(request, currentUser, context);
+        GeneratedAnswer generated = remote == null ? null : remote.getAnswer();
+        if (generated == null) {
+            try {
+                generated = answerGenerator.generate(context);
+            } catch (RuntimeException exception) {
+                generated = new GeneratedAnswer(
+                        "暂时无法生成完整回答，请稍后重试。",
+                        List.of(),
+                        List.of(),
+                        AgentGenerationStatus.DEGRADED
+                );
+            }
         }
         if (generated == null) {
             generated = new GeneratedAnswer(
@@ -437,6 +455,9 @@ public class AgentQaServiceImpl implements AgentQaService {
         response.setRelatedResources(relatedResources(context));
         response.setCitations(validatedCitations(generated, retrieval));
         response.setFollowUpQuestions(nonNullList(generated.getFollowUpQuestions()));
+        response.setThreadId(remote == null ? request.getThreadId() : remote.getThreadId());
+        response.setStatus(remote == null ? "degraded" : remote.getStatus());
+        response.setToolExecutions(remote == null ? new ArrayList<>() : nonNullList(remote.getToolExecutions()));
         return response;
     }
 

@@ -5,6 +5,8 @@ import lombok.Data;
 @Data
 public class AgentQaRequest {
 
+    private String threadId;
+
     private String question;
 
     private String conversationId;

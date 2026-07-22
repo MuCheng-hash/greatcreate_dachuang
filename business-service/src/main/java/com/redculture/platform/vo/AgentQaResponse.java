@@ -10,6 +10,10 @@ import java.util.List;
 @Data
 public class AgentQaResponse {
 
+    private String threadId;
+
+    private String status;
+
     private String answer;
 
     private String conversationId;
@@ -39,4 +43,6 @@ public class AgentQaResponse {
     private String clarificationMessage;
 
     private List<String> clarificationOptions = new ArrayList<>();
+
+    private List<String> toolExecutions = new ArrayList<>();
 }

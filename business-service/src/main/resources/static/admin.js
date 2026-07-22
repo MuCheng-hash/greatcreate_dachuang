@@ -3,6 +3,7 @@ const adminState = {
     registrations: [],
     schools: [],
     resources: [],
+    discoveryCandidates: [],
     selectedSchoolIdForRelations: null,
     selectedSchoolIdForPlans: null
 };
@@ -88,6 +89,35 @@ const adminElements = {
     resourceTableBody: document.querySelector("#resourceTableBody"),
     resourceListCount: document.querySelector("#resourceListCount"),
 
+    discoveryFilterSchoolSelect: document.querySelector("#discoveryFilterSchoolSelect"),
+    discoveryAnalysisFilter: document.querySelector("#discoveryAnalysisFilter"),
+    discoveryDecisionFilter: document.querySelector("#discoveryDecisionFilter"),
+    discoverySearchButton: document.querySelector("#discoverySearchButton"),
+    discoveryRefreshSchoolSelect: document.querySelector("#discoveryRefreshSchoolSelect"),
+    discoveryRadiusInput: document.querySelector("#discoveryRadiusInput"),
+    discoveryForceRefreshButton: document.querySelector("#discoveryForceRefreshButton"),
+    discoveryRunStatus: document.querySelector("#discoveryRunStatus"),
+    discoveryReviewForm: document.querySelector("#discoveryReviewForm"),
+    discoveryCandidateIdInput: document.querySelector("#discoveryCandidateIdInput"),
+    discoverySchoolNameInput: document.querySelector("#discoverySchoolNameInput"),
+    discoveryProviderIdInput: document.querySelector("#discoveryProviderIdInput"),
+    discoveryResourceNameInput: document.querySelector("#discoveryResourceNameInput"),
+    discoveryCategoryInput: document.querySelector("#discoveryCategoryInput"),
+    discoverySubcategoryInput: document.querySelector("#discoverySubcategoryInput"),
+    discoveryAddressInput: document.querySelector("#discoveryAddressInput"),
+    discoveryEducationValueInput: document.querySelector("#discoveryEducationValueInput"),
+    discoveryTargetGradeInput: document.querySelector("#discoveryTargetGradeInput"),
+    discoveryActivitySuggestionInput: document.querySelector("#discoveryActivitySuggestionInput"),
+    discoveryVerificationNotesInput: document.querySelector("#discoveryVerificationNotesInput"),
+    discoveryReviewerInput: document.querySelector("#discoveryReviewerInput"),
+    discoveryReviewRemarkInput: document.querySelector("#discoveryReviewRemarkInput"),
+    discoveryApproveButton: document.querySelector("#discoveryApproveButton"),
+    discoveryRejectButton: document.querySelector("#discoveryRejectButton"),
+    discoveryReopenButton: document.querySelector("#discoveryReopenButton"),
+    discoveryVerificationText: document.querySelector("#discoveryVerificationText"),
+    discoveryTableBody: document.querySelector("#discoveryTableBody"),
+    discoveryListCount: document.querySelector("#discoveryListCount"),
+
     relationForm: document.querySelector("#relationForm"),
     relationIdInput: document.querySelector("#relationIdInput"),
     relationSchoolSelect: document.querySelector("#relationSchoolSelect"),
@@ -163,6 +193,12 @@ function bindAdminEvents() {
     adminElements.resourceRefreshButton?.addEventListener("click", () => void loadResources());
     adminElements.resourceResetButton?.addEventListener("click", resetResourceForm);
 
+    adminElements.discoverySearchButton?.addEventListener("click", () => void loadDiscoveryCandidates());
+    adminElements.discoveryForceRefreshButton?.addEventListener("click", () => void forceDiscoveryRefresh());
+    adminElements.discoveryApproveButton?.addEventListener("click", () => void runDiscoveryReview("approve"));
+    adminElements.discoveryRejectButton?.addEventListener("click", () => void runDiscoveryReview("reject"));
+    adminElements.discoveryReopenButton?.addEventListener("click", () => void runDiscoveryReview("reopen"));
+
     adminElements.relationForm?.addEventListener("submit", async event => {
         event.preventDefault();
         await submitRelationForm();
@@ -201,6 +237,7 @@ async function bootstrapAdmin() {
             loadRegistrations(),
             loadSchools(),
             loadResources(),
+            loadDiscoveryCandidates(),
             loadPlans()
         ]);
         syncSelectOptions();
@@ -594,11 +631,114 @@ async function runResourceAction(resourceId, action) {
     await loadResources();
 }
 
+async function loadDiscoveryCandidates() {
+    const params = new URLSearchParams({ pageNum: "1", pageSize: "100" });
+    const schoolId = parseNullableNumber(adminElements.discoveryFilterSchoolSelect?.value);
+    const analysisStatus = adminElements.discoveryAnalysisFilter?.value || "";
+    const decisionStatus = adminElements.discoveryDecisionFilter?.value || "";
+    if (schoolId) params.set("schoolId", String(schoolId));
+    if (analysisStatus) params.set("analysisStatus", analysisStatus);
+    if (decisionStatus) params.set("decisionStatus", decisionStatus);
+    const result = await requestJson(`/api/admin/resource-discovery-candidates?${params}`);
+    adminState.discoveryCandidates = result.records || [];
+    renderDiscoveryCandidates(adminState.discoveryCandidates);
+}
+
+function renderDiscoveryCandidates(records) {
+    if (!adminElements.discoveryTableBody) return;
+    adminElements.discoveryListCount.textContent = `${records.length} 条`;
+    adminElements.discoveryTableBody.innerHTML = "";
+    if (!records.length) {
+        adminElements.discoveryTableBody.innerHTML = `<tr><td colspan="5">暂无 AI 候选资源。</td></tr>`;
+        return;
+    }
+    records.forEach(record => {
+        const tr = document.createElement("tr");
+        const confidence = record.aiConfidence == null ? "待分析" : `${Math.round(Number(record.aiConfidence) * 100)}%`;
+        tr.innerHTML = `
+            <td><strong>${escapeHtml(record.placeName || "-")}</strong><div class="status-box">${escapeHtml(distanceText(record.distanceMeters))}</div></td>
+            <td>${escapeHtml(record.providerTypeName || "-")}</td>
+            <td>${escapeHtml(record.aiCategory || "待分析")}<div class="status-box">${escapeHtml(confidence)}</div></td>
+            <td>${renderStatus(record.decisionStatus)}</td>
+            <td><button class="action-button" data-action="view">审核</button></td>`;
+        tr.querySelector('[data-action="view"]').addEventListener("click", () => fillDiscoveryReviewForm(record));
+        adminElements.discoveryTableBody.appendChild(tr);
+    });
+}
+
+function fillDiscoveryReviewForm(record) {
+    const school = adminState.schools.find(item => item.schoolId === record.schoolId);
+    adminElements.discoveryCandidateIdInput.value = record.candidateId || "";
+    adminElements.discoverySchoolNameInput.value = school?.schoolName || `学校 ${record.schoolId}`;
+    adminElements.discoveryProviderIdInput.value = record.providerPlaceId || "";
+    adminElements.discoveryResourceNameInput.value = record.placeName || "";
+    adminElements.discoveryCategoryInput.value = record.aiCategory || "other";
+    adminElements.discoverySubcategoryInput.value = record.aiSubcategory || record.providerTypeName || "";
+    adminElements.discoveryAddressInput.value = `${record.address || "地址待核实"} · ${distanceText(record.distanceMeters)}`;
+    adminElements.discoveryEducationValueInput.value = record.aiRationale || "";
+    adminElements.discoveryTargetGradeInput.value = record.targetGrades || "";
+    adminElements.discoveryActivitySuggestionInput.value = record.activitySuggestion || "";
+    adminElements.discoveryVerificationNotesInput.value = record.verificationNotes || "请核实地点真实性、开放时间、联系方式和接待条件。";
+    adminElements.discoveryReviewerInput.value = record.reviewedBy || "admin";
+    adminElements.discoveryReviewRemarkInput.value = record.reviewRemark || "";
+    adminElements.discoveryVerificationText.textContent = `${record.analysisStatus || "unanalyzed"} / ${record.decisionStatus || "pending"}`;
+    setActiveTab("discovery");
+}
+
+async function runDiscoveryReview(action) {
+    const candidateId = parseNullableNumber(adminElements.discoveryCandidateIdInput?.value);
+    if (!candidateId) {
+        setGlobalStatus("请选择候选", "请先从候选列表选择一个场所。");
+        return;
+    }
+    const body = {
+        resourceName: optionalText(adminElements.discoveryResourceNameInput.value),
+        resourceCategory: adminElements.discoveryCategoryInput.value,
+        resourceSubcategory: optionalText(adminElements.discoverySubcategoryInput.value),
+        educationValue: optionalText(adminElements.discoveryEducationValueInput.value),
+        targetGrade: optionalText(adminElements.discoveryTargetGradeInput.value),
+        activitySuggestion: optionalText(adminElements.discoveryActivitySuggestionInput.value),
+        reviewerName: optionalText(adminElements.discoveryReviewerInput.value),
+        reviewRemark: optionalText(adminElements.discoveryReviewRemarkInput.value)
+    };
+    await requestJson(`/api/admin/resource-discovery-candidates/${candidateId}/${action}`, { method: "POST", body });
+    setGlobalStatus("操作成功", action === "approve" ? "候选已转为正式资源。" : action === "reject" ? "候选已驳回。" : "候选已重新打开。" );
+    adminElements.discoveryReviewForm?.reset();
+    await Promise.all([loadDiscoveryCandidates(), loadResources()]);
+    syncSelectOptions();
+}
+
+async function forceDiscoveryRefresh() {
+    const schoolId = parseNullableNumber(adminElements.discoveryRefreshSchoolSelect?.value);
+    const radiusKm = parseNullableNumber(adminElements.discoveryRadiusInput?.value) || 5;
+    if (!schoolId) {
+        setGlobalStatus("请选择学校", "强制刷新前需要指定学校。");
+        return;
+    }
+    adminElements.discoveryRunStatus.textContent = "正在调用高德与 LLM...";
+    let run = await requestJson(`/api/admin/schools/${schoolId}/discovery-runs`, { method: "POST", body: { radiusKm } });
+    for (let attempt = 0; run && ["pending", "running"].includes(run.status) && attempt < 15; attempt += 1) {
+        await new Promise(resolve => setTimeout(resolve, 2000));
+        run = await requestJson(`/api/school-map/schools/${schoolId}/discovery-runs/${run.runId}`);
+    }
+    adminElements.discoveryRunStatus.textContent = run?.status === "completed"
+        ? `完成：${run.candidateCount || 0} 个候选，${run.analysisCount || 0} 个已分析。`
+        : run?.errorMessage || "任务仍在后台运行。";
+    await loadDiscoveryCandidates();
+}
+
+function distanceText(meters) {
+    if (meters == null) return "距离待计算";
+    return meters >= 1000 ? `${(meters / 1000).toFixed(1)} 公里` : `${meters} 米`;
+}
+
 function syncSelectOptions() {
     fillOptionSelect(adminElements.relationSchoolSelect, adminState.schools, "schoolId", "schoolName");
     fillOptionSelect(adminElements.relationFilterSchoolSelect, adminState.schools, "schoolId", "schoolName", "请选择学校查看关联");
     fillOptionSelect(adminElements.planSchoolSelect, adminState.schools, "schoolId", "schoolName");
     fillOptionSelect(adminElements.planFilterSchoolSelect, adminState.schools, "schoolId", "schoolName", "请选择学校查看方案");
+    fillOptionSelect(adminElements.discoveryFilterSchoolSelect, adminState.schools, "schoolId", "schoolName", "全部学校");
+    fillOptionSelect(adminElements.discoveryRefreshSchoolSelect, adminState.schools, "schoolId", "schoolName", "选择学校");
     fillOptionSelect(adminElements.relationResourceSelect, adminState.resources, "resourceId", "resourceName");
     fillOptionSelect(adminElements.planResourceSelect, adminState.resources, "resourceId", "resourceName", "可不关联具体资源");
 

@@ -7,16 +7,11 @@ import com.redculture.platform.vo.ai.KnowledgeGraphFactVO;
 import com.redculture.platform.vo.ai.KnowledgeRetrieveRequest;
 import com.redculture.platform.vo.ai.KnowledgeRetrieveResult;
 import com.redculture.platform.vo.ai.KnowledgeRetrievalStatus;
-import org.springframework.context.annotation.Profile;
-import org.springframework.stereotype.Component;
-
 import java.util.List;
 
 /**
- * RAG 真实实现不可用时的本地联调实现。仅在 mock-rag profile 下启用。
+ * RAG 真实实现不可用时的本地联调实现，由 AgentQaFallbackConfig 按缺失 Bean 条件提供。
  */
-@Component
-@Profile("mock-rag")
 public class MockKnowledgeRetriever implements KnowledgeRetriever {
 
     @Override

@@ -5,8 +5,11 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.redculture.platform.config.AgentProperties;
 import com.redculture.platform.config.AppMapProperties;
+import com.redculture.platform.vo.AgentCitationVO;
+import com.redculture.platform.vo.AuthCurrentUserVO;
 import com.redculture.platform.vo.ai.AgentRuntimeRequest;
 import com.redculture.platform.vo.ai.AgentRuntimeResponse;
+import com.redculture.platform.vo.request.AgentQaRequest;
 import org.springframework.http.MediaType;
 import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.stereotype.Component;
@@ -15,11 +18,14 @@ import org.springframework.web.client.RestClient;
 
 import java.io.BufferedReader;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.function.Consumer;
 
@@ -28,6 +34,7 @@ public class AgentRuntimeClient {
 
     private final RestClient restClient;
     private final ObjectMapper objectMapper;
+    private final AppMapProperties appMapProperties;
 
     public AgentRuntimeClient(AppMapProperties appMapProperties,
                               AgentProperties agentProperties,
@@ -37,6 +44,7 @@ public class AgentRuntimeClient {
                 .requestFactory(requestFactory(agentProperties))
                 .build();
         this.objectMapper = objectMapper;
+        this.appMapProperties = appMapProperties;
     }
 
     public AgentRuntimeResponse run(AgentRuntimeRequest request) {
@@ -51,6 +59,56 @@ public class AgentRuntimeClient {
             throw new IllegalStateException("agent runtime returned an empty response");
         }
         return response;
+    }
+
+    /** Calls the stateful runtime after Java has resolved authorization and trusted context. */
+    public AgentRuntimeResult generate(AgentQaRequest request,
+                                       AuthCurrentUserVO user,
+                                       AgentAnswerContext context) {
+        if (!appMapProperties.isAgentRuntimeEnabled()
+                || !StringUtils.hasText(appMapProperties.getLlmServiceBaseUrl())) {
+            return null;
+        }
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("ownerId", ownerId(user));
+        body.put("scopeType", context.getScopeType().name());
+        body.put("scopeId", context.getScopeId());
+        body.put("threadId", request.getThreadId());
+        body.put("message", context.getQuestion());
+        body.put("grade", context.getGrade());
+        body.put("theme", context.getTheme());
+        body.put("intent", context.getIntent() == null ? null : context.getIntent().name());
+        body.put("context", trustedContext(context));
+        try {
+            StatefulAgentRuntimeResponse response = restClient.post()
+                    .uri("/agent/messages")
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .accept(MediaType.APPLICATION_JSON)
+                    .body(body)
+                    .retrieve()
+                    .body(StatefulAgentRuntimeResponse.class);
+            if (response == null || !StringUtils.hasText(response.getAnswer())) {
+                return null;
+            }
+            List<String> citationIds = response.getCitations() == null ? new ArrayList<>()
+                    : response.getCitations().stream()
+                    .map(AgentCitationVO::getCitationId)
+                    .filter(StringUtils::hasText)
+                    .toList();
+            List<String> followUps = response.getFollowUpQuestions() == null ? new ArrayList<>()
+                    : response.getFollowUpQuestions();
+            List<String> toolNames = response.getToolExecutions() == null ? new ArrayList<>()
+                    : response.getToolExecutions().stream()
+                    .map(ToolExecutionResponse::getName)
+                    .filter(StringUtils::hasText)
+                    .toList();
+            return new AgentRuntimeResult(
+                    new GeneratedAnswer(response.getAnswer(), citationIds, followUps),
+                    response.getThreadId(), response.getStatus(), toolNames
+            );
+        } catch (RuntimeException ignored) {
+            return null;
+        }
     }
 
     public void stream(AgentRuntimeRequest request, Consumer<StreamEvent> consumer) {
@@ -70,7 +128,28 @@ public class AgentRuntimeClient {
                 });
     }
 
-    private void readEvents(java.io.InputStream inputStream, Consumer<StreamEvent> consumer) {
+    private String ownerId(AuthCurrentUserVO user) {
+        if (user.getAccountId() != null) {
+            return "account:" + user.getAccountId();
+        }
+        return "username:" + (user.getUsername() == null ? "unknown" : user.getUsername());
+    }
+
+    private Map<String, Object> trustedContext(AgentAnswerContext context) {
+        Map<String, Object> trusted = new LinkedHashMap<>();
+        if (context.getSchoolDetail() != null) {
+            trusted.put("school", context.getSchoolDetail().getSchool());
+            trusted.put("resources", context.getSchoolDetail().getResources());
+        }
+        trusted.put("region", context.getRegionDetail());
+        trusted.put("resource", context.getResource());
+        trusted.put("retrieval", context.getRetrieval());
+        trusted.put("citationCandidates", context.getRetrieval() == null
+                ? List.of() : context.getRetrieval().getCitationCandidates());
+        return trusted;
+    }
+
+    private void readEvents(InputStream inputStream, Consumer<StreamEvent> consumer) {
         if (inputStream == null) {
             throw new IllegalStateException("agent stream body is empty");
         }
@@ -135,5 +214,22 @@ public class AgentRuntimeClient {
         public Map<String, Object> safeData() {
             return data == null ? Collections.emptyMap() : data;
         }
+    }
+
+    @lombok.Data
+    private static class StatefulAgentRuntimeResponse {
+        private String threadId;
+        private String answer;
+        private String status;
+        private List<AgentCitationVO> citations = new ArrayList<>();
+        private List<String> followUpQuestions = new ArrayList<>();
+        private List<ToolExecutionResponse> toolExecutions = new ArrayList<>();
+    }
+
+    @lombok.Data
+    private static class ToolExecutionResponse {
+        private String name;
+        private String status;
+        private Integer durationMs;
     }
 }

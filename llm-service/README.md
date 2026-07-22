@@ -1,19 +1,72 @@
-# LLM Service
+# Stateful Agent Service
 
-本目录是独立 LLM 服务入口，负责地图讲解、学校周边资源问答、教学方案生成和 Agent 运行时。Agent 使用 FastAPI + LangChain，业务数据和 RAG 通过 Java 内部受控工具接口访问。
+本目录是独立 LLM 服务入口，负责地图讲解、学校周边资源问答、教学方案生成和 Agent 运行时。Agent 使用 FastAPI + LangChain/LangGraph，业务数据和 RAG 通过 Java 内部受控工具接口访问。
 
-## 启动
+This service is the model-facing runtime for the platform. It provides typed read-only tools, owner-scoped conversation threads, SQLite persistence for local development, and explicit degraded responses when no model is configured.
 
-```bash
-pip install -r requirements.txt
+## Start
+
+```powershell
+python -m venv .venv
+& .venv/Scripts/Activate.ps1
+python -m pip install -r requirements.txt
 python app.py
 ```
 
-默认监听：
+The default address is `http://127.0.0.1:5050`.
 
-- `http://127.0.0.1:5050`
+## Configuration
 
-已提供接口：
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `LLM_API_URL` | empty | OpenAI-compatible Chat Completions URL; `/chat/completions` may be included |
+| `LLM_API_KEY` | empty | Provider credential |
+| `LLM_MODEL` | `qwen-plus` | Provider model name |
+| `LLM_TIMEOUT_SECONDS` | `20` | Model request timeout |
+| `DATABASE_PATH` | `data/agent-state.sqlite3` | Durable local conversation store |
+| `ALLOWED_ORIGINS` | empty | Comma-separated browser origins; empty means no CORS middleware |
+| `AGENT_CONTEXT_TOKEN_BUDGET` | `6000` | Approximate input budget |
+| `AGENT_MAX_TOOL_ROUNDS` | `6` | Maximum model/tool loop rounds |
+
+Without `LLM_API_URL` and `LLM_API_KEY`, the service still stores conversations and returns a clearly marked `degraded` answer based only on trusted business context.
+
+## Stateful Agent API
+
+Create a thread:
+
+```http
+POST /agent/threads
+Content-Type: application/json
+
+{"ownerId":"account:1","scopeType":"SCHOOL","scopeId":1}
+```
+
+Send a turn (omit `threadId` for the first turn):
+
+```http
+POST /agent/messages
+Content-Type: application/json
+
+{
+  "ownerId": "account:1",
+  "scopeType": "SCHOOL",
+  "scopeId": 1,
+  "message": "附近有哪些适合四年级的资源？",
+  "threadId": null,
+  "context": {
+    "school": {"schoolName": "里庄小学"},
+    "resources": [],
+    "retrieval": {"retrievalStatus": "empty", "chunks": [], "graphFacts": []},
+    "citationCandidates": []
+  }
+}
+```
+
+The response contains `threadId`, `status`, `citations`, `toolExecutions`, related resources, and follow-up questions. Reuse the returned `threadId` for subsequent turns. The public Spring endpoint remains `/api/ai/qa/ask`; Spring supplies the authenticated owner and trusted context before calling this service.
+
+## Legacy workflows
+
+These deterministic routes remain compatible during migration:
 
 - `POST /llm/town/explain`
 - `POST /llm/town/ask`
@@ -31,8 +84,9 @@ LangChain Agent，根据受控工具结果生成结构化答案；`/llm/agent/st
 返回运行、工具、模型和最终结果事件。Agent 不执行 SQL 或 Cypher，引用只能来自
 工具返回的证据。未配置真实模型或模型响应不可用时，接口返回
 `generationStatus=degraded` 和本地结构化兜底答案。
+- `POST /llm/resource-discovery/classify`
 
-结构化教学方案生成接口支持本地兜底。如果配置了 OpenAI-compatible 模型服务，会优先调用真实模型：
+Teaching-plan generation and POI classification are structured workflows, not open-ended conversations. They use the same asynchronous LangChain model adapter and retain local fallbacks.
 
 - `LLM_API_URL`：模型接口地址
 - `LLM_BASE_URL`：可选的兼容接口基础地址；配置后服务会自动补充 `/chat/completions`
@@ -93,3 +147,7 @@ Agent 运行时通用配置：
 首版使用内存 Checkpointer，服务重启后会话状态会丢失；生产环境再替换为 Redis 或其他持久化 Checkpointer。
 运行日志会携带 `runId`、`conversationId`、模型、提示词版本、工具名称、耗时、token usage、
 生成/检索状态、降级级别和错误类型；模型未返回 usage 时保持为空，不伪造统计数据。
+
+## Tool and security boundary
+
+The Agent can only call the registered read-only tools for the trusted context supplied by Spring: scope context, approved resources, retrieved knowledge, and graph facts. It cannot execute arbitrary SQL, Cypher, URLs, shell commands, or change the owner/scope. Tool calls are bounded, audited, and citation IDs are filtered against supplied evidence.

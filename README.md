@@ -40,7 +40,7 @@ python --version
 | --- | --- | --- |
 | MySQL | `localhost:3306` | 是 |
 | Spring Boot 业务服务 | `http://localhost:8080` | 是 |
-| Flask LLM 服务 | `http://127.0.0.1:5050` | 否 |
+| FastAPI Stateful Agent 服务 | `http://127.0.0.1:5050` | 否 |
 | Neo4j Bolt | `bolt://127.0.0.1:7687` | 否 |
 
 最小可运行组合是 MySQL + Spring Boot 业务服务。LLM 和 Neo4j 可以根据需要再启动。
@@ -64,6 +64,12 @@ SOURCE data/sql/mysql_red_culture_all_in_one.sql;
 ```
 
 该脚本会创建 `red_culture_platform` 数据库、表结构和演示数据。
+
+已有数据库升级到 AI 周边资源发现功能时，不要重置全库，改为执行增量脚本：
+
+```sql
+SOURCE data/sql/mysql_ai_poi_resource_discovery.sql;
+```
 
 > **数据重置警告：** `mysql_red_culture_all_in_one.sql` 会先执行 `DROP TABLE`，删除并重建项目相关表。它只适合首次初始化或数据可以丢弃的本地开发库，不要对包含有效数据的数据库直接执行。全量脚本已经合并学校、认证和样例数据内容，导入后不要再重复执行 `data/sql/` 下的拆分脚本。
 
@@ -92,6 +98,7 @@ SOURCE D:/path/to/greatcreate_dachuang/data/sql/mysql_red_culture_all_in_one.sql
 | `APP_ADMIN_DISPLAY_NAME` | 平台管理员显示名 | `平台管理员` |
 | `AMAP_WEB_KEY` | 高德地图 Web 端 Key | 建议配置自己的 Key |
 | `AMAP_SECURITY_JS_CODE` | 高德地图安全密钥 | 默认空值 |
+| `AMAP_WEB_SERVICE_KEY` | 服务端高德 Web 服务 Key，用于周边 POI 检索和详情 | 空；未配置时仅显示正式资源 |
 | `LLM_SERVICE_BASE_URL` | 前端访问 LLM 服务的地址 | `http://127.0.0.1:5050` |
 | `NEO4J_URI` | Neo4j Bolt 地址 | `bolt://127.0.0.1:7687` |
 | `NEO4J_USERNAME` | Neo4j 用户名 | `neo4j` |
@@ -105,9 +112,12 @@ $env:APP_ADMIN_PASSWORD = "请替换为本地开发密码"
 $env:APP_ADMIN_DISPLAY_NAME = "平台管理员"
 $env:AMAP_WEB_KEY = "请替换为高德地图 Web 端 Key"
 $env:AMAP_SECURITY_JS_CODE = "请替换为高德地图安全密钥"
+$env:AMAP_WEB_SERVICE_KEY = "请替换为具有 Web 服务权限的高德 Key"
 ```
 
 默认管理员账号 `admin / admin123456` 仅用于本地开发。非本地环境必须通过 `APP_ADMIN_USERNAME` 和 `APP_ADMIN_PASSWORD` 覆盖默认值。
+
+`AMAP_WEB_SERVICE_KEY` 只由业务服务读取，不会返回浏览器。教师进入“地图资源”后会自动读取 24 小时缓存或启动周边候选发现；未配置该 Key 时，正式资源地图仍可正常使用。
 
 ### 3. 启动业务服务
 
