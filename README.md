@@ -40,7 +40,7 @@ python --version
 | --- | --- | --- |
 | MySQL | `localhost:3306` | 是 |
 | Spring Boot 业务服务 | `http://localhost:8080` | 是 |
-| Flask LLM 服务 | `http://127.0.0.1:5050` | 否 |
+| FastAPI Stateful Agent 服务 | `http://127.0.0.1:5050` | 否 |
 | Neo4j Bolt | `bolt://127.0.0.1:7687` | 否 |
 
 最小可运行组合是 MySQL + Spring Boot 业务服务。LLM 和 Neo4j 可以根据需要再启动。

@@ -23,8 +23,11 @@ import com.redculture.platform.vo.ai.TeachingPlanContextVO;
 import com.redculture.platform.vo.request.GeneratedTeachingPlanSaveRequest;
 import com.redculture.platform.vo.request.TeachingActivityPlanCreateRequest;
 import com.redculture.platform.vo.request.TeachingPlanGenerateRequest;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.data.neo4j.core.Neo4jClient;
 import org.springframework.http.MediaType;
+import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
 import org.springframework.web.client.RestClient;
@@ -47,6 +50,7 @@ import java.util.stream.Collectors;
 @Service
 public class AiTeachingPlanServiceImpl implements AiTeachingPlanService {
 
+    private static final Logger log = LoggerFactory.getLogger(AiTeachingPlanServiceImpl.class);
     private static final int MAX_CONTENT_CHUNKS = 12;
     private static final int MAX_CITATIONS = 8;
 
@@ -302,7 +306,13 @@ public class AiTeachingPlanServiceImpl implements AiTeachingPlanService {
             return null;
         }
         try {
-            return RestClient.create(appMapProperties.getLlmServiceBaseUrl())
+            SimpleClientHttpRequestFactory requestFactory = new SimpleClientHttpRequestFactory();
+            requestFactory.setConnectTimeout(3_000);
+            requestFactory.setReadTimeout(60_000);
+            return RestClient.builder()
+                    .baseUrl(appMapProperties.getLlmServiceBaseUrl())
+                    .requestFactory(requestFactory)
+                    .build()
                     .post()
                     .uri("/llm/teaching-plan/generate")
                     .contentType(MediaType.APPLICATION_JSON)
@@ -311,6 +321,8 @@ public class AiTeachingPlanServiceImpl implements AiTeachingPlanService {
                     .retrieve()
                     .body(GeneratedTeachingPlanResponse.class);
         } catch (Exception exception) {
+            log.warn("LLM teaching-plan request failed for endpoint {}: {}",
+                    appMapProperties.getLlmServiceBaseUrl(), exception.getMessage(), exception);
             return null;
         }
     }

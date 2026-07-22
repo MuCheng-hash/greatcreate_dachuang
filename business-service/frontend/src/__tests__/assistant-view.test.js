@@ -22,6 +22,7 @@ describe("assistant view", () => {
     vi.clearAllMocks();
     schoolMock.load.mockResolvedValue(schoolMock);
     apiMock.post.mockResolvedValue({
+      threadId: "thread-1",
       answer: "已找到相关资源。",
       relatedResources: ["常安镇敬老院"],
       citations: [{ citationId: "chunk:1", title: "敬老服务资源说明", excerpt: "资源说明" }],
@@ -51,5 +52,29 @@ describe("assistant view", () => {
     });
     expect(wrapper.text()).toContain("已找到相关资源。");
     expect(wrapper.text()).toContain("敬老服务资源说明");
+  });
+
+  it("reuses the server thread id on the next turn", async () => {
+    const wrapper = mount(AssistantView, {
+      global: {
+        stubs: {
+          AppShell: { template: "<div><slot /></div>" },
+          InlineNotice: true
+        }
+      }
+    });
+    await flushPromises();
+    await wrapper.get("textarea").setValue("第一轮问题");
+    await wrapper.get("form").trigger("submit.prevent");
+    await flushPromises();
+    await wrapper.get("textarea").setValue("它适合四年级吗？");
+    await wrapper.get("form").trigger("submit.prevent");
+    await flushPromises();
+    expect(apiMock.post).toHaveBeenLastCalledWith("/api/ai/qa/ask", {
+      question: "它适合四年级吗？",
+      scopeType: "SCHOOL",
+      scopeId: 1,
+      threadId: "thread-1"
+    });
   });
 });

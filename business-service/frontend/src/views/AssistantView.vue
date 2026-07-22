@@ -15,6 +15,7 @@ const loading = ref(false);
 const error = ref("");
 const chatScroll = ref(null);
 const messages = ref(loadMessages());
+const threadId = ref(loadThreadId());
 
 const suggestions = computed(() => {
   const resourceName = schoolStore.resources[0]?.resource?.resourceName;
@@ -33,6 +34,10 @@ onMounted(async () => {
 });
 
 watch(messages, (value) => sessionStorage.setItem(storageKey(), JSON.stringify(value)), { deep: true });
+watch(threadId, (value) => {
+  if (value) sessionStorage.setItem(threadStorageKey(), value);
+  else sessionStorage.removeItem(threadStorageKey());
+});
 
 function storageKey() {
   return `school-portal-assistant-session:${auth.user?.schoolId || "unknown"}`;
@@ -40,6 +45,14 @@ function storageKey() {
 
 function loadMessages() {
   try { return JSON.parse(sessionStorage.getItem(storageKey()) || "[]"); } catch { return []; }
+}
+
+function threadStorageKey() {
+  return `school-portal-assistant-thread:${auth.user?.schoolId || "unknown"}`;
+}
+
+function loadThreadId() {
+  return sessionStorage.getItem(threadStorageKey()) || "";
 }
 
 async function explain() {
@@ -59,11 +72,14 @@ async function requestAssistant(userText) {
   loading.value = true;
   await scrollToBottom();
   try {
-    const result = await api.post("/api/ai/qa/ask", {
+    const payload = {
       question: userText,
       scopeType: "SCHOOL",
       scopeId: schoolStore.school?.schoolId || auth.user?.schoolId || null
-    });
+    };
+    if (threadId.value) payload.threadId = threadId.value;
+    const result = await api.post("/api/ai/qa/ask", payload);
+    if (result.threadId) threadId.value = result.threadId;
     messages.value.push({
       role: "assistant", answer: result.answer || "服务未返回回答。",
       relatedResources: result.relatedResources || [], citations: result.citations || [],
@@ -90,7 +106,9 @@ async function scrollToBottom() {
 
 function clearChat() {
   messages.value = [];
+  threadId.value = "";
   sessionStorage.removeItem(storageKey());
+  sessionStorage.removeItem(threadStorageKey());
 }
 </script>
 

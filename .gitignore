@@ -46,3 +46,5 @@ venv/
 
 # Generated runtime files
 hs_err_pid*
+llm-service/data/*.sqlite3*
+llm-service/*.sqlite3*

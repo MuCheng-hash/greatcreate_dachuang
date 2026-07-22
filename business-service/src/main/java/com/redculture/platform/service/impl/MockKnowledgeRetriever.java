@@ -7,16 +7,11 @@ import com.redculture.platform.vo.ai.KnowledgeGraphFactVO;
 import com.redculture.platform.vo.ai.KnowledgeRetrieveRequest;
 import com.redculture.platform.vo.ai.KnowledgeRetrieveResult;
 import com.redculture.platform.vo.ai.KnowledgeRetrievalStatus;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
-import org.springframework.stereotype.Component;
-
 import java.util.List;
 
 /**
  * RAG 真实实现合入前的本地联调实现。真实 KnowledgeRetriever Bean 存在时会自动失效。
  */
-@Component
-@ConditionalOnMissingBean(KnowledgeRetriever.class)
 public class MockKnowledgeRetriever implements KnowledgeRetriever {
 
     @Override

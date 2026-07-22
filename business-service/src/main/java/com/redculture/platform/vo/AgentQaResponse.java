@@ -10,6 +10,10 @@ import java.util.List;
 @Data
 public class AgentQaResponse {
 
+    private String threadId;
+
+    private String status;
+
     private String answer;
 
     private AgentIntent intent;
@@ -25,4 +29,6 @@ public class AgentQaResponse {
     private List<AgentCitationVO> citations = new ArrayList<>();
 
     private List<String> followUpQuestions = new ArrayList<>();
+
+    private List<String> toolExecutions = new ArrayList<>();
 }

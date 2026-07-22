@@ -8,6 +8,8 @@ import com.redculture.platform.service.LocalEduResourceService;
 import com.redculture.platform.service.SchoolMapService;
 import com.redculture.platform.service.TownMapService;
 import com.redculture.platform.service.agent.AgentAnswerContext;
+import com.redculture.platform.service.agent.AgentRuntimeClient;
+import com.redculture.platform.service.agent.AgentRuntimeResult;
 import com.redculture.platform.service.agent.AnswerGenerator;
 import com.redculture.platform.service.agent.CitationValidator;
 import com.redculture.platform.service.agent.GeneratedAnswer;
@@ -25,6 +27,7 @@ import com.redculture.platform.vo.ai.KnowledgeScopeType;
 import com.redculture.platform.vo.request.AgentQaRequest;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
+import org.springframework.beans.factory.annotation.Autowired;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -44,6 +47,8 @@ public class AgentQaServiceImpl implements AgentQaService {
     private final AnswerGenerator answerGenerator;
     private final CitationValidator citationValidator;
 
+    private final AgentRuntimeClient agentRuntimeClient;
+
     public AgentQaServiceImpl(SchoolMapService schoolMapService,
                               TownMapService townMapService,
                               LocalEduResourceService localEduResourceService,
@@ -51,6 +56,19 @@ public class AgentQaServiceImpl implements AgentQaService {
                               IntentRecognizer intentRecognizer,
                               AnswerGenerator answerGenerator,
                               CitationValidator citationValidator) {
+        this(schoolMapService, townMapService, localEduResourceService, knowledgeRetriever,
+                intentRecognizer, answerGenerator, citationValidator, null);
+    }
+
+    @Autowired
+    public AgentQaServiceImpl(SchoolMapService schoolMapService,
+                              TownMapService townMapService,
+                              LocalEduResourceService localEduResourceService,
+                              KnowledgeRetriever knowledgeRetriever,
+                              IntentRecognizer intentRecognizer,
+                              AnswerGenerator answerGenerator,
+                              CitationValidator citationValidator,
+                              AgentRuntimeClient agentRuntimeClient) {
         this.schoolMapService = schoolMapService;
         this.townMapService = townMapService;
         this.localEduResourceService = localEduResourceService;
@@ -58,6 +76,7 @@ public class AgentQaServiceImpl implements AgentQaService {
         this.intentRecognizer = intentRecognizer;
         this.answerGenerator = answerGenerator;
         this.citationValidator = citationValidator;
+        this.agentRuntimeClient = agentRuntimeClient;
     }
 
     @Override
@@ -83,7 +102,8 @@ public class AgentQaServiceImpl implements AgentQaService {
         KnowledgeRetrieveResult retrieval = retrieve(context, request.getTopK());
         context.setRetrieval(retrieval);
 
-        GeneratedAnswer generated = answerGenerator.generate(context);
+        AgentRuntimeResult remote = agentRuntimeClient == null ? null : agentRuntimeClient.generate(request, currentUser, context);
+        GeneratedAnswer generated = remote == null ? answerGenerator.generate(context) : remote.getAnswer();
         if (generated == null) {
             generated = new GeneratedAnswer("暂时无法生成回答，请稍后重试。", List.of(), List.of());
         }
@@ -97,6 +117,9 @@ public class AgentQaServiceImpl implements AgentQaService {
         response.setRelatedResources(relatedResources(context));
         response.setCitations(citationValidator.filter(generated.getCitationIds(), retrieval));
         response.setFollowUpQuestions(nonNullList(generated.getFollowUpQuestions()));
+        response.setThreadId(remote == null ? request.getThreadId() : remote.getThreadId());
+        response.setStatus(remote == null ? "degraded" : remote.getStatus());
+        response.setToolExecutions(remote == null ? new ArrayList<>() : nonNullList(remote.getToolExecutions()));
         return response;
     }
 
