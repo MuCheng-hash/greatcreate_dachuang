@@ -14,6 +14,7 @@ const adminElements = {
     resourceTotalMetric: document.querySelector("#resourceTotalMetric"),
     planTotalMetric: document.querySelector("#planTotalMetric"),
     refreshDashboardButton: document.querySelector("#refreshDashboardButton"),
+    logoutButton: document.querySelector("#logoutButton"),
     tabButtons: Array.from(document.querySelectorAll(".tab-chip")),
     panels: Array.from(document.querySelectorAll(".workspace-panel")),
 
@@ -134,6 +135,7 @@ function bindAdminEvents() {
     adminElements.refreshDashboardButton?.addEventListener("click", () => {
         void bootstrapAdmin();
     });
+    adminElements.logoutButton?.addEventListener("click", () => void logoutAdmin());
 
     adminElements.tabButtons.forEach(button => {
         button.addEventListener("click", () => setActiveTab(button.dataset.tab || "schools"));
@@ -189,7 +191,7 @@ async function bootstrapAdmin() {
     try {
         const currentUser = await requestJson("/api/auth/me");
         if (!currentUser?.accountId) {
-            window.location.href = "/";
+            window.location.href = "/login";
             return;
         }
         if (currentUser.roleCode !== "platform_admin") {
@@ -206,6 +208,26 @@ async function bootstrapAdmin() {
         setGlobalStatus("在线", "后台接口联通正常，可以开始录入和维护数据。");
     } catch (error) {
         setGlobalStatus("异常", error.message || "后台接口请求失败。");
+    }
+}
+
+async function logoutAdmin() {
+    const button = adminElements.logoutButton;
+    const originalLabel = button?.textContent || "退出登录";
+    if (button) {
+        button.disabled = true;
+        button.textContent = "退出中...";
+    }
+
+    try {
+        await requestJson("/api/auth/logout", { method: "POST", credentials: "same-origin" });
+        window.location.replace("/login");
+    } catch (error) {
+        setGlobalStatus("退出失败", error.message || "退出登录失败，请稍后重试。");
+        if (button) {
+            button.disabled = false;
+            button.textContent = originalLabel;
+        }
     }
 }
 
