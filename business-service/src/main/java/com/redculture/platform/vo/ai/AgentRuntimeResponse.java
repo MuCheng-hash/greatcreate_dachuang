@@ -1,14 +1,13 @@
-package com.redculture.platform.vo;
+package com.redculture.platform.vo.ai;
 
-import com.redculture.platform.vo.ai.KnowledgeRetrievalStatus;
-import com.redculture.platform.vo.ai.KnowledgeScopeType;
+import com.redculture.platform.vo.AgentCitationVO;
 import lombok.Data;
 
 import java.util.ArrayList;
 import java.util.List;
 
 @Data
-public class AgentQaResponse {
+public class AgentRuntimeResponse {
 
     private String answer;
 
@@ -16,21 +15,21 @@ public class AgentQaResponse {
 
     private String runId;
 
-    private String fallbackLevel;
+    private String intent;
 
-    private AgentIntent intent;
+    private String generationStatus;
 
-    private KnowledgeRetrievalStatus retrievalStatus;
+    private String retrievalStatus;
 
-    private AgentGenerationStatus generationStatus = AgentGenerationStatus.COMPLETED;
-
-    private KnowledgeScopeType scopeType;
+    private String scopeType;
 
     private Long scopeId;
 
     private List<String> relatedResources = new ArrayList<>();
 
     private List<AgentCitationVO> citations = new ArrayList<>();
+
+    private List<String> citationIds = new ArrayList<>();
 
     private List<String> followUpQuestions = new ArrayList<>();
 
@@ -39,4 +38,14 @@ public class AgentQaResponse {
     private String clarificationMessage;
 
     private List<String> clarificationOptions = new ArrayList<>();
+
+    private String message;
+
+    private String fallbackLevel;
+
+    private String promptVersion;
+
+    private Integer inputTokens;
+
+    private Integer outputTokens;
 }

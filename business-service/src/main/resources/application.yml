@@ -38,3 +38,8 @@ app:
     amap-key: ${AMAP_WEB_KEY:0b5095fedd1afcec744da426d736612a}
     amap-security-js-code: ${AMAP_SECURITY_JS_CODE:}
     llm-service-base-url: ${LLM_SERVICE_BASE_URL:http://127.0.0.1:5050}
+  agent:
+    internal-service-token: ${AGENT_INTERNAL_SERVICE_TOKEN:}
+    connect-timeout-ms: ${AGENT_CONNECT_TIMEOUT_MS:3000}
+    read-timeout-ms: ${AGENT_READ_TIMEOUT_MS:30000}
+    stream-timeout-ms: ${AGENT_STREAM_TIMEOUT_MS:65000}

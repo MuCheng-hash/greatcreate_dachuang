@@ -5,9 +5,13 @@ import com.redculture.platform.service.LocalEduResourceService;
 import com.redculture.platform.service.SchoolMapService;
 import com.redculture.platform.service.TownMapService;
 import com.redculture.platform.service.agent.AnswerGenerator;
+import com.redculture.platform.service.agent.AgentAccessGuard;
+import com.redculture.platform.service.agent.AgentRuntimeClient;
 import com.redculture.platform.service.agent.CitationValidator;
 import com.redculture.platform.service.agent.GeneratedAnswer;
 import com.redculture.platform.service.agent.KeywordIntentRecognizer;
+import com.redculture.platform.vo.AgentGenerationStatus;
+import com.redculture.platform.vo.AgentCitationVO;
 import com.redculture.platform.vo.AgentIntent;
 import com.redculture.platform.vo.AgentQaResponse;
 import com.redculture.platform.vo.AuthCurrentUserVO;
@@ -20,8 +24,10 @@ import com.redculture.platform.vo.ai.KnowledgeCitationCandidateVO;
 import com.redculture.platform.vo.ai.KnowledgeRetrieveRequest;
 import com.redculture.platform.vo.ai.KnowledgeRetrieveResult;
 import com.redculture.platform.vo.ai.KnowledgeRetrievalStatus;
+import com.redculture.platform.vo.ai.AgentRuntimeResponse;
 import com.redculture.platform.vo.request.AgentQaRequest;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 
 import java.util.Collections;
 import java.util.List;
@@ -29,6 +35,7 @@ import java.util.List;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -36,6 +43,53 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class AgentQaServiceImplTest {
+
+    @Test
+    void usesFastApiRuntimeAndKeepsConversationMetadata() {
+        SchoolMapService schoolMapService = mock(SchoolMapService.class);
+        KnowledgeRetriever retriever = mock(KnowledgeRetriever.class);
+        AgentRuntimeClient runtimeClient = mock(AgentRuntimeClient.class);
+        AgentRuntimeResponse runtimeResponse = new AgentRuntimeResponse();
+        runtimeResponse.setAnswer("Agent 回答");
+        runtimeResponse.setConversationId("conversation-1");
+        runtimeResponse.setRunId("run-1");
+        runtimeResponse.setIntent("NEARBY_RESOURCE");
+        runtimeResponse.setGenerationStatus("completed");
+        runtimeResponse.setRetrievalStatus("ok");
+        AgentCitationVO citation = new AgentCitationVO();
+        citation.setCitationId("chunk:1");
+        citation.setTitle("受控证据");
+        runtimeResponse.setCitations(List.of(citation));
+        when(runtimeClient.run(any())).thenReturn(runtimeResponse);
+
+        AgentQaServiceImpl service = new AgentQaServiceImpl(
+                schoolMapService,
+                mock(TownMapService.class),
+                mock(LocalEduResourceService.class),
+                retriever,
+                new KeywordIntentRecognizer(),
+                context -> new GeneratedAnswer("不应调用", List.of(), List.of()),
+                new CitationValidator(),
+                new AgentAccessGuard(schoolMapService),
+                runtimeClient
+        );
+        AgentQaRequest request = request("附近有哪些红色资源？");
+        request.setConversationId("conversation-1");
+        request.setScopeType("SCHOOL");
+        request.setScopeId(1L);
+        AuthCurrentUserVO user = schoolUser();
+        user.setAccountId(1L);
+
+        AgentQaResponse response = service.ask(request, user);
+
+        assertEquals("Agent 回答", response.getAnswer());
+        assertEquals("conversation-1", response.getConversationId());
+        assertEquals("run-1", response.getRunId());
+        assertEquals(AgentIntent.NEARBY_RESOURCE, response.getIntent());
+        assertEquals(1, response.getCitations().size());
+        verify(runtimeClient).run(any());
+        verify(retriever, never()).retrieve(any());
+    }
 
     @Test
     void buildsSchoolScopedRetrievalAndKeepsOnlyValidCitations() {
@@ -52,6 +106,50 @@ class AgentQaServiceImplTest {
         assertEquals("chunk:1", response.getCitations().get(0).getCitationId());
         assertFalse(response.getRelatedResources().isEmpty());
         verify(retriever).retrieve(any(KnowledgeRetrieveRequest.class));
+    }
+
+    @Test
+    void resolvesSchoolNameAndGradeForAdministrator() {
+        KnowledgeRetriever retriever = mock(KnowledgeRetriever.class);
+        when(retriever.retrieve(any(KnowledgeRetrieveRequest.class))).thenReturn(okResult());
+        AgentQaServiceImpl service = newService(retriever, new GeneratedAnswer("回答", List.of(), List.of()));
+
+        AgentQaRequest request = request("里庄小学附近有哪些红色资源？适合四年级去？");
+        AgentQaResponse response = service.ask(request, adminUser());
+
+        assertEquals(1L, response.getScopeId());
+        assertEquals(AgentGenerationStatus.COMPLETED, response.getGenerationStatus());
+        ArgumentCaptor<KnowledgeRetrieveRequest> captor = ArgumentCaptor.forClass(KnowledgeRetrieveRequest.class);
+        verify(retriever).retrieve(captor.capture());
+        assertEquals(1L, captor.getValue().getScopeId());
+        assertEquals("四年级", captor.getValue().getGrade());
+    }
+
+    @Test
+    void asksForClarificationWhenAdministratorScopeIsAmbiguous() {
+        KnowledgeRetriever retriever = mock(KnowledgeRetriever.class);
+        AgentQaServiceImpl service = newService(retriever, new GeneratedAnswer("回答", List.of(), List.of()));
+
+        AgentQaResponse response = service.ask(
+                request("里庄小学和示例小学附近有哪些红色资源？"),
+                adminUser()
+        );
+
+        assertTrue(response.isClarificationRequired());
+        assertEquals(KnowledgeRetrievalStatus.EMPTY, response.getRetrievalStatus());
+        assertEquals(AgentGenerationStatus.SKIPPED, response.getGenerationStatus());
+        assertEquals(List.of("里庄小学", "示例小学"), response.getClarificationOptions());
+        verify(retriever, never()).retrieve(any());
+    }
+
+    @Test
+    void rejectsMentionedOtherSchoolForSchoolAccount() {
+        KnowledgeRetriever retriever = mock(KnowledgeRetriever.class);
+        AgentQaServiceImpl service = newService(retriever, new GeneratedAnswer("回答", List.of(), List.of()));
+
+        assertThrows(IllegalArgumentException.class,
+                () -> service.ask(request("示例小学附近有哪些红色资源？"), schoolUser()));
+        verify(retriever, never()).retrieve(any());
     }
 
     @Test
@@ -75,6 +173,18 @@ class AgentQaServiceImplTest {
         AgentQaResponse response = service.ask(request("附近有哪些红色资源？"), schoolUser());
 
         assertEquals(KnowledgeRetrievalStatus.EMPTY, response.getRetrievalStatus());
+    }
+
+    @Test
+    void supplementsRealCitationsWhenGeneratorReturnsNone() {
+        KnowledgeRetriever retriever = mock(KnowledgeRetriever.class);
+        when(retriever.retrieve(any())).thenReturn(okResult());
+        AgentQaServiceImpl service = newService(retriever, new GeneratedAnswer("回答", List.of(), List.of()));
+
+        AgentQaResponse response = service.ask(request("附近有哪些红色资源？"), schoolUser());
+
+        assertEquals(1, response.getCitations().size());
+        assertEquals("chunk:1", response.getCitations().get(0).getCitationId());
     }
 
     @Test
@@ -103,6 +213,10 @@ class AgentQaServiceImplTest {
     private AgentQaServiceImpl newService(KnowledgeRetriever retriever, GeneratedAnswer answer) {
         SchoolMapService schoolMapService = mock(SchoolMapService.class);
         when(schoolMapService.getSchoolDetail(1L)).thenReturn(schoolDetail());
+        when(schoolMapService.listSchools(null, null, null, 100)).thenReturn(List.of(
+                schoolSummary(1L, "里庄小学"),
+                schoolSummary(2L, "示例小学")
+        ));
         AnswerGenerator answerGenerator = context -> answer;
         return new AgentQaServiceImpl(
                 schoolMapService,
@@ -126,6 +240,19 @@ class AgentQaServiceImplTest {
         user.setRoleCode("school_admin");
         user.setSchoolId(1L);
         return user;
+    }
+
+    private AuthCurrentUserVO adminUser() {
+        AuthCurrentUserVO user = new AuthCurrentUserVO();
+        user.setRoleCode("platform_admin");
+        return user;
+    }
+
+    private SchoolSummaryVO schoolSummary(Long schoolId, String schoolName) {
+        SchoolSummaryVO school = new SchoolSummaryVO();
+        school.setSchoolId(schoolId);
+        school.setSchoolName(schoolName);
+        return school;
     }
 
     private SchoolMapDetailVO schoolDetail() {
