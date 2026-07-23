@@ -1,31 +1,45 @@
 package com.redculture.platform.config;
 
-import com.redculture.platform.entity.SchoolUserAccount;
-import com.redculture.platform.enums.AccountStatus;
-import com.redculture.platform.service.SchoolUserAccountService;
-import com.redculture.platform.service.impl.AuthServiceImpl;
+import com.redculture.platform.service.AuthService;
+import com.redculture.platform.service.auth.AuthCookieManager;
+import com.redculture.platform.service.auth.AuthTokenException;
+import com.redculture.platform.service.auth.JwtTokenService;
+import com.redculture.platform.vo.AuthCurrentUserVO;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import org.springframework.stereotype.Component;
+import org.springframework.util.StringUtils;
 import org.springframework.web.servlet.HandlerInterceptor;
 
 @Component
 public class AuthenticatedUserInterceptor implements HandlerInterceptor {
 
-    private final SchoolUserAccountService schoolUserAccountService;
+    private final AuthService authService;
+    private final JwtTokenService jwtTokenService;
+    private final AuthCookieManager cookieManager;
 
-    public AuthenticatedUserInterceptor(SchoolUserAccountService schoolUserAccountService) {
-        this.schoolUserAccountService = schoolUserAccountService;
+    public AuthenticatedUserInterceptor(AuthService authService,
+                                       JwtTokenService jwtTokenService,
+                                       AuthCookieManager cookieManager) {
+        this.authService = authService;
+        this.jwtTokenService = jwtTokenService;
+        this.cookieManager = cookieManager;
     }
 
     @Override
     public boolean preHandle(HttpServletRequest request, HttpServletResponse response, Object handler) throws Exception {
-        Object accountId = request.getSession().getAttribute(AuthServiceImpl.AUTH_SESSION_KEY);
-        if (accountId instanceof Long id) {
-            SchoolUserAccount account = schoolUserAccountService.getById(id);
-            if (account != null && account.getStatus() == AccountStatus.ACTIVE) {
-                return true;
+        try {
+            String rawToken = cookieManager.read(request, cookieManager.accessCookieName());
+            if (StringUtils.hasText(rawToken)) {
+                JwtTokenService.AccessTokenPrincipal principal = jwtTokenService.parseAccessToken(rawToken);
+                AuthCurrentUserVO user = authService.currentUser(principal.accountId());
+                if (user != null) {
+                    request.setAttribute(AuthContext.CURRENT_USER_ATTRIBUTE, user);
+                    return true;
+                }
             }
+        } catch (AuthTokenException ignored) {
+            // Continue with a normalized 401 response.
         }
 
         response.setStatus(HttpServletResponse.SC_UNAUTHORIZED);

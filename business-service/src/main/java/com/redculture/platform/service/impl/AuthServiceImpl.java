@@ -10,13 +10,14 @@ import com.redculture.platform.mapper.SchoolRegistrationMapper;
 import com.redculture.platform.service.AuthService;
 import com.redculture.platform.service.SchoolService;
 import com.redculture.platform.service.SchoolUserAccountService;
+import com.redculture.platform.service.auth.AuthCurrentUserFactory;
+import com.redculture.platform.service.auth.AuthTokenService;
 import com.redculture.platform.vo.AuthCurrentUserVO;
 import com.redculture.platform.vo.SchoolRegistrationSubmitVO;
 import com.redculture.platform.vo.request.AuthLoginRequest;
 import com.redculture.platform.vo.request.AuthPasswordChangeRequest;
 import com.redculture.platform.vo.request.AuthProfileUpdateRequest;
 import com.redculture.platform.vo.request.SchoolRegisterRequest;
-import jakarta.servlet.http.HttpSession;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
@@ -26,21 +27,32 @@ import java.util.Objects;
 @Service
 public class AuthServiceImpl implements AuthService {
 
-    public static final String AUTH_SESSION_KEY = "CURRENT_SCHOOL_ACCOUNT_ID";
-
     private final SchoolRegistrationMapper schoolRegistrationMapper;
     private final SchoolUserAccountService schoolUserAccountService;
-    private final SchoolService schoolService;
     private final PasswordEncoder passwordEncoder;
+    private final AuthTokenService authTokenService;
+    private final AuthCurrentUserFactory userFactory;
+
+    @org.springframework.beans.factory.annotation.Autowired
+    public AuthServiceImpl(SchoolRegistrationMapper schoolRegistrationMapper,
+                           SchoolUserAccountService schoolUserAccountService,
+                           SchoolService schoolService,
+                           PasswordEncoder passwordEncoder,
+                           AuthTokenService authTokenService,
+                           AuthCurrentUserFactory userFactory) {
+        this.schoolRegistrationMapper = schoolRegistrationMapper;
+        this.schoolUserAccountService = schoolUserAccountService;
+        this.passwordEncoder = passwordEncoder;
+        this.authTokenService = authTokenService;
+        this.userFactory = userFactory;
+    }
 
     public AuthServiceImpl(SchoolRegistrationMapper schoolRegistrationMapper,
                            SchoolUserAccountService schoolUserAccountService,
                            SchoolService schoolService,
                            PasswordEncoder passwordEncoder) {
-        this.schoolRegistrationMapper = schoolRegistrationMapper;
-        this.schoolUserAccountService = schoolUserAccountService;
-        this.schoolService = schoolService;
-        this.passwordEncoder = passwordEncoder;
+        this(schoolRegistrationMapper, schoolUserAccountService, schoolService, passwordEncoder,
+                null, new AuthCurrentUserFactory(schoolService));
     }
 
     @Override
@@ -73,7 +85,7 @@ public class AuthServiceImpl implements AuthService {
     }
 
     @Override
-    public AuthCurrentUserVO login(AuthLoginRequest request, HttpSession session) {
+    public AuthCurrentUserVO login(AuthLoginRequest request) {
         if (request == null || !StringUtils.hasText(request.getUsername()) || !StringUtils.hasText(request.getPassword())) {
             throw new IllegalArgumentException("username and password are required");
         }
@@ -93,13 +105,12 @@ public class AuthServiceImpl implements AuthService {
 
         account.setLastLoginAt(java.time.LocalDateTime.now());
         schoolUserAccountService.updateById(account);
-        session.setAttribute(AUTH_SESSION_KEY, account.getAccountId());
         return buildCurrentUser(account);
     }
 
     @Override
-    public AuthCurrentUserVO currentUser(HttpSession session) {
-        SchoolUserAccount account = findCurrentAccount(session);
+    public AuthCurrentUserVO currentUser(Long accountId) {
+        SchoolUserAccount account = findCurrentAccount(accountId);
         if (account == null) {
             return null;
         }
@@ -107,8 +118,8 @@ public class AuthServiceImpl implements AuthService {
     }
 
     @Override
-    public AuthCurrentUserVO updateProfile(AuthProfileUpdateRequest request, HttpSession session) {
-        SchoolUserAccount account = requireCurrentAccount(session);
+    public AuthCurrentUserVO updateProfile(AuthProfileUpdateRequest request, Long accountId) {
+        SchoolUserAccount account = requireCurrentAccount(accountId);
         if (request == null) {
             throw new IllegalArgumentException("profile request is required");
         }
@@ -120,8 +131,8 @@ public class AuthServiceImpl implements AuthService {
     }
 
     @Override
-    public void changePassword(AuthPasswordChangeRequest request, HttpSession session) {
-        SchoolUserAccount account = requireCurrentAccount(session);
+    public void changePassword(AuthPasswordChangeRequest request, Long accountId) {
+        SchoolUserAccount account = requireCurrentAccount(accountId);
         if (request == null || !StringUtils.hasText(request.getCurrentPassword())
                 || !StringUtils.hasText(request.getNewPassword())) {
             throw new IllegalArgumentException("currentPassword and newPassword are required");
@@ -134,51 +145,32 @@ public class AuthServiceImpl implements AuthService {
         }
         account.setPasswordHash(passwordEncoder.encode(request.getNewPassword()));
         schoolUserAccountService.updateById(account);
+        if (authTokenService != null) {
+            authTokenService.revokeAll(account.getAccountId(), "password_changed");
+        }
     }
 
-    private SchoolUserAccount findCurrentAccount(HttpSession session) {
-        Object accountId = session.getAttribute(AUTH_SESSION_KEY);
-        if (!(accountId instanceof Long)) {
+    private SchoolUserAccount findCurrentAccount(Long accountId) {
+        if (accountId == null) {
             return null;
         }
-        SchoolUserAccount account = schoolUserAccountService.getById((Long) accountId);
+        SchoolUserAccount account = schoolUserAccountService.getById(accountId);
         if (account == null || account.getStatus() != AccountStatus.ACTIVE) {
-            session.removeAttribute(AUTH_SESSION_KEY);
             return null;
         }
         return account;
     }
 
-    private SchoolUserAccount requireCurrentAccount(HttpSession session) {
-        SchoolUserAccount account = findCurrentAccount(session);
+    private SchoolUserAccount requireCurrentAccount(Long accountId) {
+        SchoolUserAccount account = findCurrentAccount(accountId);
         if (account == null) {
             throw new IllegalArgumentException("authentication required");
         }
         return account;
     }
 
-    @Override
-    public void logout(HttpSession session) {
-        session.removeAttribute(AUTH_SESSION_KEY);
-    }
-
     private AuthCurrentUserVO buildCurrentUser(SchoolUserAccount account) {
-        School school = schoolService.getById(account.getSchoolId());
-        AuthCurrentUserVO vo = new AuthCurrentUserVO();
-        vo.setAccountId(account.getAccountId());
-        vo.setUsername(account.getUsername());
-        vo.setRoleCode(account.getRoleCode());
-        vo.setSchoolId(account.getSchoolId());
-        vo.setDisplayName(account.getDisplayName());
-        vo.setContactName(account.getContactName());
-        vo.setContactPhone(account.getContactPhone());
-        vo.setLastLoginAt(account.getLastLoginAt());
-        if (school != null) {
-            vo.setSchoolName(school.getSchoolName());
-            vo.setSchoolLongitude(school.getLongitude());
-            vo.setSchoolLatitude(school.getLatitude());
-        }
-        return vo;
+        return userFactory.build(account);
     }
 
     private void validateRegisterRequest(SchoolRegisterRequest request) {

@@ -1,9 +1,6 @@
 package com.redculture.platform.config;
 
-import com.redculture.platform.entity.SchoolUserAccount;
-import com.redculture.platform.enums.AccountStatus;
-import com.redculture.platform.service.impl.AuthServiceImpl;
-import com.redculture.platform.service.SchoolUserAccountService;
+import com.redculture.platform.vo.AuthCurrentUserVO;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import org.springframework.stereotype.Component;
@@ -11,23 +8,15 @@ import org.springframework.stereotype.Component;
 @Component
 public class AdminAccessInterceptor implements org.springframework.web.servlet.HandlerInterceptor {
 
-    private final SchoolUserAccountService schoolUserAccountService;
-
-    public AdminAccessInterceptor(SchoolUserAccountService schoolUserAccountService) {
-        this.schoolUserAccountService = schoolUserAccountService;
-    }
-
     @Override
     public boolean preHandle(HttpServletRequest request, HttpServletResponse response, Object handler) throws Exception {
-        Object accountId = request.getSession().getAttribute(AuthServiceImpl.AUTH_SESSION_KEY);
-        if (!(accountId instanceof Long)) {
+        AuthCurrentUserVO account = AuthContext.currentUser(request);
+        if (account == null) {
             writeUnauthorized(response, "请先使用管理员账号登录");
             return false;
         }
 
-        Long id = (Long) accountId;
-        SchoolUserAccount account = schoolUserAccountService.getById(id);
-        if (account == null || account.getStatus() != AccountStatus.ACTIVE || !"platform_admin".equals(account.getRoleCode())) {
+        if (!"platform_admin".equals(account.getRoleCode())) {
             writeUnauthorized(response, "当前账号无后台管理权限");
             return false;
         }

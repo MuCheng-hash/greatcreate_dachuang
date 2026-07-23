@@ -2,13 +2,18 @@ package com.redculture.platform.controller;
 
 import com.redculture.platform.common.ApiResponse;
 import com.redculture.platform.service.AuthService;
+import com.redculture.platform.service.auth.AuthCookieManager;
+import com.redculture.platform.service.auth.AuthTokenException;
+import com.redculture.platform.service.auth.AuthTokenService;
+import com.redculture.platform.config.AuthContext;
 import com.redculture.platform.vo.AuthCurrentUserVO;
 import com.redculture.platform.vo.SchoolRegistrationSubmitVO;
 import com.redculture.platform.vo.request.AuthLoginRequest;
 import com.redculture.platform.vo.request.AuthPasswordChangeRequest;
 import com.redculture.platform.vo.request.AuthProfileUpdateRequest;
 import com.redculture.platform.vo.request.SchoolRegisterRequest;
-import jakarta.servlet.http.HttpSession;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.PutMapping;
@@ -21,9 +26,15 @@ import org.springframework.web.bind.annotation.RestController;
 public class AuthController {
 
     private final AuthService authService;
+    private final AuthTokenService authTokenService;
+    private final AuthCookieManager cookieManager;
 
-    public AuthController(AuthService authService) {
+    public AuthController(AuthService authService,
+                          AuthTokenService authTokenService,
+                          AuthCookieManager cookieManager) {
         this.authService = authService;
+        this.authTokenService = authTokenService;
+        this.cookieManager = cookieManager;
     }
 
     @PostMapping("/school-register")
@@ -32,20 +43,46 @@ public class AuthController {
     }
 
     @PostMapping("/login")
-    public ApiResponse<AuthCurrentUserVO> login(@RequestBody AuthLoginRequest request, HttpSession session) {
-        return ApiResponse.success("login success", authService.login(request, session));
+    public ApiResponse<AuthCurrentUserVO> login(@RequestBody AuthLoginRequest request,
+                                               HttpServletRequest servletRequest,
+                                               HttpServletResponse servletResponse) {
+        AuthCurrentUserVO user = authService.login(request);
+        cookieManager.write(servletResponse, authTokenService.issue(user, servletRequest));
+        return ApiResponse.success("login success", user);
     }
 
     @GetMapping("/me")
-    public ApiResponse<AuthCurrentUserVO> currentUser(HttpSession session) {
-        return ApiResponse.success(authService.currentUser(session));
+    public ApiResponse<AuthCurrentUserVO> currentUser(HttpServletRequest request,
+                                                      HttpServletResponse response) {
+        AuthCurrentUserVO user = AuthContext.currentUser(request);
+        if (user == null) {
+            response.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
+            return ApiResponse.fail(401, "请先登录");
+        }
+        return ApiResponse.success(user);
+    }
+
+    @PostMapping("/refresh")
+    public ApiResponse<AuthCurrentUserVO> refresh(HttpServletRequest request,
+                                                  HttpServletResponse response) {
+        try {
+            String refreshToken = cookieManager.read(request, cookieManager.refreshCookieName());
+            AuthTokenService.IssuedTokens tokens = authTokenService.rotate(refreshToken, request);
+            cookieManager.write(response, tokens);
+            return ApiResponse.success("token refreshed", tokens.user());
+        } catch (AuthTokenException exception) {
+            cookieManager.clear(response);
+            response.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
+            return ApiResponse.fail(401, exception.getMessage());
+        }
     }
 
     @PutMapping("/profile")
     public ApiResponse<AuthCurrentUserVO> updateProfile(@RequestBody AuthProfileUpdateRequest request,
-                                                        HttpSession session) {
+                                                        HttpServletRequest servletRequest) {
         try {
-            return ApiResponse.success("profile updated", authService.updateProfile(request, session));
+            return ApiResponse.success("profile updated", authService.updateProfile(
+                    request, AuthContext.requireUser(servletRequest).getAccountId()));
         } catch (IllegalArgumentException exception) {
             return ApiResponse.fail(exception.getMessage());
         }
@@ -53,9 +90,9 @@ public class AuthController {
 
     @PutMapping("/password")
     public ApiResponse<Boolean> changePassword(@RequestBody AuthPasswordChangeRequest request,
-                                               HttpSession session) {
+                                               HttpServletRequest servletRequest) {
         try {
-            authService.changePassword(request, session);
+            authService.changePassword(request, AuthContext.requireUser(servletRequest).getAccountId());
             return ApiResponse.success("password updated", true);
         } catch (IllegalArgumentException exception) {
             return ApiResponse.fail(exception.getMessage());
@@ -63,8 +100,9 @@ public class AuthController {
     }
 
     @PostMapping("/logout")
-    public ApiResponse<Boolean> logout(HttpSession session) {
-        authService.logout(session);
+    public ApiResponse<Boolean> logout(HttpServletRequest request, HttpServletResponse response) {
+        authTokenService.logout(cookieManager.read(request, cookieManager.refreshCookieName()));
+        cookieManager.clear(response);
         return ApiResponse.success("logout success", true);
     }
 }

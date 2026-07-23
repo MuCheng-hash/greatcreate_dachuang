@@ -11,7 +11,6 @@ import com.redculture.platform.vo.request.AuthPasswordChangeRequest;
 import com.redculture.platform.vo.request.AuthProfileUpdateRequest;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.springframework.mock.web.MockHttpSession;
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 import org.springframework.security.crypto.password.PasswordEncoder;
 
@@ -31,7 +30,7 @@ class AuthServiceImplTest {
     private final PasswordEncoder passwordEncoder = new BCryptPasswordEncoder();
     private AuthServiceImpl service;
     private SchoolUserAccount account;
-    private MockHttpSession session;
+    private Long accountId;
 
     @BeforeEach
     void setUp() {
@@ -50,13 +49,12 @@ class AuthServiceImplTest {
         when(accountService.getById(7L)).thenReturn(account);
         when(schoolService.getById(3L)).thenReturn(school);
 
-        session = new MockHttpSession();
-        session.setAttribute(AuthServiceImpl.AUTH_SESSION_KEY, 7L);
+        accountId = 7L;
     }
 
     @Test
-    void currentUserReturnsNullWithoutSessionAccount() {
-        AuthCurrentUserVO user = service.currentUser(new MockHttpSession());
+    void currentUserReturnsNullWithoutAccountId() {
+        AuthCurrentUserVO user = service.currentUser(null);
 
         assertNull(user);
     }
@@ -68,7 +66,7 @@ class AuthServiceImplTest {
         request.setContactName("  李明  ");
         request.setContactPhone("  13800000000  ");
 
-        AuthCurrentUserVO result = service.updateProfile(request, session);
+        AuthCurrentUserVO result = service.updateProfile(request, accountId);
 
         assertEquals("李老师", result.getDisplayName());
         assertEquals("李明", result.getContactName());
@@ -81,7 +79,7 @@ class AuthServiceImplTest {
         AuthProfileUpdateRequest request = new AuthProfileUpdateRequest();
         request.setContactPhone("1".repeat(51));
 
-        assertThrows(IllegalArgumentException.class, () -> service.updateProfile(request, session));
+        assertThrows(IllegalArgumentException.class, () -> service.updateProfile(request, accountId));
     }
 
     @Test
@@ -90,19 +88,18 @@ class AuthServiceImplTest {
         request.setCurrentPassword("wrong-password");
         request.setNewPassword("new-password");
 
-        assertThrows(IllegalArgumentException.class, () -> service.changePassword(request, session));
+        assertThrows(IllegalArgumentException.class, () -> service.changePassword(request, accountId));
     }
 
     @Test
-    void changePasswordReplacesHashAndKeepsSession() {
+    void changePasswordReplacesHashAndPersistsAccount() {
         AuthPasswordChangeRequest request = new AuthPasswordChangeRequest();
         request.setCurrentPassword("old-password");
         request.setNewPassword("new-password");
 
-        service.changePassword(request, session);
+        service.changePassword(request, accountId);
 
         assertTrue(passwordEncoder.matches("new-password", account.getPasswordHash()));
-        assertEquals(7L, session.getAttribute(AuthServiceImpl.AUTH_SESSION_KEY));
         verify(accountService).updateById(account);
     }
 }

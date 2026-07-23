@@ -100,6 +100,10 @@ SOURCE D:/path/to/greatcreate_dachuang/data/sql/mysql_red_culture_all_in_one.sql
 | `AMAP_SECURITY_JS_CODE` | 高德地图安全密钥 | 默认空值 |
 | `AMAP_WEB_SERVICE_KEY` | 服务端高德 Web 服务 Key，用于周边 POI 检索和详情 | 空；未配置时仅显示正式资源 |
 | `LLM_SERVICE_BASE_URL` | 前端访问 LLM 服务的地址 | `http://127.0.0.1:5050` |
+| `APP_AUTH_JWT_SECRET` | JWT 签名密钥，生产环境必须替换为至少 32 字节随机值 | 本地开发默认值 |
+| `APP_AUTH_COOKIE_SECURE` | 认证 Cookie 是否仅允许 HTTPS | `false`；生产环境必须为 `true` |
+| `AGENT_RUNTIME_MODE` | Agent 运行时 | `stateful`；可临时设为 `legacy` 回滚 |
+| `AGENT_INTERNAL_SERVICE_TOKEN` | Java 与 FastAPI Agent 的内部服务令牌 | 本地开发有共享默认值；部署时必须替换 |
 | `NEO4J_URI` | Neo4j Bolt 地址 | `bolt://127.0.0.1:7687` |
 | `NEO4J_USERNAME` | Neo4j 用户名 | `neo4j` |
 | `NEO4J_PASSWORD` | Neo4j 密码 | 本地开发默认值见配置文件 |
@@ -212,7 +216,7 @@ Invoke-RestMethod -Method Post `
 
 ### 页面打开后接口请求失败或无法保持登录状态
 
-必须从 `http://localhost:8080/` 打开页面。不要直接双击 HTML 形成 `file://` 地址，也不要通过 `5173`、`5500` 等其他端口访问认证页面。认证接口使用 `/api/...` 相对路径和浏览器 Session，需要与业务服务保持同源。
+必须从 `http://localhost:8080/` 打开页面。不要直接双击 HTML 形成 `file://` 地址，也不要通过 `5173`、`5500` 等其他端口访问认证页面。认证接口使用 `/api/...` 相对路径、HttpOnly JWT Cookie 和 CSRF 请求头，需要与业务服务保持同源。
 
 ### LLM 服务未启动
 
