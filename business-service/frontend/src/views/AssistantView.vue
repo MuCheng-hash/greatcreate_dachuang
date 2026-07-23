@@ -1,23 +1,43 @@
-<script setup>
+<script setup lang="ts">
 import { computed, nextTick, onMounted, ref, watch } from "vue";
 import { Bot, MessageCircleQuestion, Send, Sparkles, Trash2, UserRound } from "@lucide/vue";
 import AppShell from "@/components/AppShell.vue";
 import InlineNotice from "@/components/InlineNotice.vue";
-import LoadingBlock from "@/components/LoadingBlock.vue";
 import { api } from "@/services/api";
 import { useSchoolStore } from "@/stores/school";
-import { useAuthStore } from "@/stores/auth";
+import { useAuthStore, type AuthCurrentUser } from "@/stores/auth";
+import type {
+  AgentCitation,
+  AgentQaRequestPayload,
+  AgentQaResponse,
+  AgentSseEventData,
+  AgentSseEventName,
+} from "@/types/agent";
+
+interface AssistantToolEvent {
+  toolName?: string;
+  status?: string;
+}
+
+interface AssistantMessage extends AgentQaResponse {
+  role: "user" | "assistant";
+  text?: string;
+  answer?: string;
+  citations?: Array<AgentCitation | string>;
+  toolEvents?: AssistantToolEvent[];
+  streamStatus?: string;
+}
 
 const auth = useAuthStore();
 const schoolStore = useSchoolStore();
-const question = ref("");
-const loading = ref(false);
-const error = ref("");
-const chatScroll = ref(null);
-const messages = ref(loadMessages());
-const conversationId = ref(loadConversationId());
-const activeAbortController = ref(null);
-const threadId = ref(loadThreadId());
+const question = ref<string>("");
+const loading = ref<boolean>(false);
+const error = ref<string>("");
+const chatScroll = ref<HTMLElement | null>(null);
+const messages = ref<AssistantMessage[]>(loadMessages());
+const conversationId = ref<string>(loadConversationId());
+const activeAbortController = ref<AbortController | null>(null);
+const threadId = ref<string>(loadThreadId());
 
 const suggestions = computed(() => {
   const resourceName = schoolStore.resources[0]?.resource?.resourceName;
@@ -60,11 +80,16 @@ function loadConversationId() {
   return sessionStorage.getItem(conversationStorageKey()) || makeConversationId();
 }
 
-function loadMessages() {
-  try { return JSON.parse(sessionStorage.getItem(storageKey()) || "[]"); } catch { return []; }
+function loadMessages(): AssistantMessage[] {
+  try {
+    const stored = JSON.parse(sessionStorage.getItem(storageKey()) || "[]") as unknown;
+    return Array.isArray(stored) ? stored as AssistantMessage[] : [];
+  } catch {
+    return [];
+  }
 }
 
-function retrievalStatusLabel(status) {
+function retrievalStatusLabel(status?: string | null): string {
   return {
     ok: "已结合知识检索证据",
     empty: "未检索到直接匹配的知识证据",
@@ -72,11 +97,11 @@ function retrievalStatusLabel(status) {
   }[status] || "知识检索状态未知";
 }
 
-function retrievalStatusClass(status) {
+function retrievalStatusClass(status?: string | null): string {
   return `retrieval-${status || "unknown"}`;
 }
 
-function generationStatusLabel(status) {
+function generationStatusLabel(status?: string | null): string {
   return {
     completed: "已由答案生成服务整理",
     degraded: "答案生成服务不可用，当前为本地降级回答",
@@ -84,7 +109,7 @@ function generationStatusLabel(status) {
   }[status] || "答案生成状态未知";
 }
 
-function generationStatusClass(status) {
+function generationStatusClass(status?: string | null): string {
   return `generation-${status || "unknown"}`;
 }
 
@@ -100,17 +125,17 @@ async function explain() {
   await requestAssistant("请介绍本校周边可用于思政教学的资源。");
 }
 
-async function ask(text = question.value) {
+async function ask(text: string = question.value): Promise<void> {
   const clean = text.trim();
   if (!clean || loading.value) return;
   question.value = "";
   await requestAssistant(clean);
 }
 
-async function requestAssistant(userText) {
+async function requestAssistant(userText: string): Promise<void> {
   error.value = "";
   messages.value.push({ role: "user", text: userText });
-  const assistantMessage = {
+  const assistantMessage: AssistantMessage = {
     role: "assistant", answer: "", relatedResources: [], citations: [], followUpQuestions: [],
     toolEvents: [], streamStatus: "正在启动 Agent…"
   };
@@ -120,7 +145,7 @@ async function requestAssistant(userText) {
   activeAbortController.value = abortController;
   await scrollToBottom();
   try {
-    const requestBody = {
+    const requestBody: AgentQaRequestPayload = {
       question: userText,
       threadId: threadId.value || null,
       scopeType: "SCHOOL",
@@ -128,14 +153,14 @@ async function requestAssistant(userText) {
     };
     if (!threadId.value) requestBody.conversationId = conversationId.value;
     let finalReceived = false;
-    let streamError = null;
+    let streamError: Error | null = null;
 
     if (typeof api.stream !== "function") {
-      applyAssistantResult(assistantMessage, await api.post("/api/ai/qa/ask", requestBody));
+      applyAssistantResult(assistantMessage, await api.post<AgentQaResponse>("/api/ai/qa/ask", requestBody));
     } else {
       await api.stream("/api/ai/qa/stream", requestBody, {
         signal: abortController.signal,
-        onEvent(eventName, data) {
+        onEvent(eventName: AgentSseEventName, data: AgentSseEventData) {
           if (data?.conversationId) conversationId.value = data.conversationId;
           if (data?.threadId) threadId.value = data.threadId;
           if (eventName === "run.started") {
@@ -173,7 +198,7 @@ async function requestAssistant(userText) {
       return;
     }
     try {
-      const result = await api.post("/api/ai/qa/ask", {
+      const result = await api.post<AgentQaResponse>("/api/ai/qa/ask", {
         question: userText,
         conversationId: conversationId.value,
         threadId: threadId.value || null,
@@ -198,7 +223,7 @@ async function requestAssistant(userText) {
   }
 }
 
-function applyAssistantResult(message, result) {
+function applyAssistantResult(message: AssistantMessage, result: Partial<AgentQaResponse>): void {
   Object.assign(message, {
     answer: result?.answer || "服务未返回回答。",
     relatedResources: result?.relatedResources || [],
@@ -219,7 +244,7 @@ function applyAssistantResult(message, result) {
   if (result?.threadId) threadId.value = result.threadId;
 }
 
-function toolLabel(toolName) {
+function toolLabel(toolName?: string): string {
   return {
     "/internal/agent/tools/school-context": "学校资源",
     "/internal/agent/tools/resource-detail": "资源详情",
@@ -228,16 +253,16 @@ function toolLabel(toolName) {
   }[toolName] || toolName || "受控工具";
 }
 
-function stopGeneration() {
+function stopGeneration(): void {
   activeAbortController.value?.abort();
 }
 
-async function scrollToBottom() {
+async function scrollToBottom(): Promise<void> {
   await nextTick();
   if (chatScroll.value) chatScroll.value.scrollTop = chatScroll.value.scrollHeight;
 }
 
-function clearChat() {
+function clearChat(): void {
   messages.value = [];
   threadId.value = "";
   sessionStorage.removeItem(storageKey());
