@@ -1,19 +1,17 @@
-package com.redculture.platform.vo.request;
+package com.redculture.platform.vo.ai;
 
 import lombok.Data;
 
 @Data
-public class AgentQaRequest {
-
-    private String threadId;
+public class AgentRuntimeRequest {
 
     private String question;
 
     private String conversationId;
 
-    private String scopeType;
+    private AgentScopeVO scope;
 
-    private Long scopeId;
+    private AgentActorVO actor;
 
     private String grade;
 

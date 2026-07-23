@@ -15,6 +15,8 @@ const loading = ref(false);
 const error = ref("");
 const chatScroll = ref(null);
 const messages = ref(loadMessages());
+const conversationId = ref(loadConversationId());
+const activeAbortController = ref(null);
 const threadId = ref(loadThreadId());
 
 const suggestions = computed(() => {
@@ -28,12 +30,15 @@ const suggestions = computed(() => {
 
 onMounted(async () => {
   await schoolStore.load();
+  sessionStorage.setItem(conversationStorageKey(), conversationId.value);
+  if (threadId.value) sessionStorage.setItem(threadStorageKey(), threadId.value);
   if (!messages.value.length) {
     messages.value.push({ role: "assistant", answer: `你好，我可以结合${schoolStore.school?.schoolName || "本校"}的周边资源，协助你进行教学讲解和活动设计。`, citations: [] });
   }
 });
 
 watch(messages, (value) => sessionStorage.setItem(storageKey(), JSON.stringify(value)), { deep: true });
+watch(conversationId, (value) => sessionStorage.setItem(conversationStorageKey(), value));
 watch(threadId, (value) => {
   if (value) sessionStorage.setItem(threadStorageKey(), value);
   else sessionStorage.removeItem(threadStorageKey());
@@ -43,8 +48,44 @@ function storageKey() {
   return `school-portal-assistant-session:${auth.user?.schoolId || "unknown"}`;
 }
 
+function conversationStorageKey() {
+  return `school-portal-assistant-conversation:${auth.user?.schoolId || "unknown"}`;
+}
+
+function makeConversationId() {
+  return globalThis.crypto?.randomUUID?.() || `conversation-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function loadConversationId() {
+  return sessionStorage.getItem(conversationStorageKey()) || makeConversationId();
+}
+
 function loadMessages() {
   try { return JSON.parse(sessionStorage.getItem(storageKey()) || "[]"); } catch { return []; }
+}
+
+function retrievalStatusLabel(status) {
+  return {
+    ok: "已结合知识检索证据",
+    empty: "未检索到直接匹配的知识证据",
+    degraded: "知识检索部分不可用，当前回答基于可用业务数据"
+  }[status] || "知识检索状态未知";
+}
+
+function retrievalStatusClass(status) {
+  return `retrieval-${status || "unknown"}`;
+}
+
+function generationStatusLabel(status) {
+  return {
+    completed: "已由答案生成服务整理",
+    degraded: "答案生成服务不可用，当前为本地降级回答",
+    skipped: "未调用答案生成服务"
+  }[status] || "答案生成状态未知";
+}
+
+function generationStatusClass(status) {
+  return `generation-${status || "unknown"}`;
 }
 
 function threadStorageKey() {
@@ -69,34 +110,126 @@ async function ask(text = question.value) {
 async function requestAssistant(userText) {
   error.value = "";
   messages.value.push({ role: "user", text: userText });
+  const assistantMessage = {
+    role: "assistant", answer: "", relatedResources: [], citations: [], followUpQuestions: [],
+    toolEvents: [], streamStatus: "正在启动 Agent…"
+  };
+  messages.value.push(assistantMessage);
   loading.value = true;
+  const abortController = new AbortController();
+  activeAbortController.value = abortController;
   await scrollToBottom();
   try {
-    const payload = {
+    const requestBody = {
       question: userText,
+      threadId: threadId.value || null,
       scopeType: "SCHOOL",
       scopeId: schoolStore.school?.schoolId || auth.user?.schoolId || null
     };
-    if (threadId.value) payload.threadId = threadId.value;
-    const result = await api.post("/api/ai/qa/ask", payload);
-    if (result.threadId) threadId.value = result.threadId;
-    messages.value.push({
-      role: "assistant", answer: result.answer || "服务未返回回答。",
-      relatedResources: result.relatedResources || [], citations: result.citations || [],
-      followUpQuestions: result.followUpQuestions || []
-    });
+    if (!threadId.value) requestBody.conversationId = conversationId.value;
+    let finalReceived = false;
+    let streamError = null;
+
+    if (typeof api.stream !== "function") {
+      applyAssistantResult(assistantMessage, await api.post("/api/ai/qa/ask", requestBody));
+    } else {
+      await api.stream("/api/ai/qa/stream", requestBody, {
+        signal: abortController.signal,
+        onEvent(eventName, data) {
+          if (data?.conversationId) conversationId.value = data.conversationId;
+          if (data?.threadId) threadId.value = data.threadId;
+          if (eventName === "run.started") {
+            assistantMessage.runId = data.runId;
+            assistantMessage.streamStatus = "Agent 已启动";
+          } else if (eventName === "tool.started") {
+            assistantMessage.toolEvents.push({ toolName: data.toolName, status: "started" });
+            assistantMessage.streamStatus = `正在调用：${toolLabel(data.toolName)}`;
+          } else if (eventName === "tool.completed") {
+            const previous = [...assistantMessage.toolEvents].reverse().find(item => item.toolName === data.toolName && item.status === "started");
+            if (previous) previous.status = data.status || "completed";
+            else assistantMessage.toolEvents.push({ toolName: data.toolName, status: data.status || "completed" });
+            assistantMessage.streamStatus = data.status === "ok" ? "工具结果已返回，正在整理回答" : "部分工具不可用，正在降级处理";
+          } else if (eventName === "token") {
+            assistantMessage.answer += data.delta || "";
+            assistantMessage.streamStatus = "正在生成回答";
+          } else if (eventName === "final") {
+            finalReceived = true;
+            applyAssistantResult(assistantMessage, data.response || {});
+            if (data.response?.conversationId) conversationId.value = data.response.conversationId;
+            if (data.response?.threadId) threadId.value = data.response.threadId;
+            assistantMessage.streamStatus = "回答完成";
+          } else if (eventName === "error") {
+            streamError = new Error(data.message || "Agent 流式服务异常");
+          }
+        }
+      });
+      if (streamError && !finalReceived) throw streamError;
+      if (!finalReceived) throw new Error("流式服务未返回最终结果");
+    }
   } catch (requestError) {
+    if (requestError?.name === "AbortError") {
+      assistantMessage.streamStatus = "已停止生成";
+      if (!assistantMessage.answer) messages.value.pop();
+      return;
+    }
+    try {
+      const result = await api.post("/api/ai/qa/ask", {
+        question: userText,
+        conversationId: conversationId.value,
+        threadId: threadId.value || null,
+        scopeType: "SCHOOL",
+        scopeId: schoolStore.school?.schoolId || auth.user?.schoolId || null
+      });
+      applyAssistantResult(assistantMessage, result);
+      error.value = `${requestError.message}，已切换到兼容问答接口`;
+      return;
+    } catch {
     const resourceCount = schoolStore.resources.length;
-    messages.value.push({
-      role: "assistant",
-      answer: `${schoolStore.school?.schoolName || "当前学校"}现有 ${resourceCount} 个已关联周边资源。围绕“${userText}”，建议优先选择距离近、可达性高的资源，并按课堂导入、现场观察、实践反思三个阶段组织活动。`,
-      citations: ["当前为本地兜底回答，智能问答服务恢复后可获得更完整的引用结果。"]
-    });
+    assistantMessage.answer = `${schoolStore.school?.schoolName || "当前学校"}现有 ${resourceCount} 个已关联周边资源。围绕“${userText}”，建议优先选择距离近、可达性高的资源，并按课堂导入、现场观察、实践反思三个阶段组织活动。`;
+    assistantMessage.citations = ["当前为本地兜底回答，智能问答服务恢复后可获得更完整的引用结果。"];
+    assistantMessage.retrievalStatus = "degraded";
+    assistantMessage.generationStatus = "degraded";
     error.value = requestError.message;
+    }
   } finally {
     loading.value = false;
+    activeAbortController.value = null;
     await scrollToBottom();
   }
+}
+
+function applyAssistantResult(message, result) {
+  Object.assign(message, {
+    answer: result?.answer || "服务未返回回答。",
+    relatedResources: result?.relatedResources || [],
+    citations: result?.citations || [],
+    followUpQuestions: result?.followUpQuestions || [],
+    retrievalStatus: result?.retrievalStatus || null,
+    generationStatus: result?.generationStatus || null,
+    clarificationRequired: Boolean(result?.clarificationRequired),
+    clarificationMessage: result?.clarificationMessage || "",
+    clarificationOptions: result?.clarificationOptions || [],
+    conversationId: result?.conversationId || message.conversationId,
+    threadId: result?.threadId || message.threadId,
+    runId: result?.runId || message.runId,
+    fallbackLevel: result?.fallbackLevel || null,
+    streamStatus: result?.generationStatus === "degraded" ? "已使用降级回答" : "回答完成"
+  });
+  if (result?.conversationId) conversationId.value = result.conversationId;
+  if (result?.threadId) threadId.value = result.threadId;
+}
+
+function toolLabel(toolName) {
+  return {
+    "/internal/agent/tools/school-context": "学校资源",
+    "/internal/agent/tools/resource-detail": "资源详情",
+    "/internal/agent/tools/knowledge-retrieve": "知识检索",
+    "/internal/agent/tools/relation-query": "图谱关系"
+  }[toolName] || toolName || "受控工具";
+}
+
+function stopGeneration() {
+  activeAbortController.value?.abort();
 }
 
 async function scrollToBottom() {
@@ -108,6 +241,8 @@ function clearChat() {
   messages.value = [];
   threadId.value = "";
   sessionStorage.removeItem(storageKey());
+  sessionStorage.removeItem(conversationStorageKey());
+  conversationId.value = makeConversationId();
   sessionStorage.removeItem(threadStorageKey());
 }
 </script>
@@ -129,6 +264,11 @@ function clearChat() {
             <span class="chat-avatar"><UserRound v-if="message.role === 'user'" :size="17" /><Bot v-else :size="17" /></span>
             <div>
               <p>{{ message.text || message.answer }}</p>
+              <div v-if="message.streamStatus" class="agent-stream-status">{{ message.streamStatus }}</div>
+              <div v-if="message.toolEvents?.length" class="agent-tool-events"><span v-for="(toolEvent,toolIndex) in message.toolEvents" :key="toolIndex">{{ toolLabel(toolEvent.toolName) }}：{{ toolEvent.status === "started" ? "进行中" : toolEvent.status === "ok" ? "完成" : "降级" }}</span></div>
+              <p v-if="message.retrievalStatus" class="retrieval-status" :class="retrievalStatusClass(message.retrievalStatus)">{{ retrievalStatusLabel(message.retrievalStatus) }}</p>
+              <p v-if="message.generationStatus" class="generation-status" :class="generationStatusClass(message.generationStatus)">{{ generationStatusLabel(message.generationStatus) }}</p>
+              <div v-if="message.clarificationRequired" class="clarification"><strong>需要补充：</strong>{{ message.clarificationMessage || "请补充具体学校名称。" }}<span v-if="message.clarificationOptions?.length">可选：{{ message.clarificationOptions.join("、") }}</span></div>
               <p v-if="message.relatedResources?.length" class="related"><strong>关联资源：</strong>{{ message.relatedResources.join("、") }}</p>
               <div v-if="message.citations?.length" class="chat-citations"><span v-for="(citation,citationIndex) in message.citations" :key="citationIndex">{{ typeof citation === "string" ? citation : citation.title || citation.excerpt }}</span></div>
               <div v-if="message.followUpQuestions?.length" class="follow-ups"><button v-for="item in message.followUpQuestions" :key="item" type="button" @click="ask(item)">{{ item }}</button></div>
@@ -139,7 +279,8 @@ function clearChat() {
         </div>
         <form class="chat-composer" @submit.prevent="ask()">
           <textarea v-model="question" rows="2" placeholder="输入关于学校资源或教学活动的问题" @keydown.ctrl.enter.prevent="ask()"></textarea>
-          <button class="primary-button send-button" type="submit" :disabled="loading || !question.trim()" aria-label="发送问题"><Send :size="19" /></button>
+          <button v-if="loading" class="text-button stop-button" type="button" @click="stopGeneration">停止</button>
+          <button v-else class="primary-button send-button" type="submit" :disabled="!question.trim()" aria-label="发送问题"><Send :size="19" /></button>
         </form>
       </div>
     </section>
@@ -157,8 +298,8 @@ function clearChat() {
 .suggestion-list button { padding: 10px; border: 1px solid var(--line); border-radius: 6px; background: #fff; color: #445047; font-size: 13px; line-height: 1.5; text-align: left; }
 .suggestion-list button:hover { border-color: #a9b9ad; background: var(--green-soft); }
 .clear-button { justify-content: flex-start; margin-top: auto; color: var(--muted); }
-.chat-area { min-width: 0; display: grid; grid-template-rows: minmax(0,1fr) auto; }
-.chat-scroll { overflow-y: auto; display: grid; align-content: start; gap: 18px; padding: 24px; }
+.chat-area { min-width: 0; min-height: 0; display: grid; grid-template-rows: minmax(0,1fr) auto; overflow: hidden; }
+.chat-scroll { min-height: 0; overflow-y: auto; display: grid; align-content: start; gap: 18px; padding: 24px; overscroll-behavior: contain; }
 .chat-message { display: grid; grid-template-columns: 34px minmax(0,1fr); gap: 10px; max-width: 820px; }
 .chat-message.user { justify-self: end; grid-template-columns: minmax(0,1fr) 34px; }
 .chat-message.user .chat-avatar { grid-column: 2; grid-row: 1; background: var(--red); }
@@ -166,6 +307,20 @@ function clearChat() {
 .chat-avatar { display: grid; place-items: center; width: 34px; height: 34px; border-radius: 50%; background: var(--green); color: #fff; }
 .chat-message > div { padding: 13px 15px; border-radius: 8px; background: var(--surface-muted); }
 .chat-message p { margin: 0; line-height: 1.8; white-space: pre-wrap; }
+.agent-stream-status { margin-top: 8px; color: var(--muted); font-size: 12px; }
+.agent-tool-events { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 7px; color: var(--muted); font-size: 11px; }
+.agent-tool-events span { padding: 2px 6px; border: 1px solid var(--line); border-radius: 4px; background: #fff; }
+.retrieval-status { margin-top: 8px !important; font-size: 12px; }
+.retrieval-ok { color: var(--green); }
+.retrieval-empty { color: var(--muted); }
+.retrieval-degraded { color: var(--red); }
+.retrieval-unknown { color: var(--muted); }
+.generation-status { margin-top: 5px !important; font-size: 12px; }
+.generation-completed { color: var(--green); }
+.generation-degraded { color: var(--red); }
+.generation-skipped { color: var(--muted); }
+.generation-unknown { color: var(--muted); }
+.clarification { display: grid; gap: 3px; margin-top: 10px; padding: 8px 10px; border-left: 3px solid #c9a24b; background: #fff9e8; color: #75602a; font-size: 12px; line-height: 1.6; }
 .related { margin-top: 10px !important; color: var(--muted); font-size: 13px; }
 .chat-citations { display: grid; gap: 5px; margin-top: 12px; padding-top: 10px; border-top: 1px solid #d3dbd5; color: var(--muted); font-size: 12px; }
 .follow-ups { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 11px; }
@@ -173,6 +328,7 @@ function clearChat() {
 .chat-composer { display: grid; grid-template-columns: minmax(0,1fr) 44px; gap: 9px; padding: 14px; border-top: 1px solid var(--line); background: #fff; }
 .chat-composer textarea { min-height: 48px; max-height: 120px; resize: none; }
 .send-button { width: 44px; min-height: 44px; padding: 0; align-self: end; }
+.stop-button { min-height: 44px; padding: 0 10px; align-self: end; color: var(--red); }
 .typing { display: flex; gap: 5px; padding-left: 44px; }
 .typing span { width: 7px; height: 7px; border-radius: 50%; background: #8ca094; animation: pulse 900ms infinite alternate; }
 .typing span:nth-child(2) { animation-delay: 150ms; }.typing span:nth-child(3) { animation-delay: 300ms; }

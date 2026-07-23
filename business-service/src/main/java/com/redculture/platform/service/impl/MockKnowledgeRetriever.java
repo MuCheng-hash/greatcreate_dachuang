@@ -10,7 +10,7 @@ import com.redculture.platform.vo.ai.KnowledgeRetrievalStatus;
 import java.util.List;
 
 /**
- * RAG 真实实现合入前的本地联调实现。真实 KnowledgeRetriever Bean 存在时会自动失效。
+ * RAG 真实实现不可用时的本地联调实现，由 AgentQaFallbackConfig 按缺失 Bean 条件提供。
  */
 public class MockKnowledgeRetriever implements KnowledgeRetriever {
 

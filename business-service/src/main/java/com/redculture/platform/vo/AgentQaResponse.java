@@ -16,9 +16,17 @@ public class AgentQaResponse {
 
     private String answer;
 
+    private String conversationId;
+
+    private String runId;
+
+    private String fallbackLevel;
+
     private AgentIntent intent;
 
     private KnowledgeRetrievalStatus retrievalStatus;
+
+    private AgentGenerationStatus generationStatus = AgentGenerationStatus.COMPLETED;
 
     private KnowledgeScopeType scopeType;
 
@@ -29,6 +37,12 @@ public class AgentQaResponse {
     private List<AgentCitationVO> citations = new ArrayList<>();
 
     private List<String> followUpQuestions = new ArrayList<>();
+
+    private boolean clarificationRequired;
+
+    private String clarificationMessage;
+
+    private List<String> clarificationOptions = new ArrayList<>();
 
     private List<String> toolExecutions = new ArrayList<>();
 }
