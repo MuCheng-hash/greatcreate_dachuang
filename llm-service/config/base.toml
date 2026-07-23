@@ -1,0 +1,16 @@
+service_name = "red-culture-agent-service"
+host = "127.0.0.1"
+port = 5050
+database_path = "data/agent-state.sqlite3"
+internal_business_base_url = "http://127.0.0.1:8080"
+business_health_path = "/internal/agent/tools/health"
+health_check_timeout_seconds = 2.0
+allowed_origins = ["http://localhost:8080", "http://127.0.0.1:8080"]
+
+llm_timeout_seconds = 20.0
+llm_max_retries = 1
+llm_temperature = 0.2
+agent_max_iterations = 4
+agent_max_history_messages = 20
+agent_prompt_version = "v1"
+

@@ -1,6 +1,7 @@
 package com.redculture.platform.service.impl;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.redculture.platform.config.RagProperties;
 import com.redculture.platform.entity.ContentChunk;
 import com.redculture.platform.entity.DataSource;
 import com.redculture.platform.entity.EntitySourceRel;
@@ -11,6 +12,9 @@ import com.redculture.platform.mapper.EntitySourceRelMapper;
 import com.redculture.platform.service.KnowledgeRetriever;
 import com.redculture.platform.service.SchoolMapService;
 import com.redculture.platform.service.TownMapService;
+import com.redculture.platform.service.rag.ChunkVectorStore;
+import com.redculture.platform.service.rag.EmbeddingClient;
+import com.redculture.platform.service.rag.VectorSearchCandidate;
 import com.redculture.platform.vo.EventSummaryVO;
 import com.redculture.platform.vo.HeroSummaryVO;
 import com.redculture.platform.vo.MapResourceMarkerVO;
@@ -26,6 +30,8 @@ import com.redculture.platform.vo.ai.KnowledgeRetrievalStatus;
 import com.redculture.platform.vo.ai.KnowledgeScopeType;
 import org.springframework.context.annotation.Profile;
 import org.springframework.data.neo4j.core.Neo4jClient;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 import org.springframework.util.StringUtils;
 
@@ -43,18 +49,18 @@ import java.util.Set;
 import java.util.function.Function;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 /**
- * 基于已审核业务数据的首版 RAG 检索实现。
- *
- * <p>Agent 只依赖 KnowledgeRetriever 接口，本类负责把学校/区域/资源范围
- * 转换成 content_chunk、entity_source_rel 和 Neo4j 图谱证据。首版采用结构化
- * 过滤加关键词排序，不引入新的向量库或数据库表。</p>
+ * Retrieves approved evidence with scoped ANN recall and second-stage hybrid reranking.
+ * Agent and teaching-plan generation both consume this implementation through
+ * {@link KnowledgeRetriever}; keyword matching is only an explicit degraded fallback.
  */
 @Component
 @Profile("!mock-rag")
 public class DatabaseKnowledgeRetriever implements KnowledgeRetriever {
 
+    private static final Logger log = LoggerFactory.getLogger(DatabaseKnowledgeRetriever.class);
     private static final int DEFAULT_TOP_K = 5;
     private static final int MAX_TOP_K = 8;
     private static final int MAX_CHUNKS = 8;
@@ -70,19 +76,28 @@ public class DatabaseKnowledgeRetriever implements KnowledgeRetriever {
     private final SchoolMapService schoolMapService;
     private final TownMapService townMapService;
     private final Neo4jClient neo4jClient;
+    private final RagProperties ragProperties;
+    private final EmbeddingClient embeddingClient;
+    private final ChunkVectorStore vectorStore;
 
     public DatabaseKnowledgeRetriever(ContentChunkMapper contentChunkMapper,
                                      EntitySourceRelMapper entitySourceRelMapper,
                                      DataSourceMapper dataSourceMapper,
                                      SchoolMapService schoolMapService,
                                      TownMapService townMapService,
-                                     Neo4jClient neo4jClient) {
+                                     Neo4jClient neo4jClient,
+                                     RagProperties ragProperties,
+                                     EmbeddingClient embeddingClient,
+                                     ChunkVectorStore vectorStore) {
         this.contentChunkMapper = contentChunkMapper;
         this.entitySourceRelMapper = entitySourceRelMapper;
         this.dataSourceMapper = dataSourceMapper;
         this.schoolMapService = schoolMapService;
         this.townMapService = townMapService;
         this.neo4jClient = neo4jClient;
+        this.ragProperties = ragProperties;
+        this.embeddingClient = embeddingClient;
+        this.vectorStore = vectorStore;
     }
 
     @Override
@@ -97,7 +112,8 @@ public class DatabaseKnowledgeRetriever implements KnowledgeRetriever {
                 return KnowledgeRetrieveResult.empty();
             }
 
-            List<ScoredChunk> scoredChunks = loadChunks(request, context.entityIds());
+            ChunkLoad chunkLoad = loadChunks(request, context.entityIds());
+            List<ScoredChunk> scoredChunks = chunkLoad.chunks();
             List<KnowledgeChunkVO> chunks = scoredChunks.stream()
                     .limit(normalizeTopK(request.getTopK()))
                     .map(ScoredChunk::chunk)
@@ -120,7 +136,7 @@ public class DatabaseKnowledgeRetriever implements KnowledgeRetriever {
             result.setCitationCandidates(limitList(candidates, MAX_CITATIONS));
             result.setRetrievalStatus(resolveStatus(
                     !chunks.isEmpty() || !context.graphFacts().isEmpty() || !candidates.isEmpty(),
-                    context.graphUnavailable()
+                    context.graphUnavailable() || chunkLoad.degraded()
             ));
             return result;
         } catch (RuntimeException exception) {
@@ -229,17 +245,83 @@ public class DatabaseKnowledgeRetriever implements KnowledgeRetriever {
         }
     }
 
-    private List<ScoredChunk> loadChunks(KnowledgeRetrieveRequest request,
-                                         Map<EntityType, Set<Long>> entityIds) {
+    private ChunkLoad loadChunks(KnowledgeRetrieveRequest request,
+                                 Map<EntityType, Set<Long>> entityIds) {
         if (entityIds.isEmpty()) {
-            return Collections.emptyList();
+            return new ChunkLoad(Collections.emptyList(), false);
         }
         Set<Long> ids = entityIds.values().stream()
                 .flatMap(Collection::stream)
                 .collect(Collectors.toCollection(LinkedHashSet::new));
         if (ids.isEmpty()) {
+            return new ChunkLoad(Collections.emptyList(), false);
+        }
+
+        if (ragProperties.isEnabled()) {
+            try {
+                List<ScoredChunk> vectorChunks = loadVectorChunks(request, entityIds);
+                if (!vectorChunks.isEmpty()) {
+                    return new ChunkLoad(vectorChunks, false);
+                }
+                log.warn("Vector retrieval returned no chunks; using keyword fallback");
+            } catch (RuntimeException exception) {
+                log.warn("Vector retrieval failed; using keyword fallback", exception);
+            }
+        }
+
+        return new ChunkLoad(loadKeywordChunks(request, entityIds, ids), true);
+    }
+
+    private List<ScoredChunk> loadVectorChunks(KnowledgeRetrieveRequest request,
+                                                Map<EntityType, Set<Long>> entityIds) {
+        Set<String> entityKeys = entityIds.entrySet().stream()
+                .flatMap(entry -> entry.getValue().stream()
+                        .map(id -> entry.getKey().getValue() + ":" + id))
+                .collect(Collectors.toCollection(LinkedHashSet::new));
+        float[] queryVector = embeddingClient.embed(retrievalQuery(request));
+        int candidateLimit = Math.min(
+                MAX_CHUNKS * Math.max(2, ragProperties.getCandidateMultiplier()),
+                normalizeTopK(request.getTopK()) * Math.max(2, ragProperties.getCandidateMultiplier())
+        );
+        List<VectorSearchCandidate> candidates = vectorStore.search(queryVector, entityKeys, candidateLimit);
+        if (candidates.isEmpty()) {
             return Collections.emptyList();
         }
+
+        Map<Long, Double> semanticScores = candidates.stream()
+                .collect(Collectors.toMap(
+                        VectorSearchCandidate::chunkId,
+                        VectorSearchCandidate::score,
+                        Math::max,
+                        LinkedHashMap::new
+                ));
+        Map<Long, ContentChunk> chunksById = contentChunkMapper.selectBatchIds(semanticScores.keySet()).stream()
+                .filter(Objects::nonNull)
+                .filter(chunk -> chunk.getChunkId() != null)
+                .filter(chunk -> entityIds.getOrDefault(chunk.getEntityType(), Collections.emptySet())
+                        .contains(chunk.getEntityId()))
+                .collect(Collectors.toMap(ContentChunk::getChunkId, Function.identity(), (first, second) -> first));
+        Set<String> terms = retrievalTerms(request);
+
+        return candidates.stream()
+                .map(candidate -> {
+                    ContentChunk chunk = chunksById.get(candidate.chunkId());
+                    if (chunk == null) {
+                        return null;
+                    }
+                    double rerankedScore = rerankScore(chunk, candidate.score(), terms);
+                    return new ScoredChunk(toChunk(chunk, rerankedScore, "vector+hybrid-rerank"), rerankedScore);
+                })
+                .filter(Objects::nonNull)
+                .sorted(Comparator.comparing(ScoredChunk::score).reversed()
+                        .thenComparing(item -> item.chunk().getChunkId(), Comparator.nullsLast(Long::compareTo)))
+                .limit(MAX_CHUNKS)
+                .collect(Collectors.toList());
+    }
+
+    private List<ScoredChunk> loadKeywordChunks(KnowledgeRetrieveRequest request,
+                                                 Map<EntityType, Set<Long>> entityIds,
+                                                 Set<Long> ids) {
 
         List<ContentChunk> chunks = contentChunkMapper.selectList(new LambdaQueryWrapper<ContentChunk>()
                 .in(ContentChunk::getEntityType, entityIds.keySet())
@@ -254,28 +336,31 @@ public class DatabaseKnowledgeRetriever implements KnowledgeRetriever {
                         && entityIds.getOrDefault(chunk.getEntityType(), Collections.emptySet())
                         .contains(chunk.getEntityId()))
                 .filter(chunk -> StringUtils.hasText(chunk.getChunkText()) || StringUtils.hasText(chunk.getChunkTitle()))
-                .map(chunk -> new ScoredChunk(toChunk(chunk, score(chunk, terms), terms), score(chunk, terms)))
+                .map(chunk -> {
+                    double value = keywordScore(chunk, terms);
+                    return new ScoredChunk(toChunk(chunk, value, "keyword-fallback"), value);
+                })
                 .sorted(Comparator.comparing(ScoredChunk::score).reversed()
                         .thenComparing(item -> item.chunk().getChunkId(), Comparator.nullsLast(Long::compareTo)))
                 .limit(MAX_CHUNKS)
                 .collect(Collectors.toList());
     }
 
-    private KnowledgeChunkVO toChunk(ContentChunk chunk, double score, Set<String> terms) {
+    private KnowledgeChunkVO toChunk(ContentChunk chunk, double score, String retrievalMethod) {
         KnowledgeChunkVO vo = new KnowledgeChunkVO();
         vo.setCitationId("chunk:" + chunk.getChunkId());
         vo.setChunkId(chunk.getChunkId());
         vo.setTitle(cleanOrDefault(chunk.getChunkTitle(), "内容分块 " + chunk.getChunkId()));
         vo.setText(truncate(chunk.getChunkText(), MAX_TEXT_LENGTH));
         vo.setScore(score);
-        vo.setRetrievalMethod(terms.isEmpty() ? "structured" : "keyword");
+        vo.setRetrievalMethod(retrievalMethod);
         vo.setEntityType(enumValue(chunk.getEntityType()));
         vo.setEntityId(chunk.getEntityId());
         vo.setSourceId(chunk.getSourceId());
         return vo;
     }
 
-    private double score(ContentChunk chunk, Set<String> terms) {
+    private double keywordScore(ContentChunk chunk, Set<String> terms) {
         String title = normalize(chunk.getChunkTitle());
         String text = normalize(chunk.getChunkText());
         if (terms.isEmpty()) {
@@ -291,6 +376,29 @@ public class DatabaseKnowledgeRetriever implements KnowledgeRetriever {
             }
         }
         return Math.min(0.99D, value);
+    }
+
+    private double rerankScore(ContentChunk chunk, double semanticScore, Set<String> terms) {
+        double normalizedSemantic = Math.max(0D, Math.min(1D, (semanticScore + 1D) / 2D));
+        double keyword = keywordScore(chunk, terms);
+        double titleCoverage = termCoverage(normalize(chunk.getChunkTitle()), terms);
+        return Math.min(0.999D, normalizedSemantic * 0.75D + keyword * 0.20D + titleCoverage * 0.05D);
+    }
+
+    private double termCoverage(String value, Set<String> terms) {
+        if (terms.isEmpty() || !StringUtils.hasText(value)) {
+            return 0D;
+        }
+        long matches = terms.stream().filter(value::contains).count();
+        return (double) matches / terms.size();
+    }
+
+    private String retrievalQuery(KnowledgeRetrieveRequest request) {
+        return Stream.of(request.getQuery(), request.getTheme(), request.getGrade())
+                .filter(StringUtils::hasText)
+                .map(String::trim)
+                .distinct()
+                .collect(Collectors.joining("\n"));
     }
 
     private Set<String> retrievalTerms(KnowledgeRetrieveRequest request) {
@@ -680,6 +788,9 @@ public class DatabaseKnowledgeRetriever implements KnowledgeRetriever {
     }
 
     private record ScoredChunk(KnowledgeChunkVO chunk, double score) {
+    }
+
+    private record ChunkLoad(List<ScoredChunk> chunks, boolean degraded) {
     }
 
     private record GraphLoad(List<KnowledgeGraphFactVO> facts, boolean unavailable) {

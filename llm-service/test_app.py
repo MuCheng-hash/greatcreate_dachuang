@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import app
 import pytest
@@ -13,7 +13,7 @@ from langchain_core.messages import AIMessage
 from llm_service.api import create_app
 from llm_service.repository import ConversationRepository
 from llm_service.schemas import AgentMessageRequest, TrustedContext
-from llm_service.settings import Settings
+from llm_service.settings import LlmModelTarget, Settings
 from llm_service.tools import ToolRuntimeContext, bind_tool_runtime, reset_tool_runtime, search_approved_resources
 
 
@@ -80,26 +80,19 @@ class AgentAnswerEndpointTest(unittest.TestCase):
 
     @patch.object(app, "LLM_API_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions")
     @patch.object(app, "LLM_API_KEY", "test-key")
-    @patch.object(app.urllib.request, "urlopen")
-    def test_calls_openai_compatible_json_endpoint(self, urlopen):
-        class FakeResponse:
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *_args):
-                return False
-
-            def read(self):
-                return '{"choices":[{"message":{"content":"```json\\n{\\"answer\\":\\"模型回答\\"}\\n```"}}]}'.encode("utf-8")
-
-        urlopen.return_value = FakeResponse()
+    @patch.object(app, "ModelGateway")
+    def test_calls_openai_compatible_through_model_router(self, gateway):
+        gateway.return_value.generate_json = AsyncMock(return_value={"answer": "模型回答"})
 
         result = app.call_openai_compatible("请回答")
 
         self.assertEqual(result["answer"], "模型回答")
-        request = urlopen.call_args.args[0]
-        self.assertEqual(request.full_url, "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions")
-        self.assertEqual(request.get_header("Authorization"), "Bearer test-key")
+        router_settings = gateway.call_args.args[0]
+        self.assertEqual(
+            router_settings.llm_api_url,
+            "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
+        )
+        self.assertEqual(router_settings.llm_api_key, "test-key")
 
 
 if __name__ == "__main__":
@@ -260,7 +253,10 @@ def test_model_output_filters_invented_citations(tmp_path: Path):
                 '"relatedResources":["红色纪念馆"],"followUpQuestions":[]}'
             ))]}
 
-    runtime._agent = FakeAgent()
+    runtime._agents = [(
+        LlmModelTarget("primary", "test", "test-model", "http://test", "test-key", 0),
+        FakeAgent(),
+    )]
     response = asyncio.run(runtime.handle(AgentMessageRequest.model_validate(message_payload())))
     assert response.status == "completed"
     assert [item.citation_id for item in response.citations] == ["chunk:1"]

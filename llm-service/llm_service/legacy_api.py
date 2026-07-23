@@ -1,23 +1,36 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import uvicorn
-import urllib.error
-import urllib.request
 from typing import Any, Optional
 
 from fastapi import Body, FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import ValidationError
 from llm_service.api import create_app
+from llm_service.model_gateway import ModelGateway
+from llm_service.observability import (
+    FallbackAlertManager,
+    LlmObservability,
+    LlmTraceContext,
+    configure_json_logging,
+)
+from llm_service.settings import get_settings
 
 from agent.config import AgentSettings
 from agent.runtime import AgentRuntime
 
 settings = AgentSettings.from_env()
-agent_runtime = AgentRuntime(settings)
-app = create_app()
+service_settings = get_settings()
+configure_json_logging()
+observability = LlmObservability(
+    service_settings.database_path, service_settings.llm_model_pricing
+)
+alerts = FallbackAlertManager(service_settings.llm_alert_webhook_url)
+agent_runtime = AgentRuntime(settings, observability, alerts)
+app = create_app(service_settings, observability, alerts)
 
 
 LLM_API_URL = os.getenv("LLM_API_URL", "").strip()
@@ -125,31 +138,6 @@ def build_teaching_plan_fallback(payload: dict[str, Any], status: str = "degrade
     }
 
 
-def build_teaching_plan_prompt(payload: dict[str, Any]) -> str:
-    req = payload.get("request") or {}
-    school = payload.get("school") or {}
-    resources = payload.get("resources") or []
-    chunks = payload.get("contentChunks") or []
-    graph_facts = payload.get("graphFacts") or []
-    candidates = payload.get("citationCandidates") or []
-    context = {
-        "request": req,
-        "school": school,
-        "resources": resources[:8],
-        "contentChunks": chunks[:8],
-        "graphFacts": graph_facts[:8],
-        "citationCandidateIds": [item.get("citationId") for item in candidates if isinstance(item, dict)],
-    }
-    return (
-        "你是乡村学校本土思政教育课程助手。只能依据给定上下文生成，不要编造来源。"
-        "请输出严格 JSON，不要 Markdown。字段必须包含：generationStatus, message, theme, grade, "
-        "activityType, durationMinutes, practiceRequired, objectives, resourceBasis, activityFlow, "
-        "preparation, fieldTasks, safetyNotes, reflection, evaluation, citations, relatedResources, "
-        "followUpSuggestions。citations 只允许使用 citationCandidateIds 中的 citationId。\n\n"
-        f"上下文：{json.dumps(context, ensure_ascii=False)}"
-    )
-
-
 def resolve_llm_api_url() -> Optional[str]:
     configured_url = (LLM_API_URL or LLM_BASE_URL).strip()
     if not configured_url:
@@ -175,43 +163,23 @@ def parse_model_json(content: Any) -> Optional[dict[str, Any]]:
     return parsed if isinstance(parsed, dict) else None
 
 
-def call_openai_compatible(prompt: str) -> Optional[dict[str, Any]]:
-    api_url = resolve_llm_api_url()
-    if not api_url or not LLM_API_KEY:
-        return None
-
-    body = {
-        "model": LLM_MODEL,
-        "messages": [
-            {"role": "system", "content": "Return valid JSON only."},
-            {"role": "user", "content": prompt},
-        ],
-        "temperature": 0.3,
-    }
-    request_data = json.dumps(body).encode("utf-8")
-    req = urllib.request.Request(
-        api_url,
-        data=request_data,
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {LLM_API_KEY}",
-        },
-        method="POST",
+def call_openai_compatible(
+    prompt: str, trace_context: LlmTraceContext | None = None
+) -> Optional[dict[str, Any]]:
+    trace_context = trace_context or LlmTraceContext(feature="legacy-agent-answer")
+    router_settings = service_settings.model_copy(
+        update={
+            "llm_api_url": resolve_llm_api_url() or service_settings.llm_api_url,
+            "llm_api_key": LLM_API_KEY or service_settings.llm_api_key,
+            "llm_model": LLM_MODEL or service_settings.llm_model,
+        }
     )
-    try:
-        with urllib.request.urlopen(req, timeout=LLM_TIMEOUT_SECONDS) as response:
-            raw = response.read().decode("utf-8")
-        data = json.loads(raw)
-        choices = data.get("choices") if isinstance(data, dict) else None
-        if not isinstance(choices, list) or not choices:
-            return None
-        message = choices[0].get("message") if isinstance(choices[0], dict) else None
-        content = message.get("content") if isinstance(message, dict) else None
-        if not content:
-            return None
-        return parse_model_json(content)
-    except (urllib.error.URLError, TimeoutError, OSError, ValueError, TypeError):
-        return None
+    router = ModelGateway(router_settings, observability, alerts)
+    return asyncio.run(router.generate_json(
+        prompt,
+        trace_context,
+        lambda value: bool(str(value.get("answer") or "").strip()),
+    ))
 
 
 def build_explain_answer(payload: dict[str, Any]) -> dict[str, Any]:
@@ -435,7 +403,23 @@ def build_agent_answer_fallback(payload: dict[str, Any], message: Optional[str] 
 
 
 def build_agent_answer(payload: dict[str, Any]) -> dict[str, Any]:
-    generated = call_openai_compatible(build_agent_answer_prompt(payload))
+    actor = payload.get("actor") if isinstance(payload.get("actor"), dict) else {}
+    scope = payload.get("scope") if isinstance(payload.get("scope"), dict) else {}
+    account_id = actor.get("accountId") or payload.get("accountId")
+    school_id = actor.get("schoolId") or scope.get("scopeId")
+    user_id = f"account:{account_id}" if account_id is not None else (
+        f"school:{school_id}" if school_id is not None else "anonymous"
+    )
+    session_id = str(payload.get("conversationId") or payload.get("sessionId") or "")
+    generated = call_openai_compatible(
+        build_agent_answer_prompt(payload),
+        LlmTraceContext(
+            feature="legacy-agent-answer",
+            user_id=user_id,
+            session_id=session_id,
+            metadata={"intent": payload.get("intent") or "UNKNOWN"},
+        ),
+    )
     available_ids = set(agent_evidence_citation_ids(payload))
     if isinstance(generated, dict) and generated.get("answer"):
         raw_ids = generated.get("citationIds") or []
@@ -452,16 +436,6 @@ def build_agent_answer(payload: dict[str, Any]) -> dict[str, Any]:
             "message": "已根据受控业务上下文和检索证据生成回答。",
         }
     return build_agent_answer_fallback(payload, "真实 LLM 未配置或响应不可用，已使用本地兜底回答。")
-
-
-def build_structured_teaching_plan(payload: dict[str, Any]) -> dict[str, Any]:
-    prompt = build_teaching_plan_prompt(payload)
-    generated = call_openai_compatible(prompt)
-    if generated:
-        generated.setdefault("generationStatus", "completed")
-        generated.setdefault("message", "已调用配置的 LLM 服务生成结构化教学方案。")
-        return generated
-    return build_teaching_plan_fallback(payload)
 
 
 @app.post("/llm/town/explain")
@@ -510,11 +484,6 @@ def stream_agent(payload: dict[str, Any] | None = Body(default=None)) -> Streami
             "X-Accel-Buffering": "no",
         },
     )
-
-
-@app.post("/llm/teaching-plan/generate")
-def generate_teaching_plan(payload: dict[str, Any] | None = Body(default=None)) -> Any:
-    return build_structured_teaching_plan(payload or {})
 
 
 @app.get("/health/live")

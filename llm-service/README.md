@@ -24,6 +24,7 @@ The default address is `http://127.0.0.1:5050`.
 | `LLM_MODEL` | `qwen-plus` | Provider model name |
 | `LLM_TIMEOUT_SECONDS` | `20` | Model request timeout |
 | `DATABASE_PATH` | `data/agent-state.sqlite3` | Durable local conversation store |
+| `PROMPT_ADMIN_TOKEN` | empty | Required token for prompt-management APIs |
 | `ALLOWED_ORIGINS` | empty | Comma-separated browser origins; empty means no CORS middleware |
 | `AGENT_CONTEXT_TOKEN_BUDGET` | `6000` | Approximate input budget |
 | `AGENT_MAX_TOOL_ROUNDS` | `6` | Maximum model/tool loop rounds |
@@ -76,6 +77,7 @@ These deterministic routes remain compatible during migration:
 - `POST /llm/agent/run`
 - `POST /llm/agent/stream`
 - `POST /llm/teaching-plan/generate`
+- `POST /llm/teaching-plan/generate/stream`（SSE：`meta`、`token`、`result`、`done`）
 - `GET /health/live`
 - `GET /health/ready`
 
@@ -87,6 +89,48 @@ LangChain Agent，根据受控工具结果生成结构化答案；`/llm/agent/st
 - `POST /llm/resource-discovery/classify`
 
 Teaching-plan generation and POI classification are structured workflows, not open-ended conversations. They use the same asynchronous LangChain model adapter and retain local fallbacks.
+
+## Prompt 管理与效果评估
+
+教学方案 prompt 不再写在 Python 源码中。仓库中的 `prompts/teaching-plan/v1/system.md` 只负责首次初始化；运行时版本、活动版本、实验配置和调用记录均保存在 `DATABASE_PATH` 指向的 SQLite 数据库中。管理操作需要请求头：
+
+```http
+X-Prompt-Admin-Token: <PROMPT_ADMIN_TOKEN>
+```
+
+发布并激活新版本：
+
+```http
+POST /admin/prompts/teaching-plan/versions
+Content-Type: application/json
+
+{"version":"v2","content":"新版提示词...\n{{context_json}}","createdBy":"admin","notes":"强化安全约束"}
+```
+
+```http
+POST /admin/prompts/teaching-plan/versions/v2/activate
+```
+
+配置稳定分流的 A/B 实验；同一学校会通过哈希持续命中同一版本：
+
+```http
+PUT /admin/prompts/teaching-plan/experiment
+Content-Type: application/json
+
+{
+  "experimentKey":"teaching-plan-v2-2026-07",
+  "active":true,
+  "variants":[{"version":"v1","weight":50},{"version":"v2","weight":50}]
+}
+```
+
+效果评估接口：
+
+- `GET /admin/prompts/teaching-plan/metrics`：按版本返回调用量、成功率、平均耗时和平均人工评分。
+- `POST /admin/prompt-runs/{runId}/feedback`：提交 `qualityScore`（0-5）和 `feedback`。
+- `GET /admin/prompts/teaching-plan/versions`：查看所有版本与当前活动版本。
+
+教学方案最终响应会包含 `promptVersion`、`promptRunId`、`promptExperiment` 和 `promptVariant`，用于把用户反馈准确归因到版本和实验组。
 
 - `LLM_API_URL`：模型接口地址
 - `LLM_BASE_URL`：可选的兼容接口基础地址；配置后服务会自动补充 `/chat/completions`
@@ -151,3 +195,88 @@ Agent 运行时通用配置：
 ## Tool and security boundary
 
 The Agent can only call the registered read-only tools for the trusted context supplied by Spring: scope context, approved resources, retrieved knowledge, and graph facts. It cannot execute arbitrary SQL, Cypher, URLs, shell commands, or change the owner/scope. Tool calls are bounded, audited, and citation IDs are filtered against supplied evidence.
+
+## LLM observability
+
+Every provider call is recorded in the `llm_trace` SQLite table. Agent tool loops create
+one span for each provider request under the same trace. Prompt and response bodies are
+not stored. Each record contains user, session, feature, provider, model, status, typed
+error, provider token usage, calculated cost, total latency, time to first token, and JSON
+validity. Runtime log events are emitted as one JSON object per line.
+
+Configuration:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `OBSERVABILITY_ADMIN_TOKEN` | falls back to `PROMPT_ADMIN_TOKEN` | Protects trace and aggregate APIs |
+| `LLM_MODEL_PRICING` | `{}` | JSON map of per-million-token USD prices |
+
+Example pricing configuration (replace values with the current provider contract):
+
+```powershell
+$env:LLM_MODEL_PRICING = '{"qwen-plus":{"input":1.0,"output":2.0},"*":{"input":0.5,"output":1.0}}'
+$env:OBSERVABILITY_ADMIN_TOKEN = "change-me"
+```
+
+Provider-reported token usage is used when available. Calls without provider usage remain
+`tokenSource=unavailable`; they are never filled with fabricated estimates. Cost remains
+unpriced until a matching model or `*` price is configured.
+
+Operational endpoints:
+
+- `GET /admin/observability/traces`: paginated call details.
+- `GET /admin/observability/summary`: calls, success/valid-JSON rates, P50/P95/P99,
+  tokens, cost, typed errors, and per-user/session/feature groups.
+- `GET /metrics`: low-cardinality Prometheus counters without user or session labels.
+
+Both admin endpoints accept `userId`, `sessionId`, `feature`, `model`, `status`, `traceId`,
+`startedAfter`, and `startedBefore` filters and require:
+
+```http
+X-Observability-Admin-Token: <OBSERVABILITY_ADMIN_TOKEN>
+```
+
+Error types include `timeout`, `network`, `authentication`, `rate_limit`, `json_parse`,
+`schema_validation`, `invalid_response`, `provider_error`, and `cancelled`. JSON/schema failures and cancellation
+log at warning level; provider, network, authentication, rate-limit, and timeout failures
+log at error level.
+
+## Model fallback chain
+
+Structured generation no longer converts a provider exception directly into a hardcoded
+response. Every request uses this ordered chain:
+
+1. Primary model (`LLM_*` / `AGENT_PRIMARY_*`).
+2. Lower-cost cloud fallback (`LLM_FALLBACK_*` / `AGENT_FALLBACK_*`).
+3. Lightweight or local model (`LLM_LIGHTWEIGHT_*` / `AGENT_LIGHTWEIGHT_*`).
+4. Evidence-bound deterministic response after all configured models fail.
+
+Each failed attempt has its own LLM trace and typed error. A transition emits an
+`llm_model_fallback` warning. Exhausting the chain emits an `llm_fallback_exhausted` error
+and optionally posts the same metadata-only payload to `LLM_ALERT_WEBHOOK_URL`. Prompts and
+responses are never included in alerts.
+
+Example:
+
+```powershell
+$env:LLM_MODEL = "gpt-4"
+$env:LLM_API_URL = "https://primary.example/v1"
+$env:LLM_API_KEY = "primary-key"
+
+$env:LLM_FALLBACK_MODEL = "gpt-3.5"
+$env:LLM_FALLBACK_API_URL = "https://fallback.example/v1"
+$env:LLM_FALLBACK_API_KEY = "fallback-key"
+
+$env:LLM_LIGHTWEIGHT_PROVIDER = "ollama"
+$env:LLM_LIGHTWEIGHT_MODEL = "qwen3:8b"
+$env:LLM_LIGHTWEIGHT_API_URL = "http://127.0.0.1:11434/v1"
+$env:LLM_ALERT_WEBHOOK_URL = "https://alerts.example/hooks/llm"
+```
+
+For the tool-based Agent use the equivalent `AGENT_PRIMARY_*`, `AGENT_FALLBACK_*`, and
+`AGENT_LIGHTWEIGHT_*` variables. Ollama uses `http://127.0.0.1:11434/v1` and the placeholder
+API key `ollama` automatically when its lightweight model is configured.
+
+Streaming fallback emits a `fallback` or `model.fallback` SSE event with `reset=true` after
+partial output. Java forwards the boundary and the Vue clients clear the incomplete draft
+before rendering tokens from the next model.

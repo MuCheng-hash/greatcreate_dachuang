@@ -1,6 +1,7 @@
 package com.redculture.platform.service.agent;
 
 import com.redculture.platform.config.AppMapProperties;
+import com.redculture.platform.config.AgentQaFallbackConfig;
 import com.redculture.platform.vo.AgentGenerationStatus;
 import com.redculture.platform.vo.AgentIntent;
 import com.redculture.platform.vo.ai.KnowledgeRetrieveResult;
@@ -30,13 +31,14 @@ class LlmAnswerGeneratorTest {
     }
 
     @Test
-    void registersOnlyOneAnswerGeneratorWhenLlmGeneratorIsAvailable() {
+    void registersTemplateFallbackAlongsidePrimaryLlmGenerator() {
         try (AnnotationConfigApplicationContext context = new AnnotationConfigApplicationContext()) {
             context.registerBean(AppMapProperties.class, AppMapProperties::new);
-            context.register(LlmAnswerGenerator.class, TemplateAnswerGenerator.class);
+            context.register(LlmAnswerGenerator.class, AgentQaFallbackConfig.class);
             context.refresh();
 
             assertEquals(2, context.getBeansOfType(AnswerGenerator.class).size());
+            assertTrue(context.containsBean("templateAnswerGenerator"));
             assertTrue(context.getBean(AnswerGenerator.class) instanceof LlmAnswerGenerator);
         }
     }

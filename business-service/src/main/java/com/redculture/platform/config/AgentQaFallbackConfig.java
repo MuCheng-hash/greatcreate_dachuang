@@ -1,7 +1,6 @@
 package com.redculture.platform.config;
 
 import com.redculture.platform.service.KnowledgeRetriever;
-import com.redculture.platform.service.agent.AnswerGenerator;
 import com.redculture.platform.service.agent.TemplateAnswerGenerator;
 import com.redculture.platform.service.impl.MockKnowledgeRetriever;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
@@ -21,8 +20,8 @@ public class AgentQaFallbackConfig {
     }
 
     @Bean
-    @ConditionalOnMissingBean(AnswerGenerator.class)
-    public AnswerGenerator answerGenerator() {
+    @ConditionalOnMissingBean(TemplateAnswerGenerator.class)
+    public TemplateAnswerGenerator templateAnswerGenerator() {
         return new TemplateAnswerGenerator();
     }
 }

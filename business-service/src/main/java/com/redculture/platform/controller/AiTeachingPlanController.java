@@ -16,6 +16,8 @@ import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.http.MediaType;
+import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 @RestController
 @RequestMapping("/api/ai/teaching-plans")
@@ -37,11 +39,18 @@ public class AiTeachingPlanController {
     public ApiResponse<GeneratedTeachingPlanResponse> generate(@RequestBody TeachingPlanGenerateRequest request,
                                                                HttpSession session) {
         try {
-            requireSchoolAccess(request == null ? null : request.getSchoolId(), session);
-            return ApiResponse.success(aiTeachingPlanService.generatePlan(request));
+            AuthCurrentUserVO user = requireSchoolAccess(request == null ? null : request.getSchoolId(), session);
+            return ApiResponse.success(aiTeachingPlanService.generatePlan(
+                    request, user.getAccountId(), session.getId()));
         } catch (IllegalArgumentException exception) {
             return ApiResponse.fail(exception.getMessage());
         }
+    }
+
+    @PostMapping(value = "/generate/stream", produces = "text/event-stream;charset=UTF-8")
+    public SseEmitter generateStream(@RequestBody TeachingPlanGenerateRequest request, HttpSession session) {
+        AuthCurrentUserVO user = requireSchoolAccess(request == null ? null : request.getSchoolId(), session);
+        return aiTeachingPlanService.generatePlanStream(request, user.getAccountId(), session.getId());
     }
 
     @PostMapping("/save-draft")
@@ -64,7 +73,7 @@ public class AiTeachingPlanController {
         return ApiResponse.success(teachingActivityPlanService.listBySchoolId(user.getSchoolId(), 1L, 50L));
     }
 
-    private void requireSchoolAccess(Long schoolId, HttpSession session) {
+    private AuthCurrentUserVO requireSchoolAccess(Long schoolId, HttpSession session) {
         AuthCurrentUserVO user = authService.currentUser(session);
         if (user == null || schoolId == null) {
             throw new IllegalArgumentException("school account is required");
@@ -72,5 +81,6 @@ public class AiTeachingPlanController {
         if (!"platform_admin".equals(user.getRoleCode()) && !schoolId.equals(user.getSchoolId())) {
             throw new IllegalArgumentException("cannot access another school");
         }
+        return user;
     }
 }

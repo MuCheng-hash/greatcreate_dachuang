@@ -8,10 +8,16 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, Tool
 
 from .memory import ContextWindowManager
 from .model_gateway import ModelGateway, message_text
+from .observability import (
+    FallbackAlertManager,
+    LlmObservability,
+    LlmTraceContext,
+    classify_llm_error,
+)
 from .planner import AgentPlan, AgentPlanner
 from .repository import ConversationRepository, ThreadRecord
 from .schemas import AgentMessageRequest, AgentMessageResponse, AgentModelOutput, Citation, ToolExecution, TrustedContext
-from .settings import Settings
+from .settings import LlmModelTarget, Settings
 from .tools import AGENT_TOOLS, ToolRuntimeContext, bind_tool_runtime, reset_tool_runtime
 
 
@@ -25,21 +31,29 @@ SYSTEM_PROMPT = """你是红韵乡途学校思政教育助手。
 
 
 class AgentRuntime:
-    def __init__(self, settings: Settings, repository: ConversationRepository, model: ModelGateway | None = None):
+    def __init__(
+        self,
+        settings: Settings,
+        repository: ConversationRepository,
+        model: ModelGateway | None = None,
+        observability: LlmObservability | None = None,
+        alerts: FallbackAlertManager | None = None,
+    ):
         self.settings = settings
         self.repository = repository
-        self.model = model or ModelGateway(settings)
+        self.observability = observability
+        self.alerts = alerts or FallbackAlertManager(settings.llm_alert_webhook_url)
+        self.model = model or ModelGateway(settings, observability, self.alerts)
         self.context_manager = ContextWindowManager(
             settings.agent_context_token_budget,
             settings.agent_recent_message_count,
             settings.agent_summary_character_limit,
         )
         self.planner = AgentPlanner(settings.agent_max_tool_rounds)
-        self._agent = create_agent(
-            self.model.chat_model,
-            tools=AGENT_TOOLS,
-            system_prompt=SYSTEM_PROMPT,
-        ) if self.model.chat_model is not None else None
+        self._agents = [
+            (target, create_agent(chat_model, tools=AGENT_TOOLS, system_prompt=SYSTEM_PROMPT))
+            for target, chat_model in self.model.chat_models
+        ]
 
     async def handle(self, request: AgentMessageRequest) -> AgentMessageResponse:
         thread = self._get_or_create_thread(request)
@@ -51,7 +65,14 @@ class AgentRuntime:
 
         trusted = request.context
         plan = self.planner.plan(request.message)
-        if self._agent is None:
+        if not self._agents:
+            self.alerts.exhausted(
+                LlmTraceContext(
+                    feature="stateful-agent", user_id=request.owner_id,
+                    session_id=thread.thread_id,
+                ),
+                [{"status": "not_configured"}],
+            )
             result = self._degraded_answer(request, trusted, thread.thread_id, window.compacted)
         else:
             result = await self._invoke_agent(request, trusted, thread, window.messages, window.summary, window.compacted, plan)
@@ -90,16 +111,59 @@ class AgentRuntime:
             output_character_limit=self.settings.agent_tool_output_character_limit,
         )
         token = bind_tool_runtime(runtime)
+        context = LlmTraceContext(
+            feature="stateful-agent",
+            user_id=request.owner_id,
+            session_id=thread.thread_id,
+            expected_json=True,
+            metadata={"intent": request.intent or "", "scopeType": request.scope_type},
+        )
+        attempts: list[dict[str, Any]] = []
+        parsed: AgentModelOutput | None = None
         try:
-            result = await self._agent.ainvoke(
-                {"messages": lc_messages},
-                config={"recursion_limit": max(3, plan.max_tool_rounds * 2 + 3)},
-            )
-        except Exception:
-            return self._degraded_answer(request, trusted, thread.thread_id, compacted, runtime.executions, status="degraded")
+            for index, (target, agent) in enumerate(self._agents):
+                config: dict[str, Any] = {
+                    "recursion_limit": max(3, plan.max_tool_rounds * 2 + 3)
+                }
+                if self.observability is not None:
+                    attempt_context = LlmTraceContext(
+                        feature=context.feature,
+                        user_id=context.user_id,
+                        session_id=context.session_id,
+                        trace_id=context.trace_id,
+                        expected_json=True,
+                        metadata={
+                            **context.metadata,
+                            "modelRole": target.role,
+                            "fallbackLevel": target.fallback_level,
+                        },
+                    )
+                    config["callbacks"] = [self.observability.callback(
+                        attempt_context, target.provider, target.model
+                    )]
+                error_type = "json_parse"
+                try:
+                    result = await agent.ainvoke({"messages": lc_messages}, config=config)
+                    parsed = self._parse_model_output(result)
+                    if parsed is not None and parsed.answer.strip():
+                        break
+                except Exception as exc:
+                    error_type = classify_llm_error(exc)
+                attempts.append(self._model_attempt(target, error_type))
+                if index + 1 < len(self._agents):
+                    next_target = self._agents[index + 1][0]
+                    self.alerts.fallback(
+                        context, target.model, next_target.model, error_type,
+                        next_target.fallback_level,
+                    )
         finally:
             reset_tool_runtime(token)
-        parsed = self._parse_model_output(result)
+        if parsed is None or not parsed.answer.strip():
+            self.alerts.exhausted(context, attempts or [{"status": "not_configured"}])
+            return self._degraded_answer(
+                request, trusted, thread.thread_id, compacted,
+                runtime.executions, status="degraded",
+            )
         allowed = self._allowed_citations(trusted)
         citations = [self._citation_by_id(trusted, item) for item in parsed.citation_ids if item in allowed]
         citations = [item for item in citations if item is not None]
@@ -111,7 +175,7 @@ class AgentRuntime:
             toolExecutions=runtime.executions, contextCompacted=compacted,
         )
 
-    def _parse_model_output(self, result: dict[str, Any]) -> AgentModelOutput:
+    def _parse_model_output(self, result: dict[str, Any]) -> AgentModelOutput | None:
         messages = result.get("messages", []) if isinstance(result, dict) else []
         final_content = ""
         for message in reversed(messages):
@@ -126,7 +190,18 @@ class AgentRuntime:
                     final_content = final_content[4:].lstrip()
             return AgentModelOutput.model_validate(json.loads(final_content))
         except (ValueError, TypeError, json.JSONDecodeError):
-            return AgentModelOutput(answer=final_content or "暂时无法生成有效回答。")
+            return None
+
+    @staticmethod
+    def _model_attempt(target: LlmModelTarget, error_type: str) -> dict[str, Any]:
+        return {
+            "provider": target.provider,
+            "model": target.model,
+            "modelRole": target.role,
+            "fallbackLevel": target.fallback_level,
+            "status": "failed",
+            "errorType": error_type,
+        }
 
     def _degraded_answer(
         self, request: AgentMessageRequest, trusted: TrustedContext, thread_id: str,

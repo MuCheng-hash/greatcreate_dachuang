@@ -1,6 +1,6 @@
 <script setup>
 import { computed, onMounted, reactive, ref } from "vue";
-import { BookOpenCheck, FilePlus2, Save, Sparkles } from "@lucide/vue";
+import { BookOpenCheck, FilePlus2, Save, Sparkles, Square } from "@lucide/vue";
 import AppShell from "@/components/AppShell.vue";
 import InlineNotice from "@/components/InlineNotice.vue";
 import LoadingBlock from "@/components/LoadingBlock.vue";
@@ -17,6 +17,17 @@ const loading = ref(false);
 const saving = ref(false);
 const historyLoading = ref(false);
 const notice = reactive({ tone: "", text: "" });
+const streamText = ref("");
+const streamStage = ref("");
+const activeAbortController = ref(null);
+
+const streamPreview = computed(() => streamText.value
+  .replace(/\\n/g, "\n")
+  .replace(/"(?:generationStatus|message|theme|grade|activityType|durationMinutes|practiceRequired|objectives|resourceBasis|activityFlow|preparation|fieldTasks|safetyNotes|reflection|evaluation|citations|relatedResources|followUpSuggestions)"\s*:/g, "")
+  .replace(/[{}\[\]"]/g, "")
+  .replace(/,\s*/g, "\n")
+  .replace(/\n{3,}/g, "\n\n")
+  .trim());
 
 const sections = computed(() => generated.value ? [
   ["教学目标", generated.value.objectives], ["资源依据", generated.value.resourceBasis], ["活动流程", generated.value.activityFlow],
@@ -50,18 +61,51 @@ async function generate() {
   }
   loading.value = true;
   generated.value = null;
+  streamText.value = "";
+  streamStage.value = "正在准备教学依据";
+  const abortController = new AbortController();
+  activeAbortController.value = abortController;
   try {
-    generated.value = await api.post("/api/ai/teaching-plans/generate", {
+    const request = {
       schoolId: auth.user.schoolId, grade: form.grade.trim(), theme: form.theme.trim(), activityType: form.activityType,
       durationMinutes: Number(form.durationMinutes), practiceRequired: form.practiceRequired
+    };
+    let finalReceived = false;
+    await api.stream("/api/ai/teaching-plans/generate/stream", request, {
+      signal: abortController.signal,
+      onEvent(eventName, data) {
+        if (eventName === "stage") {
+          streamStage.value = data.message || "正在生成教学方案";
+        } else if (eventName === "token") {
+          streamText.value += data.delta || "";
+          streamStage.value = "正在生成教学方案";
+        } else if (eventName === "fallback") {
+          if (data.reset) streamText.value = "";
+          streamStage.value = data.message || "正在切换备用模型";
+        } else if (eventName === "result") {
+          generated.value = data;
+          finalReceived = true;
+        } else if (eventName === "error") {
+          throw new Error(data.message || "教学方案流式生成失败");
+        }
+      }
     });
+    if (!finalReceived) throw new Error("流式服务未返回最终方案");
     notice.tone = generated.value.generationStatus === "completed" ? "success" : "info";
     notice.text = generated.value.message || (generated.value.generationStatus === "completed" ? "教学方案已生成。" : "已生成可用的本地方案。 ");
   } catch (error) {
+    if (error?.name === "AbortError") {
+      notice.tone = "info"; notice.text = "已停止生成。"; return;
+    }
     notice.tone = "error"; notice.text = error.message || "教学方案生成失败。";
   } finally {
     loading.value = false;
+    activeAbortController.value = null;
   }
+}
+
+function stopGeneration() {
+  activeAbortController.value?.abort();
 }
 
 async function saveDraft() {
@@ -101,7 +145,8 @@ function statusLabel(status) {
           <label>活动类型<select v-model="form.activityType"><option value="VOLUNTEER_SERVICE">志愿服务</option><option value="FIELD_TRIP">实地研学</option><option value="CLASSROOM">课堂教学</option><option value="LABOR_PRACTICE">劳动实践</option><option value="SCHOOL_BASED_COURSE">校本课程</option></select></label>
           <label>活动时长（分钟）<input v-model.number="form.durationMinutes" type="number" min="20" step="10" /></label>
           <label class="check-field"><input v-model="form.practiceRequired" type="checkbox" /><span>包含线下实践活动</span></label>
-          <button class="primary-button full-button" type="submit" :disabled="loading"><Sparkles :size="18" />{{ loading ? "正在生成" : "生成教学方案" }}</button>
+          <button v-if="!loading" class="primary-button full-button" type="submit"><Sparkles :size="18" />生成教学方案</button>
+          <button v-else class="secondary-button full-button" type="button" @click="stopGeneration"><Square :size="16" />停止生成</button>
         </form>
       </section>
 
@@ -109,7 +154,10 @@ function statusLabel(status) {
         <div class="panel-header"><div><h2>生成结果</h2><p>内容可保存为草稿，由管理员继续审核完善。</p></div><button class="secondary-button" type="button" :disabled="!generated || saving" @click="saveDraft"><Save :size="17" />{{ saving ? "保存中" : "保存草稿" }}</button></div>
         <div class="panel-body result-scroll">
           <InlineNotice v-if="notice.text" :tone="notice.tone">{{ notice.text }}</InlineNotice>
-          <LoadingBlock v-if="loading" />
+          <div v-if="loading" class="streaming-plan" aria-live="polite">
+            <div class="streaming-status"><span class="streaming-dot"></span>{{ streamStage }}</div>
+            <div class="streaming-copy">{{ streamPreview }}<span class="streaming-caret"></span></div>
+          </div>
           <div v-else-if="generated" class="generated-plan">
             <header><div><span class="badge badge-red">{{ generated.grade }}</span><span class="badge">{{ generated.durationMinutes }} 分钟</span></div><h2>{{ generated.theme }}</h2></header>
             <section v-for="([title, items]) in sections" :key="title"><h3>{{ title }}</h3><ul><li v-for="item in items" :key="item">{{ item }}</li></ul></section>
@@ -136,6 +184,13 @@ function statusLabel(status) {
 .check-field input { width: 17px; min-height: 17px; }
 .result-panel { min-height: 650px; }
 .result-scroll { max-height: calc(100vh - 170px); overflow-y: auto; }
+.streaming-plan { min-height: 460px; padding: 18px 0; }
+.streaming-status { display: flex; align-items: center; gap: 8px; color: var(--green); font-size: 13px; font-weight: 700; }
+.streaming-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--red); animation: pulse 1.1s ease-in-out infinite; }
+.streaming-copy { margin-top: 18px; white-space: pre-wrap; color: var(--text); line-height: 1.85; font-size: 15px; }
+.streaming-caret { display: inline-block; width: 2px; height: 1.1em; margin-left: 3px; vertical-align: -2px; background: var(--red); animation: blink .8s steps(1) infinite; }
+@keyframes pulse { 50% { opacity: .35; transform: scale(.8); } }
+@keyframes blink { 50% { opacity: 0; } }
 .generated-plan { margin-top: 18px; }
 .generated-plan header { padding-bottom: 18px; border-bottom: 1px solid var(--line); }
 .generated-plan header > div { display: flex; gap: 7px; }

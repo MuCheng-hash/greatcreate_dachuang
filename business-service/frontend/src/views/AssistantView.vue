@@ -149,6 +149,9 @@ async function requestAssistant(userText) {
             if (previous) previous.status = data.status || "completed";
             else assistantMessage.toolEvents.push({ toolName: data.toolName, status: data.status || "completed" });
             assistantMessage.streamStatus = data.status === "ok" ? "工具结果已返回，正在整理回答" : "部分工具不可用，正在降级处理";
+          } else if (eventName === "model.fallback") {
+            if (data.reset) assistantMessage.answer = "";
+            assistantMessage.streamStatus = `正在切换备用模型：${data.nextModel || "轻量模型"}`;
           } else if (eventName === "token") {
             assistantMessage.answer += data.delta || "";
             assistantMessage.streamStatus = "正在生成回答";

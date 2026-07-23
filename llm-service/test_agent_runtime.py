@@ -63,24 +63,30 @@ class AgentRuntimeTest(unittest.TestCase):
             "AGENT_PRIMARY_MODEL": "qwen-plus",
             "AGENT_PRIMARY_BASE_URL": "https://dashscope.aliyuncs.com/compatible-mode/v1",
             "AGENT_PRIMARY_API_KEY": "bailian-key",
-            "AGENT_FALLBACK_PROVIDER": "ollama",
-            "AGENT_FALLBACK_MODEL": "qwen3:8b",
-            "AGENT_FALLBACK_BASE_URL": "http://127.0.0.1:11434/v1",
-            "AGENT_FALLBACK_API_KEY": "ollama",
+            "AGENT_FALLBACK_PROVIDER": "openai-compatible",
+            "AGENT_FALLBACK_MODEL": "gpt-3.5",
+            "AGENT_FALLBACK_BASE_URL": "https://fallback.example/v1",
+            "AGENT_FALLBACK_API_KEY": "fallback-key",
+            "AGENT_LIGHTWEIGHT_PROVIDER": "ollama",
+            "AGENT_LIGHTWEIGHT_MODEL": "qwen3:8b",
+            "AGENT_LIGHTWEIGHT_BASE_URL": "http://127.0.0.1:11434/v1",
+            "AGENT_LIGHTWEIGHT_API_KEY": "ollama",
         }
         with patch.dict(os.environ, values, clear=True):
             settings = AgentSettings.from_env()
 
         chain = settings.model_chain()
-        self.assertEqual(["qwen-plus", "qwen3:8b"], [item.model for item in chain])
-        self.assertEqual(["bailian", "ollama"], [item.provider for item in chain])
+        self.assertEqual(["qwen-plus", "gpt-3.5", "qwen3:8b"], [item.model for item in chain])
+        self.assertEqual(["bailian", "openai-compatible", "ollama"], [item.provider for item in chain])
         self.assertEqual(
             "https://dashscope.aliyuncs.com/compatible-mode/v1",
             chain[0].base_url,
         )
-        self.assertEqual("http://127.0.0.1:11434/v1", chain[1].base_url)
+        self.assertEqual("https://fallback.example/v1", chain[1].base_url)
+        self.assertEqual("http://127.0.0.1:11434/v1", chain[2].base_url)
         self.assertTrue(settings.primary_model_configured())
         self.assertTrue(settings.fallback_model_configured())
+        self.assertTrue(settings.lightweight_model_configured())
 
     def test_build_model_uses_provider_specific_url_and_key(self):
         settings = AgentSettings(
@@ -107,6 +113,7 @@ class AgentRuntimeTest(unittest.TestCase):
                 "temperature": 0.2,
                 "timeout": 20.0,
                 "max_retries": 0,
+                "stream_usage": True,
             },
             chat_openai.call_args_list[0].kwargs,
         )
@@ -145,7 +152,7 @@ class AgentRuntimeTest(unittest.TestCase):
         started = [data for event, data in events if event == "model.started"]
         failed = [data for event, data in events if event == "model.failed"]
         self.assertEqual(["bailian", "ollama"], [item["provider"] for item in started])
-        self.assertEqual("invalid_json", failed[0]["errorType"])
+        self.assertEqual("json_parse", failed[0]["errorType"])
         self.assertEqual("bailian", failed[0]["provider"])
         self.assertIsInstance(failed[0]["latencyMs"], int)
         self.assertEqual("fallback", response["model"])

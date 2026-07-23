@@ -1,16 +1,13 @@
 package com.redculture.platform.service.impl;
 
-import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.ObjectWriter;
+import com.fasterxml.jackson.core.json.JsonWriteFeature;
 import com.redculture.platform.config.AppMapProperties;
-import com.redculture.platform.entity.ContentChunk;
-import com.redculture.platform.entity.DataSource;
-import com.redculture.platform.entity.EntitySourceRel;
 import com.redculture.platform.enums.ActivityType;
-import com.redculture.platform.enums.EntityType;
-import com.redculture.platform.mapper.ContentChunkMapper;
-import com.redculture.platform.mapper.DataSourceMapper;
-import com.redculture.platform.mapper.EntitySourceRelMapper;
 import com.redculture.platform.service.AiTeachingPlanService;
+import com.redculture.platform.service.KnowledgeRetriever;
 import com.redculture.platform.service.SchoolMapService;
 import com.redculture.platform.service.TeachingActivityPlanService;
 import com.redculture.platform.vo.GeneratedTeachingPlanCitationVO;
@@ -18,34 +15,43 @@ import com.redculture.platform.vo.GeneratedTeachingPlanResponse;
 import com.redculture.platform.vo.SchoolMapDetailVO;
 import com.redculture.platform.vo.SchoolResourceItemVO;
 import com.redculture.platform.vo.TeachingActivityPlanAdminVO;
-import com.redculture.platform.vo.TeachingActivityPlanVO;
+import com.redculture.platform.vo.ai.AgentActorVO;
+import com.redculture.platform.vo.ai.KnowledgeChunkVO;
+import com.redculture.platform.vo.ai.KnowledgeCitationCandidateVO;
+import com.redculture.platform.vo.ai.KnowledgeGraphFactVO;
+import com.redculture.platform.vo.ai.KnowledgeRetrieveRequest;
+import com.redculture.platform.vo.ai.KnowledgeRetrieveResult;
+import com.redculture.platform.vo.ai.KnowledgeScopeType;
 import com.redculture.platform.vo.ai.TeachingPlanContextVO;
 import com.redculture.platform.vo.request.GeneratedTeachingPlanSaveRequest;
 import com.redculture.platform.vo.request.TeachingActivityPlanCreateRequest;
 import com.redculture.platform.vo.request.TeachingPlanGenerateRequest;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.data.neo4j.core.Neo4jClient;
 import org.springframework.http.MediaType;
 import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
 import org.springframework.web.client.RestClient;
+import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
 import java.time.LocalDateTime;
+import java.time.Duration;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
-import java.util.Collection;
 import java.util.Collections;
-import java.util.Comparator;
-import java.util.HashMap;
 import java.util.LinkedHashMap;
-import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Objects;
-import java.util.Set;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 @Service
 public class AiTeachingPlanServiceImpl implements AiTeachingPlanService {
@@ -56,34 +62,66 @@ public class AiTeachingPlanServiceImpl implements AiTeachingPlanService {
 
     private final SchoolMapService schoolMapService;
     private final TeachingActivityPlanService teachingActivityPlanService;
-    private final ContentChunkMapper contentChunkMapper;
-    private final EntitySourceRelMapper entitySourceRelMapper;
-    private final DataSourceMapper dataSourceMapper;
-    private final Neo4jClient neo4jClient;
+    private final KnowledgeRetriever knowledgeRetriever;
     private final AppMapProperties appMapProperties;
+    private final ObjectMapper objectMapper;
+    private final ObjectWriter sseObjectWriter;
 
     public AiTeachingPlanServiceImpl(SchoolMapService schoolMapService,
                                      TeachingActivityPlanService teachingActivityPlanService,
-                                     ContentChunkMapper contentChunkMapper,
-                                     EntitySourceRelMapper entitySourceRelMapper,
-                                     DataSourceMapper dataSourceMapper,
-                                     Neo4jClient neo4jClient,
-                                     AppMapProperties appMapProperties) {
+                                     KnowledgeRetriever knowledgeRetriever,
+                                     AppMapProperties appMapProperties,
+                                     ObjectMapper objectMapper) {
         this.schoolMapService = schoolMapService;
         this.teachingActivityPlanService = teachingActivityPlanService;
-        this.contentChunkMapper = contentChunkMapper;
-        this.entitySourceRelMapper = entitySourceRelMapper;
-        this.dataSourceMapper = dataSourceMapper;
-        this.neo4jClient = neo4jClient;
+        this.knowledgeRetriever = knowledgeRetriever;
         this.appMapProperties = appMapProperties;
+        this.objectMapper = objectMapper;
+        this.sseObjectWriter = objectMapper.writer().with(JsonWriteFeature.ESCAPE_NON_ASCII);
     }
 
     @Override
     public GeneratedTeachingPlanResponse generatePlan(TeachingPlanGenerateRequest request) {
+        return generatePlan(request, null, null);
+    }
+
+    @Override
+    public GeneratedTeachingPlanResponse generatePlan(TeachingPlanGenerateRequest request,
+                                                        Long accountId,
+                                                        String sessionId) {
         validateGenerateRequest(request);
-        TeachingPlanContextVO context = buildContext(request);
+        TeachingPlanContextVO context = buildContext(request, accountId, sessionId);
         GeneratedTeachingPlanResponse llmResponse = callLlmService(context);
-        GeneratedTeachingPlanResponse response = llmResponse == null ? buildFallbackResponse(context) : normalizeResponse(llmResponse, context, false);
+        return finalizeResponse(llmResponse, context);
+    }
+
+    @Override
+    public SseEmitter generatePlanStream(TeachingPlanGenerateRequest request) {
+        return generatePlanStream(request, null, null);
+    }
+
+    @Override
+    public SseEmitter generatePlanStream(TeachingPlanGenerateRequest request,
+                                         Long accountId,
+                                         String sessionId) {
+        validateGenerateRequest(request);
+        SseEmitter emitter = new SseEmitter(120_000L);
+        Thread.ofVirtual().name("teaching-plan-stream")
+                .start(() -> streamPlan(request, accountId, sessionId, emitter));
+        return emitter;
+    }
+
+    private GeneratedTeachingPlanResponse finalizeResponse(GeneratedTeachingPlanResponse llmResponse,
+                                                            TeachingPlanContextVO context) {
+        GeneratedTeachingPlanResponse response = llmResponse == null
+                ? buildFallbackResponse(context)
+                : normalizeResponse(llmResponse, context, false);
+        response.setRetrievalStatus(context.getRetrievalStatus());
+        response.setRetrievalMethods(context.getContentChunks().stream()
+                .map(TeachingPlanContextVO.ContentChunkContextVO::getRetrievalMethod)
+                .filter(StringUtils::hasText)
+                .distinct()
+                .toList());
         response.setCitations(validateCitations(response.getCitations(), context.getCitationCandidates()));
         if (response.getCitations().isEmpty()) {
             response.setCitations(context.getCitationCandidates().stream().limit(5).collect(Collectors.toList()));
@@ -117,17 +155,22 @@ public class AiTeachingPlanServiceImpl implements AiTeachingPlanService {
         return teachingActivityPlanService.createPlan(createRequest);
     }
 
-    private TeachingPlanContextVO buildContext(TeachingPlanGenerateRequest request) {
+    private TeachingPlanContextVO buildContext(TeachingPlanGenerateRequest request,
+                                                Long accountId,
+                                                String sessionId) {
         SchoolMapDetailVO detail = requireApprovedSchool(request.getSchoolId());
 
         TeachingPlanContextVO context = new TeachingPlanContextVO();
         context.setRequest(request);
+        AgentActorVO actor = new AgentActorVO();
+        actor.setAccountId(accountId);
+        actor.setSchoolId(request.getSchoolId());
+        context.setActor(actor);
+        context.setSessionId(sessionId);
         context.setSchool(detail.getSchool());
         context.setResources(buildResourceContexts(detail.getResources()));
         context.setExistingPlans(detail.getActivityPlans() == null ? Collections.emptyList() : detail.getActivityPlans());
-        context.setContentChunks(loadContentChunks(request, context));
-        context.setCitationCandidates(loadCitationCandidates(context));
-        context.setGraphFacts(loadGraphFacts(request.getSchoolId()));
+        applyRetrievedKnowledge(context, retrieveKnowledge(request));
         return context;
     }
 
@@ -151,154 +194,166 @@ public class AiTeachingPlanServiceImpl implements AiTeachingPlanService {
                 .collect(Collectors.toList());
     }
 
-    private List<TeachingPlanContextVO.ContentChunkContextVO> loadContentChunks(TeachingPlanGenerateRequest request,
-                                                                                TeachingPlanContextVO context) {
-        Map<EntityType, Set<Long>> entityIds = collectContextEntityIds(context);
-        if (entityIds.isEmpty()) {
-            return Collections.emptyList();
-        }
-
-        Set<EntityType> types = entityIds.keySet();
-        Set<Long> ids = entityIds.values().stream().flatMap(Collection::stream).collect(Collectors.toSet());
-        if (ids.isEmpty()) {
-            return Collections.emptyList();
-        }
-
-        List<ContentChunk> chunks = contentChunkMapper.selectList(new LambdaQueryWrapper<ContentChunk>()
-                .in(ContentChunk::getEntityType, types)
-                .in(ContentChunk::getEntityId, ids)
-                .orderByAsc(ContentChunk::getEntityType)
-                .orderByAsc(ContentChunk::getEntityId)
-                .orderByAsc(ContentChunk::getChunkIndex));
-
-        String theme = clean(request.getTheme());
-        return chunks.stream()
-                .filter(chunk -> entityIds.getOrDefault(chunk.getEntityType(), Collections.emptySet()).contains(chunk.getEntityId()))
-                .sorted(Comparator.comparing((ContentChunk chunk) -> relevanceScore(chunk, theme)).reversed())
-                .limit(MAX_CONTENT_CHUNKS)
-                .map(chunk -> {
-                    TeachingPlanContextVO.ContentChunkContextVO item = new TeachingPlanContextVO.ContentChunkContextVO();
-                    item.setChunkId(chunk.getChunkId());
-                    item.setEntityType(enumValue(chunk.getEntityType()));
-                    item.setEntityId(chunk.getEntityId());
-                    item.setTitle(chunk.getChunkTitle());
-                    item.setText(truncate(chunk.getChunkText(), 700));
-                    item.setSourceId(chunk.getSourceId());
-                    return item;
-                })
-                .collect(Collectors.toList());
+    private KnowledgeRetrieveResult retrieveKnowledge(TeachingPlanGenerateRequest request) {
+        KnowledgeRetrieveRequest retrieveRequest = new KnowledgeRetrieveRequest();
+        retrieveRequest.setQuery(Stream.of(request.getTheme(), request.getGrade(), enumValue(request.getActivityType()))
+                .filter(StringUtils::hasText)
+                .collect(Collectors.joining(" ")));
+        retrieveRequest.setTheme(request.getTheme());
+        retrieveRequest.setGrade(request.getGrade());
+        retrieveRequest.setScopeType(KnowledgeScopeType.SCHOOL);
+        retrieveRequest.setScopeId(request.getSchoolId());
+        retrieveRequest.setTopK(MAX_CONTENT_CHUNKS);
+        KnowledgeRetrieveResult result = knowledgeRetriever.retrieve(retrieveRequest);
+        return result == null ? KnowledgeRetrieveResult.degraded() : result;
     }
 
-    private List<GeneratedTeachingPlanCitationVO> loadCitationCandidates(TeachingPlanContextVO context) {
-        Map<String, GeneratedTeachingPlanCitationVO> citations = new LinkedHashMap<>();
+    private void applyRetrievedKnowledge(TeachingPlanContextVO context, KnowledgeRetrieveResult retrieval) {
+        context.setRetrievalStatus(retrieval.getRetrievalStatus() == null
+                ? "empty" : retrieval.getRetrievalStatus().getValue());
+        List<KnowledgeChunkVO> chunks = retrieval.getChunks() == null ? List.of() : retrieval.getChunks();
+        context.setContentChunks(chunks.stream().limit(MAX_CONTENT_CHUNKS).map(chunk -> {
+            TeachingPlanContextVO.ContentChunkContextVO item = new TeachingPlanContextVO.ContentChunkContextVO();
+            item.setChunkId(chunk.getChunkId());
+            item.setEntityType(chunk.getEntityType());
+            item.setEntityId(chunk.getEntityId());
+            item.setTitle(chunk.getTitle());
+            item.setText(chunk.getText());
+            item.setSourceId(chunk.getSourceId());
+            item.setScore(chunk.getScore());
+            item.setRetrievalMethod(chunk.getRetrievalMethod());
+            return item;
+        }).collect(Collectors.toList()));
 
-        Map<EntityType, Set<Long>> entityIds = collectContextEntityIds(context);
-        Set<Long> sourceIds = new LinkedHashSet<>();
-        for (TeachingPlanContextVO.ContentChunkContextVO chunk : context.getContentChunks()) {
+        List<KnowledgeCitationCandidateVO> candidates = retrieval.getCitationCandidates() == null
+                ? List.of() : retrieval.getCitationCandidates();
+        context.setCitationCandidates(candidates.stream().limit(MAX_CITATIONS).map(candidate -> {
             GeneratedTeachingPlanCitationVO citation = new GeneratedTeachingPlanCitationVO();
-            citation.setCitationId("chunk:" + chunk.getChunkId());
-            citation.setTitle(cleanOrDefault(chunk.getTitle(), "内容分块 " + chunk.getChunkId()));
-            citation.setSourceType("content_chunk");
-            citation.setRelatedEntityType(chunk.getEntityType());
-            citation.setRelatedEntityId(chunk.getEntityId());
-            citation.setExcerpt(truncate(chunk.getText(), 180));
-            citations.put(citation.getCitationId(), citation);
-            if (chunk.getSourceId() != null) {
-                sourceIds.add(chunk.getSourceId());
-            }
-        }
+            citation.setCitationId(candidate.getCitationId());
+            citation.setTitle(candidate.getTitle());
+            citation.setSourceType(candidate.getSourceType());
+            citation.setRelatedEntityType(candidate.getRelatedEntityType());
+            citation.setRelatedEntityId(candidate.getRelatedEntityId());
+            citation.setExcerpt(candidate.getExcerpt());
+            citation.setUrl(candidate.getUrl());
+            return citation;
+        }).collect(Collectors.toList()));
 
-        if (!entityIds.isEmpty()) {
-            Set<EntityType> types = entityIds.keySet();
-            Set<Long> ids = entityIds.values().stream().flatMap(Collection::stream).collect(Collectors.toSet());
-            List<EntitySourceRel> rels = entitySourceRelMapper.selectList(new LambdaQueryWrapper<EntitySourceRel>()
-                    .in(EntitySourceRel::getEntityType, types)
-                    .in(EntitySourceRel::getEntityId, ids)
-                    .orderByDesc(EntitySourceRel::getCredibilityScore));
-            for (EntitySourceRel rel : rels) {
-                if (!entityIds.getOrDefault(rel.getEntityType(), Collections.emptySet()).contains(rel.getEntityId())) {
-                    continue;
-                }
-                GeneratedTeachingPlanCitationVO citation = new GeneratedTeachingPlanCitationVO();
-                citation.setCitationId("source-rel:" + rel.getRelId());
-                citation.setTitle("来源记录 " + rel.getRelId());
-                citation.setSourceType("entity_source");
-                citation.setRelatedEntityType(enumValue(rel.getEntityType()));
-                citation.setRelatedEntityId(rel.getEntityId());
-                citation.setExcerpt(truncate(rel.getSourceExcerpt(), 180));
-                citation.setUrl(rel.getSourceUrl());
-                citations.putIfAbsent(citation.getCitationId(), citation);
-                if (rel.getSourceId() != null) {
-                    sourceIds.add(rel.getSourceId());
-                }
-            }
-        }
-
-        enrichCitationTitles(citations.values(), sourceIds);
-        if (citations.isEmpty()) {
-            addResourceFallbackCitations(context, citations);
-        }
-        return citations.values().stream().limit(MAX_CITATIONS).collect(Collectors.toList());
+        List<KnowledgeGraphFactVO> facts = retrieval.getGraphFacts() == null ? List.of() : retrieval.getGraphFacts();
+        context.setGraphFacts(facts.stream()
+                .map(KnowledgeGraphFactVO::getText)
+                .filter(StringUtils::hasText)
+                .toList());
     }
 
-    private void enrichCitationTitles(Collection<GeneratedTeachingPlanCitationVO> citations, Set<Long> sourceIds) {
-        if (sourceIds.isEmpty()) {
-            return;
-        }
-        Map<Long, DataSource> sourceById = dataSourceMapper.selectBatchIds(sourceIds).stream()
-                .collect(Collectors.toMap(DataSource::getSourceId, source -> source, (first, second) -> first));
-        for (GeneratedTeachingPlanCitationVO citation : citations) {
-            if (!StringUtils.hasText(citation.getTitle()) || !citation.getTitle().startsWith("来源记录")) {
-                continue;
-            }
-            DataSource source = sourceById.values().stream().findFirst().orElse(null);
-            if (source != null) {
-                citation.setTitle(source.getSourceName());
-                citation.setSourceType(enumValue(source.getSourceType()));
-                citation.setUrl(firstNonBlank(citation.getUrl(), source.getBaseUrl()));
-            }
-        }
-    }
-
-    private void addResourceFallbackCitations(TeachingPlanContextVO context,
-                                              Map<String, GeneratedTeachingPlanCitationVO> citations) {
-        for (TeachingPlanContextVO.ResourceContextVO item : context.getResources()) {
-            if (item.getResource() == null) {
-                continue;
-            }
-            GeneratedTeachingPlanCitationVO citation = new GeneratedTeachingPlanCitationVO();
-            citation.setCitationId("resource:" + item.getResourceId());
-            citation.setTitle(item.getResource().getResourceName());
-            citation.setSourceType("approved_resource");
-            citation.setRelatedEntityType(EntityType.RESOURCE.getValue());
-            citation.setRelatedEntityId(item.getResourceId());
-            citation.setExcerpt(firstNonBlank(item.getResource().getEducationValue(), item.getResource().getIntro(), item.getEducationThemeSummary()));
-            citations.put(citation.getCitationId(), citation);
-            if (citations.size() >= MAX_CITATIONS) {
-                break;
-            }
-        }
-    }
-
-    private List<String> loadGraphFacts(Long schoolId) {
+    private void streamPlan(TeachingPlanGenerateRequest request,
+                            Long accountId,
+                            String sessionId,
+                            SseEmitter emitter) {
+        TeachingPlanContextVO context = null;
+        boolean resultSent = false;
         try {
-            String cypher = ""
-                    + "MATCH (s:School {id: $schoolId})-[rel:SCHOOL_NEAR_RESOURCE]->(r:LocalEduResource) "
-                    + "OPTIONAL MATCH (r)-[:HAS_TAG]->(t:Tag) "
-                    + "RETURN r.name AS resourceName, rel.educationThemeSummary AS theme, "
-                    + "rel.distanceMeters AS distanceMeters, collect(DISTINCT t.name) AS tags "
-                    + "ORDER BY rel.priorityLevel DESC, rel.distanceMeters ASC LIMIT 8";
-            return neo4jClient.query(cypher)
-                    .bind(schoolId).to("schoolId")
-                    .fetch()
-                    .all()
-                    .stream()
-                    .map(this::toGraphFact)
-                    .filter(StringUtils::hasText)
-                    .collect(Collectors.toList());
+            sendEvent(emitter, "stage", Map.of("stage", "retrieval", "message", "正在检索教学依据"));
+            context = buildContext(request, accountId, sessionId);
+            sendEvent(emitter, "stage", Map.of("stage", "generation", "message", "正在生成教学方案"));
+
+            if (!StringUtils.hasText(appMapProperties.getLlmServiceBaseUrl())) {
+                sendFinalEvent(emitter, finalizeResponse(null, context));
+                resultSent = true;
+            } else {
+                HttpResponse<java.io.InputStream> response = openTeachingPlanStream(context);
+                if (response.statusCode() < 200 || response.statusCode() >= 300) {
+                    throw new IllegalStateException("LLM stream returned HTTP " + response.statusCode());
+                }
+                try (BufferedReader reader = new BufferedReader(
+                        new InputStreamReader(response.body(), StandardCharsets.UTF_8))) {
+                    String eventName = "message";
+                    StringBuilder data = new StringBuilder();
+                    String line;
+                    while ((line = reader.readLine()) != null) {
+                        if (line.isEmpty()) {
+                            if (!data.isEmpty()) {
+                                resultSent = forwardLlmEvent(emitter, eventName, data.toString(), context) || resultSent;
+                            }
+                            eventName = "message";
+                            data.setLength(0);
+                        } else if (line.startsWith("event:")) {
+                            eventName = line.substring(6).trim();
+                        } else if (line.startsWith("data:")) {
+                            if (!data.isEmpty()) {
+                                data.append('\n');
+                            }
+                            data.append(line.substring(5).trim());
+                        }
+                    }
+                    if (!data.isEmpty()) {
+                        resultSent = forwardLlmEvent(emitter, eventName, data.toString(), context) || resultSent;
+                    }
+                }
+            }
+            if (!resultSent) {
+                sendFinalEvent(emitter, finalizeResponse(null, context));
+            }
+            sendEvent(emitter, "done", Map.of("status", "completed"));
+            emitter.complete();
         } catch (Exception exception) {
-            return Collections.emptyList();
+            log.warn("Teaching-plan stream failed: {}", exception.getMessage(), exception);
+            try {
+                if (!resultSent && context != null) {
+                    sendFinalEvent(emitter, finalizeResponse(null, context));
+                    sendEvent(emitter, "done", Map.of("status", "degraded"));
+                    emitter.complete();
+                } else {
+                    sendEvent(emitter, "error", Map.of("message", "教学方案流式生成失败"));
+                    emitter.completeWithError(exception);
+                }
+            } catch (Exception sendException) {
+                emitter.completeWithError(sendException);
+            }
         }
+    }
+
+    private HttpResponse<java.io.InputStream> openTeachingPlanStream(TeachingPlanContextVO context) throws Exception {
+        String baseUrl = appMapProperties.getLlmServiceBaseUrl().replaceAll("/+$", "");
+        HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(baseUrl + "/llm/teaching-plan/generate/stream"))
+                .timeout(Duration.ofSeconds(110))
+                .header("Accept", MediaType.TEXT_EVENT_STREAM_VALUE)
+                .header("Content-Type", MediaType.APPLICATION_JSON_VALUE)
+                .POST(HttpRequest.BodyPublishers.ofString(
+                        objectMapper.writeValueAsString(context), StandardCharsets.UTF_8))
+                .build();
+        return HttpClient.newBuilder()
+                .connectTimeout(Duration.ofSeconds(3))
+                .build()
+                .send(request, HttpResponse.BodyHandlers.ofInputStream());
+    }
+
+    private boolean forwardLlmEvent(SseEmitter emitter,
+                                    String eventName,
+                                    String data,
+                                    TeachingPlanContextVO context) throws Exception {
+        JsonNode payload = objectMapper.readTree(data);
+        if ("result".equals(eventName)) {
+            GeneratedTeachingPlanResponse response = objectMapper.treeToValue(payload, GeneratedTeachingPlanResponse.class);
+            sendFinalEvent(emitter, finalizeResponse(response, context));
+            return true;
+        }
+        if ("token".equals(eventName) || "meta".equals(eventName)
+                || "stage".equals(eventName) || "fallback".equals(eventName)) {
+            sendEvent(emitter, eventName, payload);
+        }
+        return false;
+    }
+
+    private void sendFinalEvent(SseEmitter emitter, GeneratedTeachingPlanResponse response) throws Exception {
+        sendEvent(emitter, "result", response);
+    }
+
+    private void sendEvent(SseEmitter emitter, String eventName, Object data) throws Exception {
+        emitter.send(SseEmitter.event()
+                .name(eventName)
+                .data(sseObjectWriter.writeValueAsString(data)));
     }
 
     private GeneratedTeachingPlanResponse callLlmService(TeachingPlanContextVO context) {
@@ -467,57 +522,6 @@ public class AiTeachingPlanServiceImpl implements AiTeachingPlanService {
         }
     }
 
-    private Map<EntityType, Set<Long>> collectContextEntityIds(TeachingPlanContextVO context) {
-        Map<EntityType, Set<Long>> result = new HashMap<>();
-        if (context.getSchool() != null && context.getSchool().getSchoolId() != null) {
-            addEntityId(result, EntityType.SCHOOL, context.getSchool().getSchoolId());
-        }
-        for (TeachingPlanContextVO.ResourceContextVO resource : context.getResources()) {
-            addEntityId(result, EntityType.RESOURCE, resource.getResourceId());
-        }
-        for (TeachingActivityPlanVO plan : context.getExistingPlans()) {
-            addEntityId(result, EntityType.ACTIVITY_PLAN, plan.getPlanId());
-        }
-        return result;
-    }
-
-    private void addEntityId(Map<EntityType, Set<Long>> result, EntityType entityType, Long entityId) {
-        if (entityId == null) {
-            return;
-        }
-        result.computeIfAbsent(entityType, ignored -> new LinkedHashSet<>()).add(entityId);
-    }
-
-    private int relevanceScore(ContentChunk chunk, String theme) {
-        if (!StringUtils.hasText(theme)) {
-            return 0;
-        }
-        String text = (String.valueOf(chunk.getChunkTitle()) + " " + String.valueOf(chunk.getChunkText())).toLowerCase();
-        return text.contains(theme.toLowerCase()) ? 1 : 0;
-    }
-
-    private String toGraphFact(Map<String, Object> row) {
-        String name = stringValue(row.get("resourceName"));
-        String theme = stringValue(row.get("theme"));
-        String distance = stringValue(row.get("distanceMeters"));
-        Object tagsValue = row.get("tags");
-        List<String> tags = new ArrayList<>();
-        if (tagsValue instanceof List<?>) {
-            for (Object item : (List<?>) tagsValue) {
-                String text = stringValue(item);
-                if (StringUtils.hasText(text)) {
-                    tags.add(text);
-                }
-            }
-        }
-        return String.join("；", List.of(
-                StringUtils.hasText(name) ? "资源：" + name : "",
-                StringUtils.hasText(theme) ? "关系：" + theme : "",
-                StringUtils.hasText(distance) ? "距离：" + distance + "米" : "",
-                tags.isEmpty() ? "" : "标签：" + String.join("、", tags)
-        )).replaceAll("(^；+|；+$)", "");
-    }
-
     private String generatePlanCode() {
         return "AI_PLAN_" + LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMddHHmmssSSS"));
     }
@@ -544,32 +548,8 @@ public class AiTeachingPlanServiceImpl implements AiTeachingPlanService {
         return values.stream().filter(StringUtils::hasText).map(String::trim).collect(Collectors.toList());
     }
 
-    private String truncate(String value, int maxLength) {
-        if (value == null || value.length() <= maxLength) {
-            return value;
-        }
-        return value.substring(0, maxLength) + "...";
-    }
-
-    private String clean(String value) {
-        return value == null ? null : value.trim();
-    }
-
     private String cleanOrDefault(String value, String fallback) {
         return StringUtils.hasText(value) ? value.trim() : fallback;
-    }
-
-    private String firstNonBlank(String... values) {
-        for (String value : values) {
-            if (StringUtils.hasText(value)) {
-                return value;
-            }
-        }
-        return null;
-    }
-
-    private String stringValue(Object value) {
-        return value == null ? null : String.valueOf(value);
     }
 
     private String enumValue(Object value) {

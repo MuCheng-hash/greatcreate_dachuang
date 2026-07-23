@@ -14,7 +14,14 @@ from langchain.agents import create_agent
 from langchain.agents.middleware import before_model
 from langgraph.checkpoint.memory import InMemorySaver
 
-from .config import AgentSettings
+from llm_service.observability import (
+    FallbackAlertManager,
+    LlmObservability,
+    LlmTraceContext,
+    classify_llm_error,
+)
+
+from .config import AgentModelConfig, AgentSettings
 from .schemas import AgentFinalResponse, AgentRuntimeRequest, dump_model
 from .tools import AgentState, AgentToolError, JavaToolClient, create_tools
 
@@ -23,8 +30,15 @@ PROMPT_ROOT = Path(__file__).resolve().parent.parent / "prompts" / "agent"
 
 
 class AgentRuntime:
-    def __init__(self, settings: AgentSettings | None = None):
+    def __init__(
+        self,
+        settings: AgentSettings | None = None,
+        observability: LlmObservability | None = None,
+        alerts: FallbackAlertManager | None = None,
+    ):
         self.settings = settings or AgentSettings.from_env()
+        self.observability = observability
+        self.alerts = alerts or FallbackAlertManager()
         self.checkpointer = InMemorySaver()
         self._conversation_owners: dict[str, str] = {}
         self._owner_lock = threading.RLock()
@@ -162,19 +176,36 @@ class AgentRuntime:
         emit: Callable[[str, dict[str, Any]], None],
     ) -> dict[str, Any]:
         last_error: Exception | None = None
-        for index, model_config in enumerate(self.settings.model_chain()):
+        attempts: list[dict[str, Any]] = []
+        chain = self.settings.model_chain()
+        alert_context = self._alert_context(request, run_id)
+        for index, model_config in enumerate(chain):
             model_name = model_config.model
             attempt_started = time.perf_counter()
             try:
                 model = self._build_model(model_name)
                 if model is None:
+                    attempts.append(self._failed_attempt(model_config, "not_configured"))
+                    if index + 1 < len(chain):
+                        next_config = chain[index + 1]
+                        self.alerts.fallback(
+                            alert_context, model_config.model, next_config.model,
+                            "not_configured", next_config.fallback_level,
+                        )
+                        emit("model.fallback", {
+                            "failedModel": model_config.model,
+                            "nextModel": next_config.model,
+                            "errorType": "not_configured",
+                            "fallbackLevel": next_config.fallback_level,
+                            "reset": False,
+                        })
                     continue
                 emit(
                     "model.started",
                     {
                         "provider": model_config.provider,
                         "model": model_name,
-                        "fallbackLevel": index,
+                        "fallbackLevel": model_config.fallback_level,
                     },
                 )
                 response = self._invoke_agent(request, run_id, model, model_name, emit)
@@ -190,13 +221,14 @@ class AgentRuntime:
                         "latencyMs": latency_ms,
                         "inputTokens": response.get("inputTokens"),
                         "outputTokens": response.get("outputTokens"),
-                        "fallbackLevel": index,
+                        "fallbackLevel": model_config.fallback_level,
                     },
                 )
                 return response
             except Exception as exc:
                 last_error = exc
                 error_type = self._error_type(exc)
+                attempts.append(self._failed_attempt(model_config, error_type))
                 latency_ms = round((time.perf_counter() - attempt_started) * 1000)
                 LOGGER.warning(
                     "agent_model_failed",
@@ -206,7 +238,7 @@ class AgentRuntime:
                         "provider": model_config.provider,
                         "model": model_name,
                         "errorType": error_type,
-                        "fallbackLevel": index,
+                        "fallbackLevel": model_config.fallback_level,
                         "latencyMs": latency_ms,
                     },
                 )
@@ -216,11 +248,27 @@ class AgentRuntime:
                         "provider": model_config.provider,
                         "model": model_name,
                         "errorType": error_type,
-                        "fallbackLevel": index,
+                        "fallbackLevel": model_config.fallback_level,
                         "latencyMs": latency_ms,
                     },
                 )
 
+            if index + 1 < len(chain):
+                next_config = chain[index + 1]
+                error_type = attempts[-1]["errorType"] if attempts else "provider_error"
+                self.alerts.fallback(
+                    alert_context, model_config.model, next_config.model,
+                    error_type, next_config.fallback_level,
+                )
+                emit("model.fallback", {
+                    "failedModel": model_config.model,
+                    "nextModel": next_config.model,
+                    "errorType": error_type,
+                    "fallbackLevel": next_config.fallback_level,
+                    "reset": False,
+                })
+
+        self.alerts.exhausted(alert_context, attempts or [{"status": "not_configured"}])
         return self._local_fallback(request, run_id, last_error)
 
     def _execute_stream(
@@ -230,19 +278,36 @@ class AgentRuntime:
         emit: Callable[[str, dict[str, Any]], None],
     ) -> dict[str, Any]:
         last_error: Exception | None = None
-        for index, model_config in enumerate(self.settings.model_chain()):
+        attempts: list[dict[str, Any]] = []
+        chain = self.settings.model_chain()
+        alert_context = self._alert_context(request, run_id)
+        for index, model_config in enumerate(chain):
             model_name = model_config.model
             attempt_started = time.perf_counter()
             try:
                 model = self._build_model(model_name)
                 if model is None:
+                    attempts.append(self._failed_attempt(model_config, "not_configured"))
+                    if index + 1 < len(chain):
+                        next_config = chain[index + 1]
+                        self.alerts.fallback(
+                            alert_context, model_config.model, next_config.model,
+                            "not_configured", next_config.fallback_level,
+                        )
+                        emit("model.fallback", {
+                            "failedModel": model_config.model,
+                            "nextModel": next_config.model,
+                            "errorType": "not_configured",
+                            "fallbackLevel": next_config.fallback_level,
+                            "reset": False,
+                        })
                     continue
                 emit(
                     "model.started",
                     {
                         "provider": model_config.provider,
                         "model": model_name,
-                        "fallbackLevel": index,
+                        "fallbackLevel": model_config.fallback_level,
                     },
                 )
                 response = self._invoke_agent_stream(request, run_id, model, model_name, emit)
@@ -258,13 +323,14 @@ class AgentRuntime:
                         "latencyMs": latency_ms,
                         "inputTokens": response.get("inputTokens"),
                         "outputTokens": response.get("outputTokens"),
-                        "fallbackLevel": index,
+                        "fallbackLevel": model_config.fallback_level,
                     },
                 )
                 return response
             except Exception as exc:
                 last_error = exc
                 error_type = self._error_type(exc)
+                attempts.append(self._failed_attempt(model_config, error_type))
                 latency_ms = round((time.perf_counter() - attempt_started) * 1000)
                 LOGGER.warning(
                     "agent_stream_model_failed",
@@ -274,7 +340,7 @@ class AgentRuntime:
                         "provider": model_config.provider,
                         "model": model_name,
                         "errorType": error_type,
-                        "fallbackLevel": index,
+                        "fallbackLevel": model_config.fallback_level,
                         "latencyMs": latency_ms,
                     },
                 )
@@ -284,11 +350,27 @@ class AgentRuntime:
                         "provider": model_config.provider,
                         "model": model_name,
                         "errorType": error_type,
-                        "fallbackLevel": index,
+                        "fallbackLevel": model_config.fallback_level,
                         "latencyMs": latency_ms,
                     },
                 )
 
+            if index + 1 < len(chain):
+                next_config = chain[index + 1]
+                error_type = attempts[-1]["errorType"] if attempts else "provider_error"
+                self.alerts.fallback(
+                    alert_context, model_config.model, next_config.model,
+                    error_type, next_config.fallback_level,
+                )
+                emit("model.fallback", {
+                    "failedModel": model_config.model,
+                    "nextModel": next_config.model,
+                    "errorType": error_type,
+                    "fallbackLevel": next_config.fallback_level,
+                    "reset": True,
+                })
+
+        self.alerts.exhausted(alert_context, attempts or [{"status": "not_configured"}])
         response = self._local_fallback(request, run_id, last_error)
         self._emit_text_chunks(response.get("answer", ""), emit)
         return response
@@ -308,9 +390,10 @@ class AgentRuntime:
         )
         tools = create_tools(client, run_id, emit)
         agent = self._create_agent(model, tools)
+        callback = self._trace_callback(request, run_id, model_name)
         result = agent.invoke(
             self._initial_state(request),
-            config=self._agent_config(request.conversation_id or ""),
+            config=self._agent_config(request.conversation_id or "", callback),
         )
         content = self._last_message_text(result.get("messages", []))
         response = self._parse_response(content, request, run_id, result.get("messages", []))
@@ -333,7 +416,8 @@ class AgentRuntime:
         )
         tools = create_tools(client, run_id, emit)
         agent = self._create_agent(model, tools)
-        config = self._agent_config(request.conversation_id or "")
+        callback = self._trace_callback(request, run_id, model_name)
+        config = self._agent_config(request.conversation_id or "", callback)
         model_buffer = ""
         emitted_answer_length = 0
         messages: list[Any] = []
@@ -410,10 +494,72 @@ class AgentRuntime:
             "tool_trace": [],
         }
 
-    def _agent_config(self, conversation_id: str) -> dict[str, Any]:
-        return {
+    def _agent_config(self, conversation_id: str, callback: Any | None = None) -> dict[str, Any]:
+        config: dict[str, Any] = {
             "configurable": {"thread_id": conversation_id},
             "recursion_limit": max(3, self.settings.max_iterations * 2 + 1),
+        }
+        if callback is not None:
+            config["callbacks"] = [callback]
+        return config
+
+    def _trace_callback(
+        self, request: AgentRuntimeRequest, run_id: str, model_name: str
+    ) -> Any | None:
+        if self.observability is None:
+            return None
+        actor = request.actor
+        if actor.account_id is not None:
+            user_id = f"account:{actor.account_id}"
+        elif actor.school_id is not None:
+            user_id = f"school:{actor.school_id}"
+        else:
+            user_id = "anonymous"
+        model_config = self.settings.model_config_for(model_name)
+        context = LlmTraceContext(
+            feature="agent-runtime",
+            user_id=user_id,
+            session_id=request.conversation_id or "",
+            trace_id=run_id,
+            expected_json=True,
+            metadata={
+                "scopeType": request.scope.scope_type if request.scope else None,
+                "scopeId": request.scope.scope_id if request.scope else None,
+                "fallbackLevel": model_config.fallback_level,
+                "promptVersion": self.settings.prompt_version,
+            },
+        )
+        return self.observability.callback(
+            context, model_config.provider, model_name
+        )
+
+    def _alert_context(self, request: AgentRuntimeRequest, run_id: str) -> LlmTraceContext:
+        actor = request.actor
+        if actor.account_id is not None:
+            user_id = f"account:{actor.account_id}"
+        elif actor.school_id is not None:
+            user_id = f"school:{actor.school_id}"
+        else:
+            user_id = "anonymous"
+        return LlmTraceContext(
+            feature="agent-runtime",
+            user_id=user_id,
+            session_id=request.conversation_id or "",
+            trace_id=run_id,
+            metadata={
+                "scopeType": request.scope.scope_type if request.scope else None,
+                "scopeId": request.scope.scope_id if request.scope else None,
+            },
+        )
+
+    @staticmethod
+    def _failed_attempt(model_config: AgentModelConfig, error_type: str) -> dict[str, Any]:
+        return {
+            "provider": model_config.provider,
+            "model": model_config.model,
+            "fallbackLevel": model_config.fallback_level,
+            "status": "failed",
+            "errorType": error_type,
         }
 
     def _build_model(self, model_name: str) -> Any | None:
@@ -433,6 +579,7 @@ class AgentRuntime:
             temperature=0.2,
             timeout=self.settings.llm_timeout_seconds,
             max_retries=0,
+            stream_usage=True,
         )
 
     def _resolve_base_url(self, configured_url: str | None = None) -> str | None:
@@ -778,11 +925,7 @@ class AgentRuntime:
         message = str(error).lower()
         if "recursion" in message or "iteration" in message or "maximum" in message:
             return "max_iterations"
-        if "json" in message:
-            return "invalid_json"
-        if "timeout" in message:
-            return "timeout"
-        return "upstream_http_error"
+        return classify_llm_error(error)
 
     def _event(
         self,
