@@ -358,16 +358,17 @@ class AgentRuntimeTest(unittest.TestCase):
 
     def test_fastapi_agent_run_and_stream_endpoints(self):
         with TestClient(app) as client:
+            headers = {"X-Agent-Service-Token": "red-culture-agent-development-token-change-me"}
             run_response = client.post("/llm/agent/run", json=request_payload(
                 "接口运行", "endpoint-conversation"
-            ))
+            ), headers=headers)
             self.assertEqual(200, run_response.status_code)
             self.assertEqual("endpoint-conversation", run_response.json()["conversationId"])
             self.assertTrue(run_response.json()["runId"])
 
             stream_response = client.post("/llm/agent/stream", json=request_payload(
                 "接口流式", "endpoint-stream"
-            ))
+            ), headers=headers)
             self.assertEqual(200, stream_response.status_code)
             self.assertIn("event: run.started", stream_response.text)
             self.assertIn("event: token", stream_response.text)

@@ -100,7 +100,8 @@ class AgentSettings:
                 "INTERNAL_BUSINESS_BASE_URL",
                 "http://127.0.0.1:8080",
             ).rstrip("/"),
-            internal_service_token=_text("AGENT_INTERNAL_SERVICE_TOKEN"),
+            internal_service_token=_text("AGENT_INTERNAL_SERVICE_TOKEN")
+            or "red-culture-agent-development-token-change-me",
             llm_api_url=legacy_api_url,
             llm_base_url=legacy_base_url,
             llm_api_key=legacy_key,

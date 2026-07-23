@@ -31,9 +31,20 @@ class ToolRuntimeContext:
     repository: ConversationRepository
     output_character_limit: int
     executions: list[ToolExecution] = field(default_factory=list)
+    event_sink: Callable[[str, dict[str, Any]], None] | None = None
+
+    def _emit(self, event_name: str, data: dict[str, Any]) -> None:
+        if self.event_sink is None:
+            return
+        try:
+            self.event_sink(event_name, data)
+        except Exception:
+            # Streaming telemetry must never make a valid tool call fail.
+            return
 
     def run(self, name: str, arguments: dict[str, Any], callback: Callable[[], Any]) -> str:
         started = time.perf_counter()
+        self._emit("tool.started", {"toolName": name, "name": name})
         status = "completed"
         try:
             result = callback()
@@ -47,6 +58,15 @@ class ToolRuntimeContext:
             self.thread_id, name, _sanitize(arguments), status, duration_ms, bounded
         )
         self.executions.append(ToolExecution(name=name, status=status, durationMs=duration_ms))
+        self._emit(
+            "tool.completed",
+            {
+                "toolName": name,
+                "name": name,
+                "status": "ok" if status == "completed" else "failed",
+                "durationMs": duration_ms,
+            },
+        )
         return bounded
 
 

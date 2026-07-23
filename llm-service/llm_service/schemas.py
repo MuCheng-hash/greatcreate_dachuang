@@ -79,6 +79,13 @@ class AgentMessageResponse(ApiModel):
     thread_id: str = Field(alias="threadId")
     answer: str
     status: Literal["completed", "degraded", "incomplete"]
+    generation_status: Literal["completed", "degraded", "skipped"] | None = Field(
+        default=None, alias="generationStatus"
+    )
+    retrieval_status: str | None = Field(default=None, alias="retrievalStatus")
+    provider: str | None = None
+    model: str | None = None
+    fallback_level: int | str | None = Field(default=None, alias="fallbackLevel")
     citations: list[Citation] = Field(default_factory=list)
     related_resources: list[str] = Field(default_factory=list, alias="relatedResources")
     follow_up_questions: list[str] = Field(default_factory=list, alias="followUpQuestions")

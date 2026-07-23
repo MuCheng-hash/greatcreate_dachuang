@@ -2,6 +2,8 @@
 
 本目录是独立 LLM 服务入口，负责地图讲解、学校周边资源问答、教学方案生成和 Agent 运行时。Agent 使用 FastAPI + LangChain/LangGraph，业务数据和 RAG 通过 Java 内部受控工具接口访问。
 
+项目只保留一个 FastAPI 应用：实际应用工厂是 `llm_service.api:create_app`，`app.py` 只是兼容现有启动命令的薄启动壳。stateful Agent 使用统一的主模型→降级模型→本地结构化兜底链；旧的 `/llm/agent/*` 路径仍在同一个应用中提供兼容能力。
+
 This service is the model-facing runtime for the platform. It provides typed read-only tools, owner-scoped conversation threads, SQLite persistence for local development, and explicit degraded responses when no model is configured.
 
 ## Start
@@ -15,6 +17,9 @@ python app.py
 
 The default address is `http://127.0.0.1:5050`.
 
+不要同时启动旧的独立 FastAPI 进程；直接运行 `python app.py`，或者使用
+`uvicorn llm_service.api:create_app --factory --host 127.0.0.1 --port 5050`。
+
 ## Configuration
 
 | Variable | Default | Purpose |
@@ -23,6 +28,7 @@ The default address is `http://127.0.0.1:5050`.
 | `LLM_API_KEY` | empty | Provider credential |
 | `LLM_MODEL` | `qwen-plus` | Provider model name |
 | `LLM_TIMEOUT_SECONDS` | `20` | Model request timeout |
+| `LLM_MAX_OUTPUT_TOKENS` | `512` | Maximum output tokens for the Ollama fallback |
 | `DATABASE_PATH` | `data/agent-state.sqlite3` | Durable local conversation store |
 | `ALLOWED_ORIGINS` | empty | Comma-separated browser origins; empty means no CORS middleware |
 | `AGENT_CONTEXT_TOKEN_BUDGET` | `6000` | Approximate input budget |
@@ -62,6 +68,10 @@ Content-Type: application/json
 }
 ```
 
+`POST /agent/messages/stream` 提供同一 stateful runtime 的 SSE 版本，事件统一为
+`run.started`、`model.started`、`tool.started`、`tool.completed`、`token`、`final`、`error`、`done`。
+线程以 `threadId` 为唯一状态标识，SQLite 会持久化用户消息、助手最终消息和工具审计。
+
 The response contains `threadId`, `status`, `citations`, `toolExecutions`, related resources, and follow-up questions. Reuse the returned `threadId` for subsequent turns. The public Spring endpoint remains `/api/ai/qa/ask`; Spring supplies the authenticated owner and trusted context before calling this service.
 
 ## Legacy workflows
@@ -76,15 +86,15 @@ These deterministic routes remain compatible during migration:
 - `POST /llm/agent/run`
 - `POST /llm/agent/stream`
 - `POST /llm/teaching-plan/generate`
+- `POST /llm/resource-discovery/classify`
 - `GET /health/live`
 - `GET /health/ready`
 
-`/llm/agent/answer` 保留为兼容接口。新的 `/llm/agent/run` 会使用
-LangChain Agent，根据受控工具结果生成结构化答案；`/llm/agent/stream` 通过 SSE
-返回运行、工具、模型和最终结果事件。Agent 不执行 SQL 或 Cypher，引用只能来自
+`/llm/agent/answer`、`/llm/agent/run` 和 `/llm/agent/stream` 保留为兼容接口；Java
+业务服务默认调用 `/agent/messages` 和 `/agent/messages/stream`，设置
+`AGENT_RUNTIME_MODE=legacy` 可回滚到旧链路。stateful Agent 和结构化工作流共用统一模型降级链；Agent 不执行 SQL 或 Cypher，引用只能来自
 工具返回的证据。未配置真实模型或模型响应不可用时，接口返回
 `generationStatus=degraded` 和本地结构化兜底答案。
-- `POST /llm/resource-discovery/classify`
 
 Teaching-plan generation and POI classification are structured workflows, not open-ended conversations. They use the same asynchronous LangChain model adapter and retain local fallbacks.
 
@@ -93,6 +103,7 @@ Teaching-plan generation and POI classification are structured workflows, not op
 - `LLM_API_KEY`：模型密钥
 - `LLM_MODEL`：模型名称，默认 `qwen-plus`
 - `LLM_TIMEOUT_SECONDS`：调用超时秒数，默认 `20`
+- `LLM_MAX_OUTPUT_TOKENS`：Ollama 降级模型的最大输出 token 数，默认 `512`
 
 例如使用阿里云百炼兼容接口时，可以在启动 LLM 服务前配置：
 
@@ -129,7 +140,7 @@ python app.py
 Agent 运行时通用配置：
 
 - `INTERNAL_BUSINESS_BASE_URL`：Java business-service 地址，默认 `http://127.0.0.1:8080`
-- `AGENT_INTERNAL_SERVICE_TOKEN`：FastAPI 调用 Java 内部工具的服务令牌
+- `AGENT_INTERNAL_SERVICE_TOKEN`：Java 与 FastAPI 之间的共享服务令牌，同时保护 stateful/legacy Agent 接口和 Java 内部工具接口；本地有开发默认值，部署时必须替换
 - `AGENT_PRIMARY_PROVIDER`：主模型供应商，默认 `openai-compatible`
 - `AGENT_PRIMARY_MODEL`：主模型，默认读取 `LLM_MODEL`
 - `AGENT_PRIMARY_BASE_URL`：主模型 OpenAI-compatible 基础地址

@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import app
 import pytest
@@ -38,7 +39,7 @@ class AgentAnswerEndpointTest(unittest.TestCase):
             },
         }
 
-    @patch.object(app, "call_openai_compatible", return_value=None)
+    @patch("llm_service.model_gateway.ModelGateway.generate_json", new_callable=AsyncMock, return_value=None)
     def test_returns_degraded_fallback_with_valid_evidence_ids(self, _call):
         response = self.client.post("/llm/agent/answer", json=self.payload)
 
@@ -48,7 +49,7 @@ class AgentAnswerEndpointTest(unittest.TestCase):
         self.assertTrue(data["answer"])
         self.assertEqual(data["citationIds"], ["chunk:1", "graph:1"])
 
-    @patch.object(app, "call_openai_compatible", return_value={
+    @patch("llm_service.model_gateway.ModelGateway.generate_json", new_callable=AsyncMock, return_value={
         "answer": "模型回答",
         "citationIds": ["chunk:1", "forged:citation"],
         "followUpQuestions": ["它适合哪个年级？"],
@@ -62,45 +63,6 @@ class AgentAnswerEndpointTest(unittest.TestCase):
         self.assertEqual(data["citationIds"], ["chunk:1"])
         self.assertNotIn("forged:citation", data["citationIds"])
 
-    def test_accepts_markdown_wrapped_json_from_compatible_model(self):
-        parsed = app.parse_model_json('```json\n{"answer":"回答","citationIds":[]}\n```')
-
-        self.assertEqual(parsed["answer"], "回答")
-
-    def test_resolves_bailian_chat_completions_endpoint_from_base_url(self):
-        with patch.object(app, "LLM_API_URL", ""), patch.object(
-            app,
-            "LLM_BASE_URL",
-            "https://dashscope.aliyuncs.com/compatible-mode/v1/",
-        ):
-            self.assertEqual(
-                app.resolve_llm_api_url(),
-                "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
-            )
-
-    @patch.object(app, "LLM_API_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions")
-    @patch.object(app, "LLM_API_KEY", "test-key")
-    @patch.object(app.urllib.request, "urlopen")
-    def test_calls_openai_compatible_json_endpoint(self, urlopen):
-        class FakeResponse:
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *_args):
-                return False
-
-            def read(self):
-                return '{"choices":[{"message":{"content":"```json\\n{\\"answer\\":\\"模型回答\\"}\\n```"}}]}'.encode("utf-8")
-
-        urlopen.return_value = FakeResponse()
-
-        result = app.call_openai_compatible("请回答")
-
-        self.assertEqual(result["answer"], "模型回答")
-        request = urlopen.call_args.args[0]
-        self.assertEqual(request.full_url, "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions")
-        self.assertEqual(request.get_header("Authorization"), "Bearer test-key")
-
 
 if __name__ == "__main__":
     unittest.main()
@@ -109,8 +71,13 @@ if __name__ == "__main__":
 def settings_for(tmp_path: Path, **overrides) -> Settings:
     return Settings(
         database_path=tmp_path / "agent.sqlite3",
+        internal_service_token=overrides.pop("internal_service_token", ""),
         llm_api_url="",
         llm_api_key="",
+        fallback_provider=overrides.pop("fallback_provider", ""),
+        fallback_model=overrides.pop("fallback_model", ""),
+        fallback_base_url=overrides.pop("fallback_base_url", ""),
+        fallback_api_key=overrides.pop("fallback_api_key", ""),
         agent_context_token_budget=overrides.pop("agent_context_token_budget", 1000),
         agent_recent_message_count=overrides.pop("agent_recent_message_count", 6),
         **overrides,
@@ -185,6 +152,148 @@ def test_new_thread_and_multiturn_persistence(tmp_path: Path):
         assert [item["role"] for item in stored["messages"]] == ["user", "assistant", "user", "assistant"]
 
 
+def test_stateful_stream_emits_events_and_persists_final_response(tmp_path: Path):
+    with TestClient(create_app(settings_for(tmp_path))) as client:
+        response = client.post("/agent/messages/stream", json=message_payload())
+
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("text/event-stream")
+        assert "event: run.started" in response.text
+        assert "event: model.failed" in response.text
+        assert "event: token" in response.text
+        assert "event: final" in response.text
+        assert "event: done" in response.text
+
+        final_block = next(
+            block for block in response.text.strip().split("\n\n")
+            if block.startswith("event: final")
+        )
+        final_data = json.loads(final_block.split("data: ", 1)[1])
+        thread_id = final_data["threadId"]
+
+        stored = client.get(
+            f"/agent/threads/{thread_id}",
+            params={"ownerId": "school-user:1", "scopeType": "SCHOOL", "scopeId": 1},
+        ).json()
+        assert [item["role"] for item in stored["messages"]] == ["user", "assistant"]
+        assert stored["messages"][-1]["content"] == final_data["response"]["answer"]
+
+
+def test_stateful_runtime_uses_configured_fallback_model(tmp_path: Path):
+    settings = settings_for(
+        tmp_path,
+        primary_provider="bailian",
+        primary_model="qwen-plus",
+        primary_base_url="https://dashscope.example/v1",
+        primary_api_key="primary-key",
+        fallback_provider="ollama",
+        fallback_model="qwen3:8b",
+        fallback_base_url="http://127.0.0.1:11434/v1",
+        fallback_api_key="ollama",
+    )
+    app = create_app(settings)
+    runtime = app.state.runtime
+
+    class FakeAgent:
+        def __init__(self, content: str):
+            self.content = content
+
+        async def ainvoke(self, _input, config=None):
+            return {"messages": [AIMessage(content=self.content)]}
+
+    runtime._create_agent_for = lambda config: {
+        "qwen-plus": FakeAgent("阿里云无效响应"),
+        "qwen3:8b": FakeAgent('{"answer":"Ollama回答","citationIds":[]}'),
+    }[config.model]
+
+    response = asyncio.run(
+        runtime.handle(AgentMessageRequest.model_validate(
+            message_payload(message="主模型失败后继续")
+        ))
+    )
+
+    assert response.answer == "Ollama回答"
+    assert response.provider == "ollama"
+    assert response.model == "qwen3:8b"
+    assert response.fallback_level == 1
+    assert response.generation_status == "completed"
+
+
+def test_stateful_stream_reports_primary_failure_and_fallback_success(tmp_path: Path):
+    settings = settings_for(
+        tmp_path,
+        primary_provider="bailian",
+        primary_model="qwen-plus",
+        primary_api_key="primary-key",
+        fallback_provider="ollama",
+        fallback_model="qwen3:8b",
+        fallback_api_key="ollama",
+    )
+    app = create_app(settings)
+    runtime = app.state.runtime
+
+    class FakeAgent:
+        def __init__(self, content: str):
+            self.content = content
+
+        async def ainvoke(self, _input, config=None):
+            return {"messages": [AIMessage(content=self.content)]}
+
+    runtime._create_agent_for = lambda config: {
+        "qwen-plus": FakeAgent("阿里云无效响应"),
+        "qwen3:8b": FakeAgent('{"answer":"Ollama流式回答","citationIds":[]}'),
+    }[config.model]
+
+    async def collect_events():
+        return [event async for event in runtime.stream_events(
+            AgentMessageRequest.model_validate(
+                message_payload(message="流式主模型失败后继续", conversationId="fallback-stream")
+            )
+        )]
+
+    events = asyncio.run(collect_events())
+    names = [event.split("\n", 1)[0].removeprefix("event: ") for event in events]
+    assert names.count("model.started") == 2
+    assert "model.failed" in names
+    assert "model.completed" in names
+    final_block = next(event for event in events if event.startswith("event: final"))
+    final_data = json.loads(final_block.split("data: ", 1)[1])
+    assert final_data["response"]["provider"] == "ollama"
+    assert final_data["response"]["fallbackLevel"] == 1
+
+
+def test_stateful_stream_rejects_cross_owner_and_cross_scope_thread(tmp_path: Path):
+    with TestClient(create_app(settings_for(tmp_path))) as client:
+        first = client.post("/agent/messages", json=message_payload()).json()
+        thread_id = first["threadId"]
+
+        cross_owner = client.post(
+            "/agent/messages/stream",
+            json=message_payload(ownerId="school-user:2", threadId=thread_id),
+        )
+        cross_scope = client.post(
+            "/agent/messages/stream",
+            json=message_payload(threadId=thread_id, scopeId=2),
+        )
+
+        assert cross_owner.status_code == 404
+        assert cross_scope.status_code == 404
+
+
+def test_agent_service_token_is_required_when_configured(tmp_path: Path):
+    settings = settings_for(tmp_path, internal_service_token="internal-secret")
+    with TestClient(create_app(settings)) as client:
+        missing = client.post("/agent/messages", json=message_payload())
+        accepted = client.post(
+            "/agent/messages",
+            headers={"X-Agent-Service-Token": "internal-secret"},
+            json=message_payload(),
+        )
+
+        assert missing.status_code == 401
+        assert accepted.status_code == 200
+
+
 def test_restart_recovery_uses_same_database(tmp_path: Path):
     settings = settings_for(tmp_path)
     with TestClient(create_app(settings)) as client:
@@ -245,8 +354,26 @@ def test_tool_registry_is_scoped_bounded_and_audited(tmp_path: Path):
     assert "甲纪念馆" in output
     assert "乙文化站" not in output
     assert runtime.executions[0].name == "search_approved_resources"
+    assert runtime.event_sink is None
     with repository._connect() as connection:
         assert connection.execute("SELECT COUNT(*) FROM agent_tool_audit").fetchone()[0] == 1
+
+
+def test_tool_runtime_emits_started_and_completed_events(tmp_path: Path):
+    repository = ConversationRepository(tmp_path / "tool-events.sqlite3")
+    thread = repository.create_thread("owner", "SCHOOL", 1)
+    context = TrustedContext(resources=[{"resource": {"resourceName": "甲纪念馆"}}])
+    events = []
+    runtime = ToolRuntimeContext(thread.thread_id, context, repository, 2000, event_sink=lambda name, data: events.append((name, data)))
+    token = bind_tool_runtime(runtime)
+    try:
+        search_approved_resources.invoke({"query": "纪念馆", "limit": 1})
+    finally:
+        reset_tool_runtime(token)
+
+    assert [name for name, _ in events] == ["tool.started", "tool.completed"]
+    assert events[0][1]["toolName"] == "search_approved_resources"
+    assert events[1][1]["status"] == "ok"
 
 
 def test_model_output_filters_invented_citations(tmp_path: Path):
