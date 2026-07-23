@@ -4,6 +4,7 @@ import com.redculture.platform.service.KnowledgeRetriever;
 import com.redculture.platform.service.LocalEduResourceService;
 import com.redculture.platform.service.SchoolMapService;
 import com.redculture.platform.service.TownMapService;
+import com.redculture.platform.config.AgentProperties;
 import com.redculture.platform.service.agent.AnswerGenerator;
 import com.redculture.platform.service.agent.AgentAccessGuard;
 import com.redculture.platform.service.agent.AgentRuntimeClient;
@@ -63,6 +64,8 @@ class AgentQaServiceImplTest {
         runtimeResponse.setCitations(List.of(citation));
         when(runtimeClient.run(any())).thenReturn(runtimeResponse);
 
+        AgentProperties legacyProperties = new AgentProperties();
+        legacyProperties.setRuntimeMode("legacy");
         AgentQaServiceImpl service = new AgentQaServiceImpl(
                 schoolMapService,
                 mock(TownMapService.class),
@@ -72,7 +75,8 @@ class AgentQaServiceImplTest {
                 context -> new GeneratedAnswer("不应调用", List.of(), List.of()),
                 new CitationValidator(),
                 new AgentAccessGuard(schoolMapService),
-                runtimeClient
+                runtimeClient,
+                legacyProperties
         );
         AgentQaRequest request = request("附近有哪些红色资源？");
         request.setConversationId("conversation-1");
