@@ -2,7 +2,7 @@
 
 The repository currently splits business ownership into Spring Boot and model-facing endpoints into a single Flask module. The Python service has no request models, server-side conversation identity, durable state, tool registry, or model-driven execution loop. The Java QA service performs a useful but fixed sequence of scope resolution, intent recognition, retrieval, template generation, and citation filtering. The Vue client stores display history only in browser session storage and sends each question independently.
 
-The change must preserve Spring ownership of authentication, approved business data, and database/graph access. It must also keep the current teaching-plan and POI-classification endpoints available while the conversational endpoint migrates. Development must remain runnable without model credentials.
+The change must preserve Spring ownership of authentication, approved business data, and database/graph access. Java keeps the public teaching-plan and QA façades, while the model-facing FastAPI service converges all tasks on the Stateful Agent protocol. Development must remain runnable without model credentials.
 
 ## Goals / Non-Goals
 
@@ -12,7 +12,7 @@ The change must preserve Spring ownership of authentication, approved business d
 - Isolate and persist each conversation by an opaque thread identifier and authenticated owner scope.
 - Bound tool rounds, tool output, message history, and model context.
 - Keep citations limited to evidence supplied by trusted business and retrieval context.
-- Keep legacy one-shot LLM endpoints compatible and provide explicit degraded behavior without credentials.
+- Remove the old FastAPI one-shot `/llm/*` endpoints and provide explicit degraded behavior without credentials.
 - Route the existing Spring QA API and Vue assistant through the stateful runtime without weakening authorization.
 
 **Non-Goals:**
@@ -24,7 +24,7 @@ The change must preserve Spring ownership of authentication, approved business d
 
 ## Decisions
 
-1. **FastAPI application factory and modular packages.** The Python service will expose a FastAPI `app` from a small entry point, with settings, schemas, persistence, tools, Agent runtime, and legacy workflows in separate modules. FastAPI is selected for typed validation, async HTTP/model access, generated API documentation, and future streaming support. Replacing Flask alone is not considered sufficient.
+1. **FastAPI application factory and modular packages.** The Python service will expose a FastAPI `app` from a small entry point, with settings, schemas, persistence, tools, Agent runtime, and structured task helpers in separate modules. FastAPI is selected for typed validation, async HTTP/model access, generated API documentation, and streaming support. Replacing Flask alone is not considered sufficient.
 
 2. **LangChain tools with a LangGraph-backed Agent.** The runtime will use LangChain's current Agent constructor, which is backed by LangGraph, and register an allowlist of typed read-only tools. The compiled Agent is shared; `thread_id` and owner metadata select isolated state. A bounded model tool loop serves as the planner/executor, with explicit middleware/runtime limits and a deterministic degraded path when no model is configured. A hand-written unrestricted planner was rejected because it would duplicate LangGraph execution and increase unsafe actions.
 
@@ -38,7 +38,7 @@ The change must preserve Spring ownership of authentication, approved business d
 
 7. **Spring remains the public authenticated gateway.** `AgentQaRequest` and `AgentQaResponse` gain `threadId`. The Java QA service continues to enforce scope and assemble trusted context, then uses an HTTP answer generator for the stateful runtime when configured. Local template generation remains an explicit fallback. The Vue UI stores the returned opaque thread identifier and sends it on later turns.
 
-8. **Legacy endpoints remain deterministic workflows.** Teaching-plan generation and resource classification continue to use structured model output and validation. Town/school legacy ask routes remain available for compatibility but are documented as stateless. This avoids forcing every LLM operation into an Agent abstraction.
+8. **Unified structured task workflows.** Chat, teaching-plan generation, and resource classification all use the same Stateful Agent request and SSE protocols. Structured tasks retain schema validation, PromptManager versions, trusted context, and local fallbacks; resource-discovery service threads are archived after completion so they do not pollute teacher conversations.
 
 ## Risks / Trade-offs
 
@@ -52,14 +52,14 @@ The change must preserve Spring ownership of authentication, approved business d
 
 ## Migration Plan
 
-1. Add the FastAPI modular service and tests while retaining legacy route paths.
+1. Add the FastAPI modular service and tests with the unified Stateful Agent route family.
 2. Add thread/message APIs and SQLite persistence; verify restart recovery and owner isolation.
 3. Add typed context tools and LangChain/LangGraph execution with bounded context.
 4. Add the Spring HTTP answer generator and `threadId` fields behind configuration, preserving template fallback.
 5. Update Vue to persist only the opaque server thread identifier plus render history.
 6. Run Python, Java, and frontend tests, then deploy FastAPI before enabling the Spring runtime client.
 
-Rollback consists of disabling the configured Agent runtime client in Spring and returning to the existing local answer generator. Legacy Python endpoints remain compatible during rollback.
+Rollback consists of disabling remote Agent calls in Spring and returning to the existing local structured fallback. The removed FastAPI `/llm/*` routes are not part of rollback and must remain absent.
 
 ## Open Questions
 

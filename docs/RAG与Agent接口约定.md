@@ -303,7 +303,9 @@ Java 内部接口和 HTTP 接口只实现一种即可，不要求同一份代码
 - RAG 同学不要修改 Agent 的 Controller、前端问答渲染和最终响应结构。
 - Agent 同学不要直接修改 RAG 的检索算法或数据库查询实现。
 - 双方都不要为了本协议修改数据库表结构。
-- 现有 `/api/ai/teaching-plans/generate` 和 `/llm/teaching-plan/generate` 保持兼容。
+- Java 对外的 `/api/ai/teaching-plans/generate` 和
+  `/api/ai/teaching-plans/generate/stream` 保持兼容；FastAPI 内部统一调用
+  `/agent/messages` 和 `/agent/messages/stream`，不再保留 `/llm/*` 教学方案接口。
 
 ## 8. 联调样例
 
