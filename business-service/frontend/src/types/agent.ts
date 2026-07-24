@@ -115,6 +115,7 @@ export type AgentSseEventName =
   | "tool.started"
   | "tool.completed"
   | "token"
+  | "plan.patch"
   | "final"
   | "error"
   | "done"
@@ -125,6 +126,7 @@ export interface AgentSseEventData {
   threadId?: string;
   conversationId?: string;
   delta?: string;
+  patch?: Partial<TeachingPlanResponse>;
   toolName?: string;
   name?: string;
   status?: string;
