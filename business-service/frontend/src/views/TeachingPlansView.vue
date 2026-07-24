@@ -20,6 +20,7 @@ const notice = reactive({ tone: "", text: "" });
 const streamText = ref("");
 const streamStage = ref("");
 const activeAbortController = ref(null);
+const threadId = ref("");
 
 const streamPreview = computed(() => streamText.value
   .replace(/\\n/g, "\n")
@@ -36,11 +37,16 @@ const sections = computed(() => generated.value ? [
 ].filter(([, items]) => Array.isArray(items) && items.length) : []);
 
 onMounted(async () => {
+  threadId.value = sessionStorage.getItem(threadStorageKey()) || "";
   await schoolStore.load();
   await loadPlans();
   const theme = schoolStore.resources.find((item) => item.educationThemeSummary)?.educationThemeSummary;
   if (theme) form.theme = theme.slice(0, 40);
 });
+
+function threadStorageKey() {
+  return `school-portal-teaching-plan-thread:${auth.user?.schoolId || "unknown"}`;
+}
 
 async function loadPlans() {
   historyLoading.value = true;
@@ -68,7 +74,8 @@ async function generate() {
   try {
     const request = {
       schoolId: auth.user.schoolId, grade: form.grade.trim(), theme: form.theme.trim(), activityType: form.activityType,
-      durationMinutes: Number(form.durationMinutes), practiceRequired: form.practiceRequired
+      durationMinutes: Number(form.durationMinutes), practiceRequired: form.practiceRequired,
+      ...(threadId.value ? { threadId: threadId.value } : {})
     };
     let finalReceived = false;
     await api.stream("/api/ai/teaching-plans/generate/stream", request, {
@@ -79,11 +86,17 @@ async function generate() {
         } else if (eventName === "token") {
           streamText.value += data.delta || "";
           streamStage.value = "正在生成教学方案";
-        } else if (eventName === "fallback") {
+        } else if (eventName === "fallback" || eventName === "model.failed") {
           if (data.reset) streamText.value = "";
-          streamStage.value = data.message || "正在切换备用模型";
-        } else if (eventName === "result") {
-          generated.value = data;
+          streamStage.value = data.message || `正在切换备用模型：${data.nextModel || "本地模型"}`;
+        } else if (eventName === "model.started") {
+          streamStage.value = `正在调用 ${data.model || "模型"} 生成教学方案`;
+        } else if (eventName === "final") {
+          generated.value = data.response?.teachingPlan || data.response || data.teachingPlan || data;
+          if (data.threadId || data.response?.threadId || generated.value.threadId) {
+            threadId.value = data.threadId || data.response?.threadId || generated.value.threadId;
+            sessionStorage.setItem(threadStorageKey(), threadId.value);
+          }
           finalReceived = true;
         } else if (eventName === "error") {
           throw new Error(data.message || "教学方案流式生成失败");

@@ -1,5 +1,6 @@
 export type AgentGenerationStatus = "completed" | "degraded" | "skipped" | "incomplete" | string;
 export type AgentRetrievalStatus = "ok" | "empty" | "degraded" | string;
+export type AgentTaskType = "CHAT" | "TEACHING_PLAN" | "RESOURCE_DISCOVERY";
 
 export interface AgentCitation {
   citationId?: string;
@@ -15,7 +16,55 @@ export interface AgentToolExecution {
   durationMs?: number;
 }
 
+export interface TeachingPlanResponse {
+  threadId?: string | null;
+  generationStatus?: AgentGenerationStatus | null;
+  retrievalStatus?: AgentRetrievalStatus | null;
+  promptVersion?: string | null;
+  promptRunId?: string | null;
+  llmProvider?: string | null;
+  llmModel?: string | null;
+  fallbackLevel?: number | null;
+  message?: string | null;
+  theme?: string | null;
+  grade?: string | null;
+  activityType?: string | null;
+  durationMinutes?: number | null;
+  practiceRequired?: boolean | null;
+  objectives?: string[];
+  resourceBasis?: string[];
+  activityFlow?: string[];
+  preparation?: string[];
+  fieldTasks?: string[];
+  safetyNotes?: string[];
+  reflection?: string[];
+  evaluation?: string[];
+  citations?: AgentCitation[];
+  relatedResources?: string[];
+  followUpSuggestions?: string[];
+}
+
+export interface ResourceDiscoveryResult {
+  providerPlaceId?: string | null;
+  ideologicalRelevant?: boolean | null;
+  resourceCategory?: string | null;
+  resourceSubcategory?: string | null;
+  confidence?: number | null;
+  rationale?: string | null;
+  educationThemes?: string[];
+  targetGrades?: string | null;
+  activitySuggestion?: string | null;
+  verificationNotes?: string | null;
+}
+
+export interface ResourceDiscoveryResponse {
+  analysisStatus?: string | null;
+  message?: string | null;
+  results?: ResourceDiscoveryResult[];
+}
+
 export interface AgentQaResponse {
+  taskType?: AgentTaskType | string | null;
   answer?: string;
   intent?: string | null;
   retrievalStatus?: AgentRetrievalStatus | null;
@@ -32,6 +81,19 @@ export interface AgentQaResponse {
   status?: string | null;
   toolExecutions?: AgentToolExecution[];
   fallbackLevel?: number | string | null;
+  teachingPlan?: TeachingPlanResponse | null;
+  resourceDiscovery?: ResourceDiscoveryResponse | null;
+}
+
+export interface StatefulAgentRequest {
+  taskType: AgentTaskType;
+  taskPayload?: Record<string, unknown>;
+  ownerId: string;
+  scopeType: string;
+  scopeId: number | null;
+  threadId?: string | null;
+  message: string;
+  context?: Record<string, unknown>;
 }
 
 export interface AgentQaRequestPayload {

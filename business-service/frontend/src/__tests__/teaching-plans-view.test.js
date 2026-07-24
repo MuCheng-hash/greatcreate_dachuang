@@ -27,20 +27,27 @@ describe("teaching plans view", () => {
     apiMock.stream.mockImplementation(async (path, body, options) => {
       expect(path).toBe("/api/ai/teaching-plans/generate/stream");
       expect(body).toEqual(expect.objectContaining({ schoolId: 1, theme: "敬老志愿服务" }));
-      options.onEvent("stage", { message: "正在调用模型" });
+      options.onEvent("run.started", { message: "正在调用模型" });
       options.onEvent("token", { delta: "主模型残片" });
-      options.onEvent("fallback", { reset: true, nextModel: "qwen3:8b", message: "正在切换备用模型" });
+      options.onEvent("model.failed", { reset: true, nextModel: "qwen3:8b", message: "正在切换备用模型" });
       options.onEvent("token", { delta: "{\"objectives\":[\"逐字生成目标" });
       await new Promise((resolve) => { finishStream = resolve; });
       options.onEvent("token", { delta: "\"]}" });
-      options.onEvent("result", {
-        generationStatus: "completed",
-        message: "教学方案已生成",
-        theme: "敬老志愿服务",
-        grade: "四年级",
-        durationMinutes: 120,
-        objectives: ["逐字生成目标"],
-        citations: []
+      options.onEvent("final", {
+        threadId: "thread-teaching-plan-1",
+        response: {
+          taskType: "TEACHING_PLAN",
+          status: "completed",
+          teachingPlan: {
+            generationStatus: "completed",
+            message: "教学方案已生成",
+            theme: "敬老志愿服务",
+            grade: "四年级",
+            durationMinutes: 120,
+            objectives: ["逐字生成目标"],
+            citations: []
+          }
+        }
       });
       options.onEvent("done", {});
     });

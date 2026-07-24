@@ -1,8 +1,7 @@
 const state = {
     appConfig: {
         amapKey: "",
-        amapSecurityJsCode: "",
-        llmServiceBaseUrl: "http://127.0.0.1:5050"
+        amapSecurityJsCode: ""
     },
     userLocation: null,
     userLocationAddress: null,
@@ -54,7 +53,8 @@ const state = {
     drawerOpen: false,
     currentAccount: null,
     authMode: "login",
-    generatedTeachingPlan: null
+    generatedTeachingPlan: null,
+    teachingPlanThreadId: ""
 };
 
 const elements = {
@@ -288,8 +288,7 @@ async function loadClientConfig() {
         const config = await requestJson("/api/map/client-config");
         state.appConfig = {
             amapKey: String(config?.amapKey || "").trim(),
-            amapSecurityJsCode: String(config?.amapSecurityJsCode || "").trim(),
-            llmServiceBaseUrl: String(config?.llmServiceBaseUrl || "").trim()
+            amapSecurityJsCode: String(config?.amapSecurityJsCode || "").trim()
         };
     } catch (error) {
         updateMapStatus("前端地图配置读取失败。");
@@ -2235,6 +2234,7 @@ async function generateTeachingPlan() {
             body: JSON.stringify(payload)
         });
         state.generatedTeachingPlan = response;
+        state.teachingPlanThreadId = response.threadId || "";
         renderTeachingPlanResponse(response);
         elements.planStatus.textContent = response.generationStatus === "completed" ? "已完成" : "降级结果";
         if (elements.savePlanDraftButton) {
@@ -2286,7 +2286,7 @@ async function saveGeneratedPlanDraft() {
 }
 
 function buildTeachingPlanPayload() {
-    return {
+    const payload = {
         schoolId: state.currentSchoolDetail?.school?.schoolId,
         grade: elements.planGradeInput?.value.trim() || "",
         theme: elements.planThemeInput?.value.trim() || "",
@@ -2294,6 +2294,10 @@ function buildTeachingPlanPayload() {
         durationMinutes: Number(elements.planDurationInput?.value || 0) || null,
         practiceRequired: Boolean(elements.planPracticeInput?.checked)
     };
+    if (state.teachingPlanThreadId) {
+        payload.threadId = state.teachingPlanThreadId;
+    }
+    return payload;
 }
 
 function renderTeachingPlanResponse(plan) {
@@ -2367,14 +2371,12 @@ async function requestTownExplain() {
         return;
     }
     elements.qaStatus.textContent = "生成中";
-    await invokeLlmApi("/llm/town/explain", {
-        regionId: state.currentTownDetail.regionId,
-        regionName: state.currentTownDetail.regionName,
-        markers: state.currentTownDetail.markers || [],
-        heroIds: (state.currentTownDetail.heroes || []).map((item) => item.heroId),
-        eventIds: (state.currentTownDetail.events || []).map((item) => item.eventId),
-        storyIds: (state.currentTownDetail.stories || []).map((item) => item.storyId)
-    }, "当前问答服务不可用，已展示本地讲解兜底文案。");
+    await invokeQaApi(
+        "请介绍当前乡镇可用于思政教学的资源。",
+        "REGION",
+        state.currentTownDetail.regionId,
+        "当前问答服务不可用，已展示本地讲解兜底文案。"
+    );
 }
 
 async function askTownQuestion() {
@@ -2388,15 +2390,7 @@ async function askTownQuestion() {
     }
 
     elements.qaStatus.textContent = "提问中";
-    await invokeLlmApi("/llm/town/ask", {
-        regionId: state.currentTownDetail.regionId,
-        regionName: state.currentTownDetail.regionName,
-        question,
-        markers: state.currentTownDetail.markers || [],
-        heroIds: (state.currentTownDetail.heroes || []).map((item) => item.heroId),
-        eventIds: (state.currentTownDetail.events || []).map((item) => item.eventId),
-        storyIds: (state.currentTownDetail.stories || []).map((item) => item.storyId)
-    }, "当前问答服务不可用，已展示本地问答兜底文案。");
+    await invokeQaApi(question, "REGION", state.currentTownDetail.regionId, "当前问答服务不可用，已展示本地问答兜底文案。");
 }
 
 async function requestSchoolExplain() {
@@ -2404,7 +2398,12 @@ async function requestSchoolExplain() {
         return;
     }
     elements.qaStatus.textContent = "生成中";
-    await invokeLlmApi("/llm/school/explain", buildSchoolQaPayload(), "当前 LLM 服务不可用，已展示本地学校讲解兜底文案。");
+    await invokeQaApi(
+        "请介绍本校周边可用于思政教学的资源。",
+        "SCHOOL",
+        state.currentSchoolDetail.school?.schoolId,
+        "当前问答服务不可用，已展示本地学校讲解兜底文案。"
+    );
 }
 
 async function askSchoolQuestion() {
@@ -2414,10 +2413,7 @@ async function askSchoolQuestion() {
     }
 
     elements.qaStatus.textContent = "提问中";
-    await invokeLlmApi("/llm/school/ask", {
-        ...buildSchoolQaPayload(),
-        question
-    }, "当前 LLM 服务不可用，已展示本地学校问答兜底文案。");
+    await invokeQaApi(question, "SCHOOL", state.currentSchoolDetail.school?.schoolId, "当前 LLM 服务不可用，已展示本地学校问答兜底文案。");
 }
 
 function syncPlanFormWithSchool(detail) {
@@ -2438,6 +2434,7 @@ function syncPlanFormWithSchool(detail) {
     if (elements.planCitations) {
         elements.planCitations.innerHTML = "";
     }
+    state.teachingPlanThreadId = "";
 }
 
 function buildSchoolQaPayload() {
@@ -2456,31 +2453,22 @@ function buildSchoolQaPayload() {
     };
 }
 
-async function invokeLlmApi(path, payload, fallbackStatus) {
-    const llmBase = state.appConfig.llmServiceBaseUrl;
-    if (!llmBase) {
-        renderFallbackQa(payload.question);
+async function invokeQaApi(question, scopeType, scopeId, fallbackStatus) {
+    if (!scopeId) {
+        renderFallbackQa(question);
         elements.qaStatus.textContent = "本地兜底";
         return;
     }
 
     try {
-        const response = await fetch(`${llmBase}${path}`, {
+        const response = await requestJson("/api/ai/qa/ask", {
             method: "POST",
-            headers: {
-                "Content-Type": "application/json",
-                Accept: "application/json"
-            },
-            body: JSON.stringify(payload)
+            body: JSON.stringify({ question, scopeType, scopeId })
         });
-        if (!response.ok) {
-            throw new Error("llm request failed");
-        }
-        const json = await response.json();
-        renderQaResponse(json);
+        renderQaResponse(response);
         elements.qaStatus.textContent = "已完成";
     } catch (error) {
-        renderFallbackQa(payload.question);
+        renderFallbackQa(question);
         elements.qaStatus.textContent = fallbackStatus;
     }
 }
@@ -2497,7 +2485,13 @@ function renderQaResponse(response) {
     `;
 
     elements.qaCitations.innerHTML = citations.length
-        ? citations.map((citation) => `<article><p>${escapeHtml(citation)}</p></article>`).join("")
+        ? citations.map((citation) => {
+            const title = typeof citation === "string"
+                ? citation
+                : citation?.title || citation?.citationId || "引用来源";
+            const excerpt = typeof citation === "object" ? citation?.excerpt : "";
+            return `<article><p>${escapeHtml(title)}</p>${excerpt ? `<small>${escapeHtml(excerpt)}</small>` : ""}</article>`;
+        }).join("")
         : "";
 
     if (followUpQuestions.length) {
