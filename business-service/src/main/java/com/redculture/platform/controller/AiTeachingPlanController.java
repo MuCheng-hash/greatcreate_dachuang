@@ -11,11 +11,13 @@ import com.redculture.platform.vo.TeachingActivityPlanAdminVO;
 import com.redculture.platform.vo.request.GeneratedTeachingPlanSaveRequest;
 import com.redculture.platform.vo.request.TeachingPlanGenerateRequest;
 import jakarta.servlet.http.HttpServletRequest;
+import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 @RestController
 @RequestMapping("/api/ai/teaching-plans")
@@ -34,11 +36,21 @@ public class AiTeachingPlanController {
     public ApiResponse<GeneratedTeachingPlanResponse> generate(@RequestBody TeachingPlanGenerateRequest request,
                                                                HttpServletRequest servletRequest) {
         try {
-            requireSchoolAccess(request == null ? null : request.getSchoolId(), AuthContext.requireUser(servletRequest));
-            return ApiResponse.success(aiTeachingPlanService.generatePlan(request));
+            AuthCurrentUserVO user = AuthContext.requireUser(servletRequest);
+            requireSchoolAccess(request == null ? null : request.getSchoolId(), user);
+            return ApiResponse.success(aiTeachingPlanService.generatePlan(
+                    request, user.getAccountId(), null));
         } catch (IllegalArgumentException exception) {
             return ApiResponse.fail(exception.getMessage());
         }
+    }
+
+    @PostMapping(value = "/generate/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    public SseEmitter generateStream(@RequestBody TeachingPlanGenerateRequest request,
+                                     HttpServletRequest servletRequest) {
+        AuthCurrentUserVO user = AuthContext.requireUser(servletRequest);
+        requireSchoolAccess(request == null ? null : request.getSchoolId(), user);
+        return aiTeachingPlanService.generatePlanStream(request, user.getAccountId(), null);
     }
 
     @PostMapping("/save-draft")

@@ -13,6 +13,7 @@ from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, Sys
 
 from .memory import ContextWindowManager
 from .model_gateway import ModelGateway, message_text
+from .observability import FallbackAlertManager, LlmObservability, LlmTraceContext, classify_llm_error
 from .planner import AgentPlan, AgentPlanner
 from .repository import ConversationRepository, ThreadRecord
 from .schemas import AgentMessageRequest, AgentMessageResponse, AgentModelOutput, Citation, ToolExecution, TrustedContext
@@ -25,10 +26,19 @@ EventSink = Callable[[str, dict[str, Any]], None]
 
 
 class AgentRuntime:
-    def __init__(self, settings: Settings, repository: ConversationRepository, model: ModelGateway | None = None):
+    def __init__(
+        self,
+        settings: Settings,
+        repository: ConversationRepository,
+        model: ModelGateway | None = None,
+        observability: LlmObservability | None = None,
+        alerts: FallbackAlertManager | None = None,
+    ):
         self.settings = settings
         self.repository = repository
-        self.model = model or ModelGateway(settings)
+        self.observability = observability
+        self.alerts = alerts or FallbackAlertManager(settings.llm_alert_webhook_url)
+        self.model = model or ModelGateway(settings, observability, self.alerts)
         self.context_manager = ContextWindowManager(
             settings.agent_context_token_budget,
             settings.agent_recent_message_count,
@@ -134,12 +144,60 @@ class AgentRuntime:
         if attempts:
             return attempts[0][0]
         return ModelConfig(
-            provider=self.settings.primary_provider or "openai-compatible",
-            model=self.settings.primary_model,
-            base_url=self.settings.primary_base_url,
-            api_key=self.settings.primary_api_key,
+            provider=(
+                self.settings.agent_primary_provider
+                or self.settings.primary_provider
+                or self.settings.llm_provider
+                or "openai-compatible"
+            ),
+            model=(
+                self.settings.agent_primary_model
+                or self.settings.primary_model
+                or self.settings.llm_model
+            ),
+            base_url=(
+                self.settings.agent_primary_base_url
+                or self.settings.primary_base_url
+                or self.settings.llm_api_url
+                or self.settings.llm_base_url
+            ),
+            api_key=(
+                self.settings.agent_primary_api_key
+                or self.settings.primary_api_key
+                or self.settings.llm_api_key
+            ),
             fallback_level=0,
         )
+
+    def _agent_invoke_config(
+        self,
+        request: AgentMessageRequest,
+        thread: ThreadRecord,
+        config: ModelConfig,
+        plan: AgentPlan,
+    ) -> dict[str, Any]:
+        invoke_config: dict[str, Any] = {
+            "recursion_limit": max(3, plan.max_tool_rounds * 2 + 3),
+        }
+        if self.observability is not None:
+            trace_context = LlmTraceContext(
+                feature="stateful-agent",
+                user_id=request.owner_id,
+                session_id=thread.thread_id,
+                expected_json=True,
+                metadata={
+                    "intent": request.intent or "",
+                    "scopeType": request.scope_type,
+                    "modelRole": "primary" if config.fallback_level == 0 else (
+                        "fallback" if config.fallback_level == 1 else "lightweight"
+                    ),
+                    "fallbackLevel": config.fallback_level,
+                },
+            )
+            invoke_config["callbacks"] = [
+                self.observability.callback(trace_context, config.provider, config.model)
+            ]
+        return invoke_config
 
     def _with_model_metadata(
         self, response: AgentMessageResponse, config: ModelConfig, generation_status: str = "completed"
@@ -160,7 +218,8 @@ class AgentRuntime:
         plan: AgentPlan,
     ) -> AgentMessageResponse:
         executions: list[ToolExecution] = []
-        for config, injected_agent in self._model_attempts():
+        model_attempts = self._model_attempts()
+        for config, injected_agent in model_attempts:
             runtime = ToolRuntimeContext(
                 thread_id=thread.thread_id,
                 trusted_context=request.context,
@@ -180,10 +239,12 @@ class AgentRuntime:
                     plan,
                     tool_runtime=runtime,
                     agent=agent,
+                    model_config=config,
                 )
                 return self._with_model_metadata(result, config)
             except Exception as exc:
                 executions.extend(runtime.executions)
+                error_type = classify_llm_error(exc)
                 LOGGER.warning(
                     "stateful_agent_model_failed",
                     extra={
@@ -191,12 +252,48 @@ class AgentRuntime:
                         "provider": config.provider,
                         "model": config.model,
                         "fallbackLevel": config.fallback_level,
-                        "errorType": type(exc).__name__,
+                        "errorType": error_type,
                     },
                 )
+                next_config = next(
+                    (
+                        next_item
+                        for next_item, _ in self._model_attempts()
+                        if next_item.fallback_level > config.fallback_level
+                    ),
+                    None,
+                )
+                if next_config is not None:
+                    self.alerts.fallback(
+                        LlmTraceContext(
+                            feature="stateful-agent",
+                            user_id=request.owner_id,
+                            session_id=thread.thread_id,
+                        ),
+                        config.model,
+                        next_config.model,
+                        error_type,
+                        next_config.fallback_level,
+                    )
             finally:
                 reset_tool_runtime(token)
 
+        self.alerts.exhausted(
+            LlmTraceContext(
+                feature="stateful-agent",
+                user_id=request.owner_id,
+                session_id=thread.thread_id,
+            ),
+            [
+                {
+                    "provider": config.provider,
+                    "model": config.model,
+                    "fallbackLevel": config.fallback_level,
+                    "status": "failed",
+                }
+                for config, _ in model_attempts
+            ] or [{"status": "not_configured"}],
+        )
         return self._degraded_answer(
             request, request.context, thread.thread_id, compacted, executions, status="degraded"
         )
@@ -222,7 +319,26 @@ class AgentRuntime:
             },
         )
         executions: list[ToolExecution] = []
-        for config, injected_agent in self._model_attempts():
+        model_attempts = self._model_attempts()
+        if not model_attempts:
+            emit(
+                "model.started",
+                {
+                    "provider": primary.provider,
+                    "model": primary.model,
+                    "fallbackLevel": primary.fallback_level,
+                },
+            )
+            emit(
+                "model.failed",
+                {
+                    "provider": primary.provider,
+                    "model": primary.model,
+                    "fallbackLevel": primary.fallback_level,
+                    "errorType": "not_configured",
+                },
+            )
+        for config, injected_agent in model_attempts:
             runtime = ToolRuntimeContext(
                 thread_id=thread.thread_id,
                 trusted_context=request.context,
@@ -252,6 +368,7 @@ class AgentRuntime:
                     runtime,
                     emit,
                     agent=agent,
+                    model_config=config,
                 )
                 result = self._with_model_metadata(result, config)
                 emit(
@@ -272,7 +389,7 @@ class AgentRuntime:
                         "provider": config.provider,
                         "model": config.model,
                         "fallbackLevel": config.fallback_level,
-                        "errorType": type(exc).__name__,
+                        "errorType": classify_llm_error(exc),
                     },
                 )
                 emit(
@@ -281,12 +398,21 @@ class AgentRuntime:
                         "provider": config.provider,
                         "model": config.model,
                         "fallbackLevel": config.fallback_level,
-                        "errorType": type(exc).__name__,
+                        "errorType": classify_llm_error(exc),
                     },
                 )
             finally:
                 reset_tool_runtime(token)
 
+        if not model_attempts:
+            self.alerts.exhausted(
+                LlmTraceContext(
+                    feature="stateful-agent-stream",
+                    user_id=request.owner_id,
+                    session_id=thread.thread_id,
+                ),
+                [{"status": "not_configured"}],
+            )
         result = self._degraded_answer(
             request, request.context, thread.thread_id, compacted, executions, status="degraded"
         )
@@ -316,6 +442,7 @@ class AgentRuntime:
         plan: AgentPlan,
         tool_runtime: ToolRuntimeContext | None = None,
         agent: Any | None = None,
+        model_config: ModelConfig | None = None,
     ) -> AgentMessageResponse:
         lc_messages = self._build_messages(messages, summary, plan)
         runtime = tool_runtime or ToolRuntimeContext(
@@ -329,7 +456,9 @@ class AgentRuntime:
             raise RuntimeError("model_unavailable")
         result = await target_agent.ainvoke(
             {"messages": lc_messages},
-            config={"recursion_limit": max(3, plan.max_tool_rounds * 2 + 3)},
+            config=self._agent_invoke_config(
+                request, thread, model_config or self._primary_model_config(), plan
+            ),
         )
         return self._response_from_model_result(result, trusted, thread.thread_id, compacted, runtime.executions)
 
@@ -345,6 +474,7 @@ class AgentRuntime:
         runtime: ToolRuntimeContext,
         emit: EventSink,
         agent: Any | None = None,
+        model_config: ModelConfig | None = None,
     ) -> AgentMessageResponse:
         lc_messages = self._build_messages(messages, summary, plan)
         model_messages: list[Any] = []
@@ -356,7 +486,9 @@ class AgentRuntime:
         if hasattr(target_agent, "astream"):
             async for chunk in target_agent.astream(
                 {"messages": lc_messages},
-                config={"recursion_limit": max(3, plan.max_tool_rounds * 2 + 3)},
+                config=self._agent_invoke_config(
+                    request, thread, model_config or self._primary_model_config(), plan
+                ),
                 stream_mode="messages",
                 version="v2",
             ):
@@ -375,7 +507,9 @@ class AgentRuntime:
         else:
             result = await target_agent.ainvoke(
                 {"messages": lc_messages},
-                config={"recursion_limit": max(3, plan.max_tool_rounds * 2 + 3)},
+                config=self._agent_invoke_config(
+                    request, thread, model_config or self._primary_model_config(), plan
+                ),
             )
             model_messages = result.get("messages", []) if isinstance(result, dict) else []
             model_buffer = self._last_ai_message_text(model_messages)

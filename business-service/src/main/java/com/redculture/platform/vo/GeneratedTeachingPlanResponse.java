@@ -10,6 +10,24 @@ public class GeneratedTeachingPlanResponse {
 
     private String generationStatus;
 
+    private String retrievalStatus;
+
+    private List<String> retrievalMethods = new ArrayList<>();
+
+    private String promptVersion;
+
+    private String promptRunId;
+
+    private String promptExperiment;
+
+    private String promptVariant;
+
+    private String llmProvider;
+
+    private String llmModel;
+
+    private Integer fallbackLevel;
+
     private String message;
 
     private String theme;

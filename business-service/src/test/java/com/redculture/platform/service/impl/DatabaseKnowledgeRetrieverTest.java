@@ -1,5 +1,6 @@
 package com.redculture.platform.service.impl;
 
+import com.redculture.platform.config.RagProperties;
 import com.redculture.platform.entity.ContentChunk;
 import com.redculture.platform.entity.DataSource;
 import com.redculture.platform.entity.EntitySourceRel;
@@ -10,6 +11,9 @@ import com.redculture.platform.mapper.EntitySourceRelMapper;
 import com.redculture.platform.service.SchoolMapService;
 import com.redculture.platform.service.TownMapService;
 import com.redculture.platform.service.KnowledgeRetriever;
+import com.redculture.platform.service.rag.ChunkVectorStore;
+import com.redculture.platform.service.rag.EmbeddingClient;
+import com.redculture.platform.service.rag.VectorSearchCandidate;
 import com.redculture.platform.vo.SchoolMapDetailVO;
 import com.redculture.platform.vo.ai.KnowledgeRetrieveRequest;
 import com.redculture.platform.vo.ai.KnowledgeRetrieveResult;
@@ -25,6 +29,8 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyCollection;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anySet;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -67,7 +73,10 @@ class DatabaseKnowledgeRetrieverTest {
                 dataSourceMapper,
                 schoolMapService,
                 mock(TownMapService.class),
-                null
+                null,
+                new RagProperties(),
+                mock(EmbeddingClient.class),
+                mock(ChunkVectorStore.class)
         );
 
         KnowledgeRetrieveRequest request = new KnowledgeRetrieveRequest();
@@ -82,7 +91,51 @@ class DatabaseKnowledgeRetrieverTest {
         assertEquals(1, result.getChunks().size());
         assertTrue(result.allCitationIds().contains("chunk:11"));
         assertTrue(result.allCitationIds().contains("source-rel:21"));
-        assertEquals("keyword", result.getChunks().get(0).getRetrievalMethod());
+        assertEquals("keyword-fallback", result.getChunks().get(0).getRetrievalMethod());
+    }
+
+    @Test
+    void usesAnnCandidatesAndHybridRerankingWhenRagIsEnabled() {
+        ContentChunkMapper contentChunkMapper = mock(ContentChunkMapper.class);
+        ContentChunk semanticMatch = new ContentChunk();
+        semanticMatch.setChunkId(31L);
+        semanticMatch.setEntityType(EntityType.RESOURCE);
+        semanticMatch.setEntityId(7L);
+        semanticMatch.setChunkTitle("志愿服务实践");
+        semanticMatch.setChunkText("组织学生参与社区关怀与社会责任实践。明");
+        when(contentChunkMapper.selectBatchIds(anyCollection())).thenReturn(List.of(semanticMatch));
+
+        RagProperties properties = new RagProperties();
+        properties.setEnabled(true);
+        EmbeddingClient embeddingClient = mock(EmbeddingClient.class);
+        when(embeddingClient.embed(any(String.class))).thenReturn(new float[]{0.1F, 0.2F});
+        ChunkVectorStore vectorStore = mock(ChunkVectorStore.class);
+        when(vectorStore.search(any(float[].class), anySet(), anyInt()))
+                .thenReturn(List.of(new VectorSearchCandidate(31L, 0.91D)));
+
+        DatabaseKnowledgeRetriever retriever = new DatabaseKnowledgeRetriever(
+                contentChunkMapper,
+                mock(EntitySourceRelMapper.class),
+                mock(DataSourceMapper.class),
+                mock(SchoolMapService.class),
+                mock(TownMapService.class),
+                null,
+                properties,
+                embeddingClient,
+                vectorStore
+        );
+        KnowledgeRetrieveRequest request = new KnowledgeRetrieveRequest();
+        request.setQuery("适合学生的社区责任活动");
+        request.setScopeType(KnowledgeScopeType.RESOURCE);
+        request.setScopeId(7L);
+        request.setTopK(3);
+
+        KnowledgeRetrieveResult result = retriever.retrieve(request);
+
+        assertEquals(KnowledgeRetrievalStatus.OK, result.getRetrievalStatus());
+        assertEquals(1, result.getChunks().size());
+        assertEquals("vector+hybrid-rerank", result.getChunks().get(0).getRetrievalMethod());
+        assertTrue(result.getChunks().get(0).getScore() > 0.7D);
     }
 
     @Test

@@ -61,3 +61,18 @@ app:
     discovery-max-candidates: ${DISCOVERY_MAX_CANDIDATES:50}
     discovery-llm-batch-size: ${DISCOVERY_LLM_BATCH_SIZE:20}
     discovery-min-confidence: ${DISCOVERY_MIN_CONFIDENCE:0.60}
+  rag:
+    enabled: ${RAG_ENABLED:false}
+    sync-on-startup: ${RAG_SYNC_ON_STARTUP:true}
+    embedding-base-url: ${RAG_EMBEDDING_BASE_URL:https://dashscope.aliyuncs.com/compatible-mode/v1}
+    embedding-api-key: ${RAG_EMBEDDING_API_KEY:}
+    embedding-model: ${RAG_EMBEDDING_MODEL:text-embedding-v3}
+    embedding-dimensions: ${RAG_EMBEDDING_DIMENSIONS:1024}
+    embedding-batch-size: ${RAG_EMBEDDING_BATCH_SIZE:10}
+    qdrant-base-url: ${QDRANT_BASE_URL:http://127.0.0.1:6333}
+    qdrant-api-key: ${QDRANT_API_KEY:}
+    qdrant-collection: ${QDRANT_COLLECTION:red_culture_content_chunks}
+    candidate-multiplier: ${RAG_CANDIDATE_MULTIPLIER:4}
+    minimum-vector-score: ${RAG_MINIMUM_VECTOR_SCORE:0.2}
+    connect-timeout-ms: ${RAG_CONNECT_TIMEOUT_MS:3000}
+    read-timeout-ms: ${RAG_READ_TIMEOUT_MS:15000}

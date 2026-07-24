@@ -70,6 +70,7 @@ if __name__ == "__main__":
 
 def settings_for(tmp_path: Path, **overrides) -> Settings:
     return Settings(
+        _env_file=None,
         database_path=tmp_path / "agent.sqlite3",
         internal_service_token=overrides.pop("internal_service_token", ""),
         llm_api_url="",

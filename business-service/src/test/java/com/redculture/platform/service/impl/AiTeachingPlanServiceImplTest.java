@@ -1,13 +1,12 @@
 package com.redculture.platform.service.impl;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpServer;
 import com.redculture.platform.config.AppMapProperties;
 import com.redculture.platform.entity.ContentChunk;
 import com.redculture.platform.enums.ActivityType;
 import com.redculture.platform.enums.EntityType;
-import com.redculture.platform.mapper.ContentChunkMapper;
-import com.redculture.platform.mapper.DataSourceMapper;
-import com.redculture.platform.mapper.EntitySourceRelMapper;
+import com.redculture.platform.service.KnowledgeRetriever;
 import com.redculture.platform.service.SchoolMapService;
 import com.redculture.platform.service.TeachingActivityPlanService;
 import com.redculture.platform.vo.GeneratedTeachingPlanResponse;
@@ -16,16 +15,16 @@ import com.redculture.platform.vo.SchoolMapDetailVO;
 import com.redculture.platform.vo.SchoolResourceItemVO;
 import com.redculture.platform.vo.SchoolSummaryVO;
 import com.redculture.platform.vo.request.TeachingPlanGenerateRequest;
+import com.redculture.platform.vo.ai.KnowledgeChunkVO;
+import com.redculture.platform.vo.ai.KnowledgeCitationCandidateVO;
+import com.redculture.platform.vo.ai.KnowledgeRetrieveResult;
+import com.redculture.platform.vo.ai.KnowledgeRetrievalStatus;
 import org.junit.jupiter.api.Test;
-import org.springframework.data.neo4j.core.Neo4jClient;
-import org.springframework.test.util.ReflectionTestUtils;
 
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.util.Collections;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -34,7 +33,6 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -112,68 +110,51 @@ class AiTeachingPlanServiceImplTest {
         assertEquals("敬老志愿服务", response.getTheme());
         assertFalse(response.getObjectives().isEmpty());
         assertFalse(response.getCitations().isEmpty());
+        assertEquals("ok", response.getRetrievalStatus());
+        assertEquals(List.of("vector+hybrid-rerank"), response.getRetrievalMethods());
         verify(teachingActivityPlanService, never()).createPlan(any());
-    }
-
-    @Test
-    void loadGraphFactsReturnsEmptyWhenNeo4jUnavailable() {
-        Neo4jClient neo4jClient = mock(Neo4jClient.class);
-        when(neo4jClient.query(anyString())).thenThrow(new RuntimeException("neo4j unavailable"));
-        AiTeachingPlanServiceImpl service = newService(mock(SchoolMapService.class), mock(TeachingActivityPlanService.class),
-                Collections.emptyList(), "", neo4jClient);
-
-        List<String> facts = ReflectionTestUtils.invokeMethod(service, "loadGraphFacts", 1L);
-
-        assertEquals(Collections.emptyList(), facts);
-    }
-
-    @Test
-    void loadGraphFactsMapsRowsWhenNeo4jAvailable() {
-        Neo4jClient neo4jClient = mock(Neo4jClient.class, RETURNS_DEEP_STUBS);
-        Map<String, Object> row = new HashMap<>();
-        row.put("resourceName", "Local Museum");
-        row.put("theme", "local history");
-        row.put("distanceMeters", 800);
-        row.put("tags", List.of("history", "practice"));
-        when(neo4jClient.query(anyString()).bind(any()).to(anyString()).fetch().all()).thenReturn(List.of(row));
-        AiTeachingPlanServiceImpl service = newService(mock(SchoolMapService.class), mock(TeachingActivityPlanService.class),
-                Collections.emptyList(), "", neo4jClient);
-
-        List<String> facts = ReflectionTestUtils.invokeMethod(service, "loadGraphFacts", 1L);
-
-        assertFalse(facts.isEmpty());
-        assertFalse(facts.get(0).isBlank());
     }
 
     private AiTeachingPlanServiceImpl newService(SchoolMapService schoolMapService,
                                                  TeachingActivityPlanService teachingActivityPlanService,
                                                  List<ContentChunk> chunks,
                                                  String llmBaseUrl) {
-        return newService(schoolMapService, teachingActivityPlanService, chunks, llmBaseUrl, mock(Neo4jClient.class));
-    }
-
-    private AiTeachingPlanServiceImpl newService(SchoolMapService schoolMapService,
-                                                 TeachingActivityPlanService teachingActivityPlanService,
-                                                 List<ContentChunk> chunks,
-                                                 String llmBaseUrl,
-                                                 Neo4jClient neo4jClient) {
-        ContentChunkMapper contentChunkMapper = mock(ContentChunkMapper.class);
-        EntitySourceRelMapper entitySourceRelMapper = mock(EntitySourceRelMapper.class);
-        DataSourceMapper dataSourceMapper = mock(DataSourceMapper.class);
+        KnowledgeRetriever knowledgeRetriever = mock(KnowledgeRetriever.class);
         AppMapProperties properties = new AppMapProperties();
         properties.setLlmServiceBaseUrl(llmBaseUrl);
 
-        when(contentChunkMapper.selectList(any())).thenReturn(chunks);
-        when(entitySourceRelMapper.selectList(any())).thenReturn(Collections.emptyList());
+        KnowledgeRetrieveResult retrieval = new KnowledgeRetrieveResult();
+        retrieval.setRetrievalStatus(KnowledgeRetrievalStatus.OK);
+        retrieval.setChunks(chunks.stream().map(chunk -> {
+            KnowledgeChunkVO value = new KnowledgeChunkVO();
+            value.setChunkId(chunk.getChunkId());
+            value.setCitationId("chunk:" + chunk.getChunkId());
+            value.setEntityType(chunk.getEntityType().getValue());
+            value.setEntityId(chunk.getEntityId());
+            value.setTitle(chunk.getChunkTitle());
+            value.setText(chunk.getChunkText());
+            value.setSourceId(chunk.getSourceId());
+            value.setRetrievalMethod("vector+hybrid-rerank");
+            return value;
+        }).toList());
+        retrieval.setCitationCandidates(chunks.stream().map(chunk -> {
+            KnowledgeCitationCandidateVO value = new KnowledgeCitationCandidateVO();
+            value.setCitationId("chunk:" + chunk.getChunkId());
+            value.setTitle(chunk.getChunkTitle());
+            value.setSourceType("content_chunk");
+            value.setRelatedEntityType(chunk.getEntityType().getValue());
+            value.setRelatedEntityId(chunk.getEntityId());
+            value.setExcerpt(chunk.getChunkText());
+            return value;
+        }).toList());
+        when(knowledgeRetriever.retrieve(any())).thenReturn(retrieval);
 
         return new AiTeachingPlanServiceImpl(
                 schoolMapService,
                 teachingActivityPlanService,
-                contentChunkMapper,
-                entitySourceRelMapper,
-                dataSourceMapper,
-                neo4jClient,
-                properties
+                knowledgeRetriever,
+                properties,
+                new ObjectMapper()
         );
     }
 

@@ -1,25 +1,10 @@
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
-
-def _text(name: str, default: str = "") -> str:
-    return os.getenv(name, default).strip()
-
-
-def _float(name: str, default: float) -> float:
-    try:
-        return float(os.getenv(name, str(default)))
-    except (TypeError, ValueError):
-        return default
-
-
-def _int(name: str, default: int) -> int:
-    try:
-        return int(os.getenv(name, str(default)))
-    except (TypeError, ValueError):
-        return default
+if TYPE_CHECKING:
+    from llm_service.settings import Settings
 
 
 @dataclass(frozen=True)
@@ -61,63 +46,105 @@ class AgentSettings:
     fallback_provider: str = ""
     fallback_base_url: str = ""
     fallback_api_key: str = ""
+    lightweight_provider: str = ""
+    lightweight_model: str = ""
+    lightweight_base_url: str = ""
+    lightweight_api_key: str = ""
 
     @classmethod
     def from_env(cls) -> "AgentSettings":
-        origins = tuple(
-            origin.strip()
-            for origin in _text(
-                "LLM_ALLOWED_ORIGINS",
-                "http://localhost:8080,http://127.0.0.1:8080",
-            ).split(",")
-            if origin.strip()
+        from llm_service.settings import load_settings
+
+        return cls.from_settings(load_settings())
+
+    @classmethod
+    def from_settings(cls, settings: "Settings") -> "AgentSettings":
+        legacy_api_url = settings.llm_api_url.strip()
+        legacy_base_url = settings.openai_base_url.strip()
+        legacy_key = settings.llm_api_key.strip()
+        primary_provider = (
+            settings.agent_primary_provider.strip()
+            or settings.primary_provider.strip()
+            or settings.llm_provider.strip()
+            or "openai-compatible"
         )
-        legacy_api_url = _text("LLM_API_URL")
-        legacy_base_url = _text("LLM_BASE_URL")
-        legacy_key = _text("LLM_API_KEY")
-        primary_provider = _text("AGENT_PRIMARY_PROVIDER", "openai-compatible")
-        primary_model = _text(
-            "AGENT_PRIMARY_MODEL",
-            _text("LLM_MODEL", "qwen-plus"),
+        primary_model = (
+            settings.agent_primary_model.strip()
+            or settings.primary_model.strip()
+            or settings.llm_model.strip()
         )
-        primary_base_url = _text(
-            "AGENT_PRIMARY_BASE_URL",
-            legacy_api_url or legacy_base_url,
+        primary_base_url = (
+            settings.agent_primary_base_url.strip()
+            or settings.primary_base_url.strip()
+            or legacy_api_url
+            or legacy_base_url
         )
         if not primary_base_url and primary_provider.lower() == "bailian":
             primary_base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-        fallback_provider = _text("AGENT_FALLBACK_PROVIDER")
-        fallback_model = _text("AGENT_FALLBACK_MODEL")
-        fallback_base_url = _text("AGENT_FALLBACK_BASE_URL")
-        fallback_api_key = _text("AGENT_FALLBACK_API_KEY")
+        fallback_provider = (
+            settings.agent_fallback_provider.strip()
+            or settings.fallback_provider.strip()
+            or settings.llm_fallback_provider.strip()
+        )
+        fallback_model = (
+            settings.agent_fallback_model.strip()
+            or settings.fallback_model.strip()
+            or settings.llm_fallback_model.strip()
+        )
+        fallback_base_url = (
+            settings.agent_fallback_base_url.strip()
+            or settings.fallback_base_url.strip()
+            or settings.llm_fallback_api_url.strip()
+        )
+        fallback_api_key = (
+            settings.agent_fallback_api_key.strip()
+            or settings.fallback_api_key.strip()
+            or settings.llm_fallback_api_key.strip()
+        )
         if fallback_provider.lower() == "ollama":
             fallback_base_url = fallback_base_url or "http://127.0.0.1:11434/v1"
             fallback_api_key = fallback_api_key or "ollama"
+        lightweight_provider = settings.agent_lightweight_provider.strip() or "ollama"
+        lightweight_model = (
+            settings.agent_lightweight_model.strip()
+            or settings.llm_lightweight_model.strip()
+        )
+        lightweight_base_url = (
+            settings.agent_lightweight_base_url.strip()
+            or settings.llm_lightweight_api_url.strip()
+        )
+        lightweight_api_key = (
+            settings.agent_lightweight_api_key.strip()
+            or settings.llm_lightweight_api_key.strip()
+        )
+        if lightweight_provider.lower() == "ollama" and lightweight_model:
+            lightweight_base_url = lightweight_base_url or "http://127.0.0.1:11434/v1"
+            lightweight_api_key = lightweight_api_key or "ollama"
         return cls(
-            host=_text("LLM_HOST", "127.0.0.1"),
-            port=_int("LLM_PORT", 5050),
-            internal_business_base_url=_text(
-                "INTERNAL_BUSINESS_BASE_URL",
-                "http://127.0.0.1:8080",
-            ).rstrip("/"),
-            internal_service_token=_text("AGENT_INTERNAL_SERVICE_TOKEN")
-            or "red-culture-agent-development-token-change-me",
+            host=settings.host,
+            port=settings.port,
+            internal_business_base_url=settings.internal_business_base_url,
+            internal_service_token=settings.internal_service_token,
             llm_api_url=legacy_api_url,
             llm_base_url=legacy_base_url,
             llm_api_key=legacy_key,
             primary_model=primary_model,
             fallback_model=fallback_model,
-            llm_timeout_seconds=_float("LLM_TIMEOUT_SECONDS", 20.0),
-            max_iterations=max(1, min(_int("AGENT_MAX_ITERATIONS", 4), 8)),
-            max_history_messages=max(4, min(_int("AGENT_MAX_HISTORY_MESSAGES", 20), 40)),
-            prompt_version=_text("AGENT_PROMPT_VERSION", "v1"),
-            allowed_origins=origins,
+            llm_timeout_seconds=settings.llm_timeout_seconds,
+            max_iterations=max(1, min(settings.agent_max_iterations, 8)),
+            max_history_messages=max(4, min(settings.agent_max_history_messages, 40)),
+            prompt_version=settings.agent_prompt_version,
+            allowed_origins=tuple(settings.allowed_origins),
             primary_provider=primary_provider,
             primary_base_url=primary_base_url,
-            primary_api_key=_text("AGENT_PRIMARY_API_KEY", legacy_key),
+            primary_api_key=settings.agent_primary_api_key.strip() or legacy_key,
             fallback_provider=fallback_provider,
             fallback_base_url=fallback_base_url,
             fallback_api_key=fallback_api_key,
+            lightweight_provider=lightweight_provider,
+            lightweight_model=lightweight_model,
+            lightweight_base_url=lightweight_base_url,
+            lightweight_api_key=lightweight_api_key,
         )
 
     def ready(self) -> bool:
@@ -142,6 +169,16 @@ class AgentSettings:
                     fallback_level=1,
                 )
             )
+        if self.lightweight_model and self.lightweight_model not in {item.model for item in models}:
+            models.append(
+                AgentModelConfig(
+                    provider=self.lightweight_provider or "ollama",
+                    model=self.lightweight_model,
+                    base_url=self.lightweight_base_url,
+                    api_key=self.lightweight_api_key,
+                    fallback_level=2,
+                )
+            )
         return tuple(models)
 
     def model_config_for(self, model_name: str) -> AgentModelConfig:
@@ -161,5 +198,7 @@ class AgentSettings:
         return self.model_chain()[0].configured()
 
     def fallback_model_configured(self) -> bool:
-        chain = self.model_chain()
-        return len(chain) > 1 and chain[1].configured()
+        return any(item.fallback_level == 1 and item.configured() for item in self.model_chain())
+
+    def lightweight_model_configured(self) -> bool:
+        return any(item.fallback_level == 2 and item.configured() for item in self.model_chain())

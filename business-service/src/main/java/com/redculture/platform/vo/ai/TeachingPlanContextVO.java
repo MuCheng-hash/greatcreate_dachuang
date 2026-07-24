@@ -15,6 +15,10 @@ public class TeachingPlanContextVO {
 
     private TeachingPlanGenerateRequest request;
 
+    private AgentActorVO actor;
+
+    private String sessionId;
+
     private SchoolSummaryVO school;
 
     private List<ResourceContextVO> resources = new ArrayList<>();
@@ -26,6 +30,8 @@ public class TeachingPlanContextVO {
     private List<GeneratedTeachingPlanCitationVO> citationCandidates = new ArrayList<>();
 
     private List<String> graphFacts = new ArrayList<>();
+
+    private String retrievalStatus;
 
     @Data
     public static class ResourceContextVO {
@@ -59,5 +65,9 @@ public class TeachingPlanContextVO {
         private String text;
 
         private Long sourceId;
+
+        private Double score;
+
+        private String retrievalMethod;
     }
 }

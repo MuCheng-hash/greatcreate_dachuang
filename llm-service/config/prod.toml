@@ -1,0 +1,4 @@
+app_env = "prod"
+host = "0.0.0.0"
+business_health_required = true
+require_llm_model = true

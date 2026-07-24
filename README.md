@@ -201,6 +201,31 @@ Invoke-RestMethod -Method Post `
 
 返回包含 `answer` 的 JSON 即表示 LLM 服务工作正常。
 
+## 启用真实 RAG 检索
+
+`content_chunk` 的向量索引存放在 Qdrant。检索流程为：内容分块、embedding、HNSW ANN 召回、融合重排、上下文注入。先启动向量库：
+
+```powershell
+docker compose -f docker-compose.rag.yml up -d
+```
+
+再为业务服务设置 embedding 参数。默认示例使用百炼的 OpenAI-compatible 接口：
+
+```powershell
+$env:RAG_ENABLED = "true"
+$env:RAG_EMBEDDING_API_KEY = "your-api-key"
+$env:RAG_EMBEDDING_MODEL = "text-embedding-v3"
+$env:RAG_EMBEDDING_DIMENSIONS = "1024"
+```
+
+业务服务启动时会同步 `content_chunk` 到 Qdrant，并维护 `embedding_status`。内容更新后也可以手动全量重建：
+
+```powershell
+Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8080/api/admin/rag/reindex"
+```
+
+未启用 RAG 或 embedding/Qdrant 暂时不可用时，系统会明确返回 `degraded` 并使用 `keyword-fallback`，不会把关键词结果标记成向量召回。
+
 ## 常见问题
 
 ### 业务服务提示数据库连接失败
@@ -237,7 +262,7 @@ Invoke-RestMethod -Method Post `
 
 ## 服务边界与详细文档
 
-业务服务负责稳定业务数据、地图、认证和后台流程；LLM 服务负责把检索结果组织成自然语言答案或教学方案。后续接入 RAG、Agent 或向量库时，优先放在 `llm-service/`，不要塞回业务服务。
+业务服务负责稳定业务数据、受控 RAG 检索、地图、认证和后台流程；LLM 服务负责把已召回的可信证据组织成自然语言答案或教学方案。教学方案和 Agent 都通过统一的 `KnowledgeRetriever` 边界消费检索结果。
 
 - [业务服务说明](business-service/README.md)
 - [LLM 服务说明](llm-service/README.md)
