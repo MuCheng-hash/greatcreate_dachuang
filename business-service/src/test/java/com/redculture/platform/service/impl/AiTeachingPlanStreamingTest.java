@@ -26,6 +26,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.hamcrest.Matchers.containsString;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
@@ -39,22 +40,24 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 class AiTeachingPlanStreamingTest {
 
     @Test
-    void proxiesTokensAndReturnsValidatedFinalResult() throws Exception {
+    void proxiesSafePlanPatchesAndReturnsValidatedFinalResult() throws Exception {
         AtomicReference<String> requestBody = new AtomicReference<>();
         HttpServer llmServer = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         llmServer.createContext("/agent/messages/stream", exchange -> {
             requestBody.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
-            String events = "event: run.started\ndata: {\"threadId\":\"thread-1\",\"taskType\":\"TEACHING_PLAN\"}\n\n"
+            String events = "event: run.started\ndata: {\"threadId\":\"thread-1\",\"taskType\":\"TEACHING_PLAN\",\"model\":\"qwen-plus\"}\n\n"
                     + "event: model.started\ndata: {\"model\":\"qwen-plus\"}\n\n"
-                    + "event: token\ndata: {\"delta\":\"主模型残片\"}\n\n"
+                    + "event: token\ndata: {\"delta\":\"{\\\"theme\\\":\\\"家乡文化\"}\"}\n\n"
                     + "event: model.failed\ndata: {\"errorType\":\"timeout\",\"nextModel\":\"qwen3:8b\"}\n\n"
-                    + "event: token\ndata: {\"delta\":\"第一段\"}\n\n"
+                    + "event: plan.patch\ndata: {\"patch\":{\"theme\":\"家乡文化\",\"grade\":\"四年级\","
+                    + "\"activityFlow\":[{\"time\":\"0-20分钟\",\"content\":\"校内集合并完成导入\"}],"
+                    + "\"llmModel\":\"qwen-plus\",\"provider\":\"openai-compatible\"}}\n\n"
                     + "event: final\ndata: {\"threadId\":\"thread-1\",\"response\":{"
                     + "\"taskType\":\"TEACHING_PLAN\",\"answer\":\"done\",\"status\":\"completed\","
-                    + "\"generationStatus\":\"completed\",\"teachingPlan\":{"
-                    + "\"generationStatus\":\"completed\",\"message\":\"done\","
+                    + "\"generationStatus\":\"success\",\"teachingPlan\":{"
+                    + "\"generationStatus\":\"success\",\"message\":\"done\","
                     + "\"theme\":\"家乡文化\",\"grade\":\"四年级\",\"citations\":[],"
-                    + "\"activityFlow\":[\"课堂导入\"]}}}\n\n"
+                    + "\"activityFlow\":[{\"time\":\"0-20分钟\",\"content\":\"校内集合并完成导入\"}]}}}\n\n"
                     + "event: done\ndata: {\"threadId\":\"thread-1\"}\n\n";
             byte[] response = events.getBytes(StandardCharsets.UTF_8);
             exchange.getResponseHeaders().set("Content-Type", "text/event-stream");
@@ -107,14 +110,21 @@ class AiTeachingPlanStreamingTest {
                     .andReturn();
             pending.getAsyncResult(5_000);
 
-            mvc.perform(asyncDispatch(pending))
+            MvcResult streamingResult = mvc.perform(asyncDispatch(pending))
                     .andExpect(status().isOk())
-                    .andExpect(content().string(containsString("event:token")))
-                    .andExpect(content().string(containsString("event:model.failed")))
-                    .andExpect(content().string(containsString("\\u7B2C\\u4E00\\u6BB5")))
+                    .andExpect(content().string(containsString("event:plan.patch")))
+                    .andExpect(content().string(containsString("event:stage")))
+                    .andExpect(content().string(containsString("0-20")))
                     .andExpect(content().string(containsString("event:final")))
                     .andExpect(content().string(containsString("\"teachingPlan\"")))
-                    .andExpect(content().string(containsString("\"retrievalStatus\":\"ok\"")));
+                    .andExpect(content().string(containsString("\"generationStatus\":\"completed\"")))
+                    .andExpect(content().string(containsString("\"retrievalStatus\":\"ok\"")))
+                    .andReturn();
+            String responseBody = streamingResult.getResponse().getContentAsString();
+            assertFalse(responseBody.contains("event:token"));
+            assertFalse(responseBody.contains("qwen-plus"));
+            assertFalse(responseBody.contains("qwen3:8b"));
+            assertFalse(responseBody.contains("LLM 服务不可用"));
             assertTrue(requestBody.get().contains("\"ownerId\":\"account:17\""));
             assertTrue(requestBody.get().contains("\"taskType\":\"TEACHING_PLAN\""));
         } finally {

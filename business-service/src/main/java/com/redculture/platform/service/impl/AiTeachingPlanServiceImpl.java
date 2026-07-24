@@ -41,6 +41,7 @@ import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -50,6 +51,20 @@ public class AiTeachingPlanServiceImpl implements AiTeachingPlanService {
     private static final Logger log = LoggerFactory.getLogger(AiTeachingPlanServiceImpl.class);
     private static final int MAX_CONTENT_CHUNKS = 12;
     private static final int MAX_CITATIONS = 8;
+    private static final Set<String> TEACHING_PLAN_PATCH_FIELDS = Set.of(
+            "generationStatus", "message", "theme", "grade", "activityType",
+            "durationMinutes", "practiceRequired", "objectives", "resourceBasis",
+            "activityFlow", "preparation", "fieldTasks", "safetyNotes", "reflection",
+            "evaluation", "citations", "relatedResources", "followUpSuggestions"
+    );
+    private static final Set<String> TEACHING_PLAN_PATCH_LIST_FIELDS = Set.of(
+            "objectives", "resourceBasis", "activityFlow", "preparation", "fieldTasks",
+            "safetyNotes", "reflection", "evaluation", "relatedResources",
+            "followUpSuggestions"
+    );
+    private static final Set<String> TEACHING_PLAN_PATCH_TEXT_FIELDS = Set.of(
+            "message", "theme", "grade", "activityType"
+    );
 
     private final SchoolMapService schoolMapService;
     private final TeachingActivityPlanService teachingActivityPlanService;
@@ -315,29 +330,96 @@ public class AiTeachingPlanServiceImpl implements AiTeachingPlanService {
                 return false;
             }
             GeneratedTeachingPlanResponse response = objectMapper.convertValue(
-                    rawPlan, GeneratedTeachingPlanResponse.class
+                    normalizeRawTeachingPlan(rawPlan), GeneratedTeachingPlanResponse.class
             );
             response.setThreadId(textValue(payload.get("threadId"), textValue(responseMap.get("threadId"), "")));
             sendFinalEvent(emitter, finalizeResponse(response, context));
             return true;
         }
-        if ("run.started".equals(eventName) || "model.started".equals(eventName)
-                || "model.completed".equals(eventName) || "model.failed".equals(eventName)
-                || "tool.started".equals(eventName) || "tool.completed".equals(eventName)
-                || "token".equals(eventName) || "error".equals(eventName)) {
-            sendEvent(emitter, eventName, payload);
+        if ("run.started".equals(eventName) || "model.started".equals(eventName)) {
+            sendEvent(emitter, "stage", Map.of("stage", "generation", "message", "正在生成教学方案"));
+        } else if ("model.failed".equals(eventName)) {
+            sendEvent(emitter, "stage", Map.of("stage", "generation", "message", "正在切换备用生成方式"));
+        } else if ("plan.patch".equals(eventName)) {
+            Map<String, Object> patch = safeTeachingPlanPatch(payload.get("patch"));
+            if (!patch.isEmpty()) {
+                sendEvent(emitter, "plan.patch", Map.of("patch", patch));
+            }
+        } else if ("token".equals(eventName)) {
+            // 兼容旧版事件但不再透传原始分片，教学方案只使用结构化 patch。
+        } else if ("error".equals(eventName)) {
+            sendEvent(emitter, "stage", Map.of("stage", "generation", "message", "正在整理基础教学方案"));
         }
         return false;
     }
 
+    private Map<String, Object> safeTeachingPlanPatch(Object rawPatch) {
+        Map<String, Object> safePatch = new LinkedHashMap<>();
+        if (!(rawPatch instanceof Map<?, ?> patchMap)) {
+            return safePatch;
+        }
+        for (Map.Entry<?, ?> entry : patchMap.entrySet()) {
+            String field = String.valueOf(entry.getKey());
+            if (!TEACHING_PLAN_PATCH_FIELDS.contains(field)) {
+                continue;
+            }
+            Object value = entry.getValue();
+            if ("generationStatus".equals(field)) {
+                String status = value instanceof String ? textValue(value, "") : "";
+                if (StringUtils.hasText(status)) {
+                    safePatch.put(field, canonicalGenerationStatus(status, false));
+                }
+            } else if (TEACHING_PLAN_PATCH_TEXT_FIELDS.contains(field)) {
+                String text = value instanceof String ? textValue(value, "") : "";
+                if (StringUtils.hasText(text)) {
+                    safePatch.put(field, "message".equals(field)
+                            ? safeTeachingPlanMessage(text, false) : text);
+                }
+            } else if ("durationMinutes".equals(field) && value instanceof Number) {
+                safePatch.put(field, value);
+            } else if ("practiceRequired".equals(field) && value instanceof Boolean) {
+                safePatch.put(field, value);
+            } else if ("citations".equals(field) && value instanceof List<?> values) {
+                safePatch.put(field, safeCitationPatchList(values));
+            } else if (TEACHING_PLAN_PATCH_LIST_FIELDS.contains(field) && value instanceof List<?> values) {
+                safePatch.put(field, values.stream()
+                        .map(this::readableActivityFlowItem)
+                        .filter(StringUtils::hasText)
+                        .collect(Collectors.toList()));
+            }
+        }
+        return safePatch;
+    }
+
+    private List<Map<String, Object>> safeCitationPatchList(List<?> values) {
+        List<Map<String, Object>> citations = new ArrayList<>();
+        for (Object value : values) {
+            if (!(value instanceof Map<?, ?> rawCitation)) {
+                continue;
+            }
+            Map<String, Object> citation = new LinkedHashMap<>();
+            for (String field : List.of("citationId", "title", "excerpt", "sourceType", "score")) {
+                Object fieldValue = rawCitation.get(field);
+                if (fieldValue != null && StringUtils.hasText(String.valueOf(fieldValue))) {
+                    citation.put(field, fieldValue);
+                }
+            }
+            if (!citation.isEmpty()) {
+                citations.add(citation);
+            }
+        }
+        return citations;
+    }
+
     private void sendFinalEvent(SseEmitter emitter, GeneratedTeachingPlanResponse response) throws Exception {
+        String generationStatus = canonicalGenerationStatus(response.getGenerationStatus(), false);
+        response.setGenerationStatus(generationStatus);
         Map<String, Object> agentResponse = new LinkedHashMap<>();
         agentResponse.put("threadId", response.getThreadId());
         agentResponse.put("taskType", "TEACHING_PLAN");
         agentResponse.put("answer", response.getMessage());
-        agentResponse.put("status", "completed".equalsIgnoreCase(response.getGenerationStatus())
-                ? "completed" : "degraded");
-        agentResponse.put("generationStatus", response.getGenerationStatus());
+        agentResponse.put("status", "completed".equals(generationStatus) ? "completed" : "degraded");
+        agentResponse.put("generationStatus", generationStatus);
         agentResponse.put("retrievalStatus", response.getRetrievalStatus());
         agentResponse.put("teachingPlan", response);
         agentResponse.put("citations", response.getCitations());
@@ -403,6 +485,69 @@ public class AiTeachingPlanServiceImpl implements AiTeachingPlanService {
                 ? String.valueOf(value) : fallback;
     }
 
+    private String canonicalGenerationStatus(String value, boolean fallback) {
+        if ("completed".equalsIgnoreCase(value)
+                || "success".equalsIgnoreCase(value)
+                || "succeeded".equalsIgnoreCase(value)
+                || "ok".equalsIgnoreCase(value)) {
+            return "completed";
+        }
+        if ("degraded".equalsIgnoreCase(value)
+                || "fallback".equalsIgnoreCase(value)
+                || "unavailable".equalsIgnoreCase(value)
+                || "failed".equalsIgnoreCase(value)) {
+            return "degraded";
+        }
+        return fallback ? "degraded" : "completed";
+    }
+
+    private String safeTeachingPlanMessage(String value, boolean fallback) {
+        if (!StringUtils.hasText(value) || value.contains("LLM") || value.contains("服务不可用")) {
+            return fallback ? "已生成基础教学方案，部分内容可能需要人工补充" : "已完成结构化生成。";
+        }
+        return value;
+    }
+
+    private Map<String, Object> normalizeRawTeachingPlan(Object rawPlan) {
+        Map<String, Object> normalized = new LinkedHashMap<>();
+        if (!(rawPlan instanceof Map<?, ?> rawMap)) {
+            return normalized;
+        }
+        rawMap.forEach((key, value) -> normalized.put(String.valueOf(key), value));
+        Object rawActivityFlow = normalized.get("activityFlow");
+        if (rawActivityFlow instanceof List<?> activityItems) {
+            normalized.put("activityFlow", activityItems.stream()
+                    .map(this::readableActivityFlowItem)
+                    .filter(StringUtils::hasText)
+                    .collect(Collectors.toList()));
+        }
+        return normalized;
+    }
+
+    private String readableActivityFlowItem(Object item) {
+        if (!(item instanceof Map<?, ?> values)) {
+            return textValue(item, "");
+        }
+        String time = textValue(values.get("time"), "");
+        String content = textValue(values.get("content"), "");
+        if (!StringUtils.hasText(content)) {
+            content = textValue(values.get("text"), "");
+        }
+        if (StringUtils.hasText(time) && StringUtils.hasText(content)) {
+            return time + "：" + content;
+        }
+        if (StringUtils.hasText(content)) {
+            return content;
+        }
+        return values.entrySet().stream()
+                .map(entry -> {
+                    String value = textValue(entry.getValue(), "");
+                    return StringUtils.hasText(value) ? entry.getKey() + "：" + value : "";
+                })
+                .filter(StringUtils::hasText)
+                .collect(Collectors.joining("；"));
+    }
+
     private GeneratedTeachingPlanResponse normalizeResponse(GeneratedTeachingPlanResponse response,
                                                             TeachingPlanContextVO context,
                                                             boolean fallback) {
@@ -410,12 +555,8 @@ public class AiTeachingPlanServiceImpl implements AiTeachingPlanService {
             response = new GeneratedTeachingPlanResponse();
         }
         TeachingPlanGenerateRequest request = context.getRequest();
-        response.setGenerationStatus(StringUtils.hasText(response.getGenerationStatus())
-                ? response.getGenerationStatus()
-                : (fallback ? "degraded" : "completed"));
-        response.setMessage(StringUtils.hasText(response.getMessage())
-                ? response.getMessage()
-                : (fallback ? "已使用本地结构化兜底生成。" : "已完成结构化生成。"));
+        response.setGenerationStatus(canonicalGenerationStatus(response.getGenerationStatus(), fallback));
+        response.setMessage(safeTeachingPlanMessage(response.getMessage(), fallback));
         response.setTheme(cleanOrDefault(response.getTheme(), request.getTheme()));
         response.setGrade(cleanOrDefault(response.getGrade(), request.getGrade()));
         response.setActivityType(cleanOrDefault(response.getActivityType(), enumValue(request.getActivityType())));
@@ -452,7 +593,7 @@ public class AiTeachingPlanServiceImpl implements AiTeachingPlanService {
 
         GeneratedTeachingPlanResponse response = new GeneratedTeachingPlanResponse();
         response.setGenerationStatus("degraded");
-        response.setMessage("LLM 服务不可用，已基于学校周边资源生成本地结构化方案。");
+        response.setMessage("已生成基础教学方案，部分内容可能需要人工补充");
         response.setTheme(cleanOrDefault(request.getTheme(), "本土思政实践活动"));
         response.setGrade(cleanOrDefault(request.getGrade(), "小学高年级"));
         response.setActivityType(enumValue(request.getActivityType()));
