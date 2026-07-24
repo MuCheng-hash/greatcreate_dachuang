@@ -2,81 +2,35 @@ from __future__ import annotations
 
 import asyncio
 import json
-import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
-import app
-import pytest
 from fastapi.testclient import TestClient
 from langchain_core.messages import AIMessage
+import pytest
 
+from llm_service import legacy_api
 from llm_service.api import create_app
 from llm_service.container import build_container
 from llm_service import legacy_api
 from llm_service.repository import ConversationRepository
+from llm_service.prompt_manager import PromptManager
+from llm_service.runtime import AgentRuntime
 from llm_service.schemas import AgentMessageRequest, TrustedContext
 from llm_service.settings import Settings
+from llm_service.structured_tasks import (
+    IncrementalTeachingPlanParser,
+    normalize_teaching_plan,
+    teaching_plan_stream_text,
+)
 from llm_service.tools import ToolRuntimeContext, bind_tool_runtime, reset_tool_runtime, search_approved_resources
-
-
-class AgentAnswerEndpointTest(unittest.TestCase):
-
-    def setUp(self):
-        self.client = TestClient(app.app)
-        self.payload = {
-            "question": "里庄小学附近有哪些红色资源？",
-            "intent": "NEARBY_RESOURCE",
-            "scope": {"scopeType": "SCHOOL", "scopeId": 1, "name": "里庄小学"},
-            "businessContext": {
-                "school": {"schoolName": "里庄小学"},
-                "resources": [
-                    {"resource": {"resourceName": "常安镇敬老院"}}
-                ],
-            },
-            "retrievalResult": {
-                "chunks": [{"citationId": "chunk:1", "text": "资源证据"}],
-                "graphFacts": [{"citationId": "graph:1", "text": "图谱证据"}],
-                "citationCandidates": [{"citationId": "chunk:1"}],
-            },
-        }
-
-    @patch.object(legacy_api, "call_openai_compatible", return_value=None)
-    @patch("llm_service.model_gateway.ModelGateway.generate_json", new_callable=AsyncMock, return_value=None)
-    def test_returns_degraded_fallback_with_valid_evidence_ids(self, _call):
-        response = self.client.post("/llm/agent/answer", json=self.payload)
-
-        self.assertEqual(response.status_code, 200)
-        data = response.json()
-        self.assertEqual(data["generationStatus"], "degraded")
-        self.assertTrue(data["answer"])
-        self.assertEqual(data["citationIds"], ["chunk:1", "graph:1"])
-
-    @patch.object(legacy_api, "call_openai_compatible", return_value={
-    @patch("llm_service.model_gateway.ModelGateway.generate_json", new_callable=AsyncMock, return_value={
-        "answer": "模型回答",
-        "citationIds": ["chunk:1", "forged:citation"],
-        "followUpQuestions": ["它适合哪个年级？"],
-    })
-    def test_filters_model_citations_to_known_evidence(self, _call):
-        response = self.client.post("/llm/agent/answer", json=self.payload)
-
-        self.assertEqual(response.status_code, 200)
-        data = response.json()
-        self.assertEqual(data["generationStatus"], "completed")
-        self.assertEqual(data["citationIds"], ["chunk:1"])
-        self.assertNotIn("forged:citation", data["citationIds"])
-
-
-if __name__ == "__main__":
-    unittest.main()
 
 
 def settings_for(tmp_path: Path, **overrides) -> Settings:
     return Settings(
         _env_file=None,
         database_path=tmp_path / "agent.sqlite3",
-        internal_service_token=overrides.pop("internal_service_token", ""),
+        internal_service_token=overrides.pop("internal_service_token", "test-agent-secret"),
         llm_api_url="",
         llm_api_key="",
         fallback_provider=overrides.pop("fallback_provider", ""),
@@ -86,6 +40,13 @@ def settings_for(tmp_path: Path, **overrides) -> Settings:
         agent_context_token_budget=overrides.pop("agent_context_token_budget", 1000),
         agent_recent_message_count=overrides.pop("agent_recent_message_count", 6),
         **overrides,
+    )
+
+
+def build_client(settings: Settings) -> TestClient:
+    return TestClient(
+        create_app(settings),
+        headers={"X-Agent-Service-Token": settings.internal_service_token},
     )
 
 
@@ -109,22 +70,56 @@ def message_payload(**overrides):
     return payload
 
 
-def test_health_and_legacy_routes(tmp_path: Path):
-    app = create_app(settings_for(tmp_path))
-    with TestClient(app) as client:
+def test_unified_tasks_and_legacy_routes_coexist(tmp_path: Path):
+    settings = settings_for(tmp_path)
+    with build_client(settings) as client:
         health = client.get("/health")
         assert health.status_code == 200
         assert health.json()["agentRuntime"] == "langchain-langgraph"
 
-        plan = client.post("/llm/teaching-plan/generate", json={"request": {"theme": "家乡红色文化"}})
+        plan = client.post(
+            "/agent/messages",
+            json=message_payload(
+                taskType="TEACHING_PLAN",
+                taskPayload={
+                    "theme": "家乡红色文化",
+                    "grade": "四年级",
+                    "activityType": "CLASSROOM",
+                    "durationMinutes": 40,
+                    "practiceRequired": False,
+                },
+                message="请生成结构化教学方案。",
+            ),
+        )
         assert plan.status_code == 200
-        assert plan.json()["generationStatus"] == "degraded"
+        assert plan.json()["taskType"] == "TEACHING_PLAN"
+        assert plan.json()["teachingPlan"]["generationStatus"] == "degraded"
 
         classification = client.post(
-            "/llm/resource-discovery/classify",
-            json={"candidates": [{"providerPlaceId": "A1", "name": "候选地点"}]},
+            "/agent/messages",
+            json=message_payload(
+                taskType="RESOURCE_DISCOVERY",
+                taskPayload={"candidates": [{"providerPlaceId": "A1", "name": "候选地点"}]},
+                message="请分析候选地点。",
+            ),
         )
-        assert classification.json()["analysisStatus"] == "unavailable"
+        assert classification.status_code == 200
+        assert classification.json()["resourceDiscovery"]["analysisStatus"] == "unavailable"
+
+        legacy_paths = (
+            "/llm/agent/answer",
+            "/llm/agent/run",
+            "/llm/agent/stream",
+            "/llm/town/explain",
+            "/llm/town/ask",
+            "/llm/school/explain",
+            "/llm/school/ask",
+            "/llm/teaching-plan/generate",
+            "/llm/teaching-plan/generate/stream",
+            "/llm/resource-discovery/classify",
+        )
+        registered_paths = client.get("/openapi.json").json()["paths"]
+        assert all(path in registered_paths for path in legacy_paths)
 
 
 def test_profile_configuration_is_overridden_by_environment(tmp_path: Path, monkeypatch):
@@ -171,7 +166,7 @@ def test_container_can_be_explicitly_injected_and_required_health_failure_is_503
 
 
 def test_validation_rejects_missing_owner_and_unknown_scope(tmp_path: Path):
-    with TestClient(create_app(settings_for(tmp_path))) as client:
+    with build_client(settings_for(tmp_path)) as client:
         missing = client.post("/agent/messages", json={"message": "你好"})
         assert missing.status_code == 422
         invalid = client.post("/agent/messages", json=message_payload(scopeType="OTHER"))
@@ -179,7 +174,7 @@ def test_validation_rejects_missing_owner_and_unknown_scope(tmp_path: Path):
 
 
 def test_new_thread_and_multiturn_persistence(tmp_path: Path):
-    with TestClient(create_app(settings_for(tmp_path))) as client:
+    with build_client(settings_for(tmp_path)) as client:
         first = client.post("/agent/messages", json=message_payload())
         assert first.status_code == 200
         data = first.json()
@@ -201,7 +196,7 @@ def test_new_thread_and_multiturn_persistence(tmp_path: Path):
 
 
 def test_stateful_stream_emits_events_and_persists_final_response(tmp_path: Path):
-    with TestClient(create_app(settings_for(tmp_path))) as client:
+    with build_client(settings_for(tmp_path)) as client:
         response = client.post("/agent/messages/stream", json=message_payload())
 
         assert response.status_code == 200
@@ -225,6 +220,176 @@ def test_stateful_stream_emits_events_and_persists_final_response(tmp_path: Path
         ).json()
         assert [item["role"] for item in stored["messages"]] == ["user", "assistant"]
         assert stored["messages"][-1]["content"] == final_data["response"]["answer"]
+
+
+def test_teaching_plan_and_resource_discovery_streams_use_unified_protocol(tmp_path: Path):
+    with build_client(settings_for(tmp_path)) as client:
+        plan_response = client.post(
+            "/agent/messages/stream",
+            json=message_payload(
+                taskType="TEACHING_PLAN",
+                taskPayload={"theme": "家乡文化", "grade": "四年级"},
+                message="请生成教学方案。",
+            ),
+        )
+        assert plan_response.status_code == 200
+        assert "event: run.started" in plan_response.text
+        assert "event: token" not in plan_response.text
+        assert "event: final" in plan_response.text
+        plan_final = next(
+            block for block in plan_response.text.split("\n\n") if block.startswith("event: final")
+        )
+        plan_data = json.loads(plan_final.split("data: ", 1)[1])
+        assert plan_data["response"]["taskType"] == "TEACHING_PLAN"
+        assert plan_data["response"]["teachingPlan"]["theme"] == "家乡文化"
+
+        discovery_response = client.post(
+            "/agent/messages/stream",
+            json=message_payload(
+                taskType="RESOURCE_DISCOVERY",
+                taskPayload={"candidates": [{"providerPlaceId": "A1", "name": "候选地点"}]},
+                message="请分析候选地点。",
+            ),
+        )
+        assert discovery_response.status_code == 200
+        assert "event: final" in discovery_response.text
+        discovery_final = next(
+            block for block in discovery_response.text.split("\n\n") if block.startswith("event: final")
+        )
+        discovery_data = json.loads(discovery_final.split("data: ", 1)[1])
+        assert discovery_data["response"]["taskType"] == "RESOURCE_DISCOVERY"
+        assert discovery_data["response"]["resourceDiscovery"]["results"] == []
+
+
+def test_incremental_teaching_plan_patches_arrive_before_complete_without_raw_json():
+    parser = IncrementalTeachingPlanParser()
+    patches = []
+    chunks = [
+        '{"generationStatus":"succ',
+        'ess","theme":"家乡文化","activityFlow":[{"time":"0-20分钟","content":"校内集合',
+        '并完成导入"}],"objectives":["认识身边资源"]}',
+    ]
+    for chunk in chunks:
+        patches.extend(parser.feed(chunk))
+
+    assert patches[0] == {"generationStatus": "completed"}
+    assert patches[1] == {"theme": "家乡文化"}
+    assert patches[2]["activityFlow"] == ["0-20分钟：校内集合并完成导入"]
+    assert patches[3] == {"objectives": ["认识身边资源"]}
+    assert '"time"' not in str(patches)
+    assert "{" not in patches[2]["activityFlow"][0]
+
+
+def test_runtime_emits_plan_patch_before_final_without_token_fragments(tmp_path: Path):
+    class StreamingModel:
+        async def stream_json_events(self, _prompt, _trace_context, _validator):
+            yield "attempt", {"provider": "test", "model": "qwen-test"}
+            yield "token", {"delta": '{"generationStatus":"success","theme":"家乡'}
+            yield "token", {
+                "delta": '文化","activityFlow":[{"time":"0-20分钟","content":"校内集合"}],'
+            }
+            yield "token", {"delta": '"objectives":["认识真实资源"]}'}
+            yield "complete", {
+                "result": {
+                    "generationStatus": "success",
+                    "theme": "家乡文化",
+                    "objectives": ["认识真实资源"],
+                    "activityFlow": [{"time": "0-20分钟", "content": "校内集合"}],
+                },
+                "provider": "test",
+                "model": "qwen-test",
+            }
+
+    settings = settings_for(tmp_path, llm_model="qwen-test")
+    repository = ConversationRepository(settings.database_path)
+    runtime = AgentRuntime(
+        settings,
+        repository,
+        model=StreamingModel(),
+        prompts=PromptManager(settings.database_path, settings.prompt_root),
+    )
+    runtime._agent = object()
+    request = AgentMessageRequest.model_validate(message_payload(
+        taskType="TEACHING_PLAN",
+        taskPayload={"theme": "家乡文化", "grade": "四年级"},
+        message="请生成教学方案。",
+    ))
+
+    async def collect_events():
+        return [event async for event in runtime.stream_events(request)]
+
+    events = asyncio.run(collect_events())
+    names = [event.splitlines()[0].split(": ", 1)[1] for event in events]
+    patch_index = names.index("plan.patch")
+    final_index = names.index("final")
+    assert patch_index < final_index
+    assert "token" not in names
+    patch_events = [event for name, event in zip(names, events) if name == "plan.patch"]
+    patch_text = "\n".join(patch_events)
+    assert "qwen-test" not in patch_text
+    assert '"time"' not in patch_text
+    assert "0-20分钟：校内集合" in patch_text
+
+
+def test_teaching_plan_normalizes_success_and_object_activity_flow(tmp_path: Path):
+    request = AgentMessageRequest.model_validate(message_payload(
+        taskType="TEACHING_PLAN",
+        taskPayload={"theme": "家乡文化", "grade": "四年级"},
+        message="请生成教学方案。",
+    ))
+    result = normalize_teaching_plan(
+        {
+            "generationStatus": "success",
+            "theme": "家乡文化",
+            "objectives": ["认识身边的真实资源"],
+            "activityFlow": [
+                {"time": "0-20分钟", "content": "校内集合并完成活动导入"},
+                {"time": "20-40分钟", "content": "分组研读资源"},
+            ],
+        },
+        request,
+    )
+
+    assert result["generationStatus"] == "completed"
+    assert result["activityFlow"] == [
+        "0-20分钟：校内集合并完成活动导入",
+        "20-40分钟：分组研读资源",
+    ]
+    stream_text = teaching_plan_stream_text(result)
+    assert "活动流程" in stream_text
+    assert "0-20分钟：校内集合并完成活动导入" in stream_text
+    assert '"time"' not in stream_text
+    assert "{" not in stream_text
+
+
+def test_resource_discovery_filters_model_results_to_input_candidates(tmp_path: Path):
+    settings = settings_for(tmp_path)
+    application = create_app(settings)
+    application.state.model.generate_json_with_metadata = AsyncMock(return_value=(
+        {
+            "analysisStatus": "completed",
+            "message": "已完成分类",
+            "results": [
+                {"providerPlaceId": "A1", "resourceCategory": "red_culture", "confidence": 0.9},
+                {"providerPlaceId": "forged", "resourceCategory": "red_culture", "confidence": 1.0},
+            ],
+        },
+        {"provider": "bailian", "model": "qwen-plus", "fallbackLevel": 0},
+    ))
+    with TestClient(application, headers={"X-Agent-Service-Token": settings.internal_service_token}) as client:
+        response = client.post(
+            "/agent/messages",
+            json=message_payload(
+                taskType="RESOURCE_DISCOVERY",
+                taskPayload={"candidates": [{"providerPlaceId": "A1", "name": "候选地点"}]},
+                message="请分析候选地点。",
+            ),
+        )
+
+    assert response.status_code == 200
+    result = response.json()["resourceDiscovery"]
+    assert result["analysisStatus"] == "completed"
+    assert [item["providerPlaceId"] for item in result["results"]] == ["A1"]
 
 
 def test_stateful_runtime_uses_configured_fallback_model(tmp_path: Path):
@@ -311,7 +476,7 @@ def test_stateful_stream_reports_primary_failure_and_fallback_success(tmp_path: 
 
 
 def test_stateful_stream_rejects_cross_owner_and_cross_scope_thread(tmp_path: Path):
-    with TestClient(create_app(settings_for(tmp_path))) as client:
+    with build_client(settings_for(tmp_path)) as client:
         first = client.post("/agent/messages", json=message_payload()).json()
         thread_id = first["threadId"]
 
@@ -342,11 +507,18 @@ def test_agent_service_token_is_required_when_configured(tmp_path: Path):
         assert accepted.status_code == 200
 
 
+def test_agent_service_token_configuration_fails_closed(tmp_path: Path):
+    settings = settings_for(tmp_path, internal_service_token="")
+    with TestClient(create_app(settings)) as client:
+        response = client.post("/agent/messages", json=message_payload())
+        assert response.status_code == 503
+
+
 def test_restart_recovery_uses_same_database(tmp_path: Path):
     settings = settings_for(tmp_path)
-    with TestClient(create_app(settings)) as client:
+    with build_client(settings) as client:
         thread_id = client.post("/agent/messages", json=message_payload()).json()["threadId"]
-    with TestClient(create_app(settings)) as restarted:
+    with build_client(settings) as restarted:
         response = restarted.post(
             "/agent/messages", json=message_payload(threadId=thread_id, message="继续")
         )
@@ -355,7 +527,7 @@ def test_restart_recovery_uses_same_database(tmp_path: Path):
 
 
 def test_owner_and_scope_are_isolated(tmp_path: Path):
-    with TestClient(create_app(settings_for(tmp_path))) as client:
+    with build_client(settings_for(tmp_path)) as client:
         thread_id = client.post("/agent/messages", json=message_payload()).json()["threadId"]
         cross_owner = client.post(
             "/agent/messages",
@@ -371,7 +543,7 @@ def test_owner_and_scope_are_isolated(tmp_path: Path):
 
 def test_context_is_compacted_but_raw_messages_remain(tmp_path: Path):
     settings = settings_for(tmp_path, agent_context_token_budget=60, agent_recent_message_count=2)
-    with TestClient(create_app(settings)) as client:
+    with build_client(settings) as client:
         thread_id = None
         for number in range(4):
             response = client.post(
@@ -425,8 +597,7 @@ def test_tool_runtime_emits_started_and_completed_events(tmp_path: Path):
 
 
 def test_model_output_filters_invented_citations(tmp_path: Path):
-    app = create_app(settings_for(tmp_path))
-    runtime = app.state.runtime
+    runtime = create_app(settings_for(tmp_path)).state.runtime
 
     class FakeAgent:
         async def ainvoke(self, _input, config=None):

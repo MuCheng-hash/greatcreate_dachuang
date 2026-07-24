@@ -7,7 +7,7 @@
 - 负责 MySQL 主业务数据的增删改查、审核和聚合。
 - 负责地图、学校周边资源、教学活动方案等业务接口。
 - 负责调用 Neo4j 查询图谱关系，但不直接负责大模型生成。
-- 负责向前端暴露 `llmServiceBaseUrl`，由前端请求独立的 LLM 服务。
+- 负责校验 JWT、学校范围和可信上下文，并通过内部令牌调用统一 Stateful Agent 服务。
 
 ## 目录说明
 
@@ -44,6 +44,6 @@ npm run dev
 
 常用配置：
 
-- `LLM_SERVICE_BASE_URL`：独立 LLM 服务地址，默认 `http://127.0.0.1:5050`。
+- `LLM_SERVICE_BASE_URL`：Java 访问 FastAPI Stateful Agent 的内部地址，默认 `http://127.0.0.1:5050`；浏览器不直接访问该地址。
 - `NEO4J_URI`、`NEO4J_USERNAME`、`NEO4J_PASSWORD`：Neo4j 连接配置。
 - `AMAP_WEB_KEY`、`AMAP_SECURITY_JS_CODE`：高德地图前端配置。

@@ -6,7 +6,7 @@ import com.redculture.platform.config.AppMapProperties;
 import com.redculture.platform.vo.AgentIntent;
 import com.redculture.platform.vo.AuthCurrentUserVO;
 import com.redculture.platform.vo.ai.KnowledgeScopeType;
-import com.redculture.platform.vo.ai.AgentRuntimeRequest;
+import com.redculture.platform.vo.ai.StatefulAgentRequest;
 import com.redculture.platform.vo.request.AgentQaRequest;
 import com.sun.net.httpserver.HttpServer;
 import org.junit.jupiter.api.Test;
@@ -26,7 +26,7 @@ class AgentRuntimeClientTest {
     @Test
     void parsesOrderedSseEventsFromFastApi() throws IOException {
         HttpServer server = HttpServer.create(new InetSocketAddress(0), 0);
-        server.createContext("/llm/agent/stream", exchange -> {
+        server.createContext("/agent/messages/stream", exchange -> {
             exchange.getRequestBody().readAllBytes();
             exchange.getResponseHeaders().set("Content-Type", "text/event-stream");
             exchange.sendResponseHeaders(200, 0);
@@ -53,7 +53,13 @@ class AgentRuntimeClientTest {
             );
             List<AgentRuntimeClient.StreamEvent> events = new ArrayList<>();
 
-            client.stream(new AgentRuntimeRequest(), events::add);
+            StatefulAgentRequest request = new StatefulAgentRequest();
+            request.setOwnerId("account:1");
+            request.setScopeType("SCHOOL");
+            request.setScopeId(1L);
+            request.setTaskType("CHAT");
+            request.setMessage("你好");
+            client.stream(request, events::add);
 
             assertEquals(List.of("run.started", "token", "final", "done"),
                     events.stream().map(AgentRuntimeClient.StreamEvent::event).toList());

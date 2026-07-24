@@ -15,9 +15,22 @@ from .memory import ContextWindowManager
 from .model_gateway import ModelGateway, message_text
 from .observability import FallbackAlertManager, LlmObservability, LlmTraceContext, classify_llm_error
 from .planner import AgentPlan, AgentPlanner
+from .prompt_manager import PromptManager
 from .repository import ConversationRepository, ThreadRecord
 from .schemas import AgentMessageRequest, AgentMessageResponse, AgentModelOutput, Citation, ToolExecution, TrustedContext
 from .settings import ModelConfig, Settings
+from .structured_tasks import (
+    IncrementalTeachingPlanParser,
+    normalize_resource_discovery,
+    normalize_teaching_plan,
+    resource_discovery_fallback,
+    resource_discovery_valid,
+    structured_task_stream_text,
+    task_answer,
+    task_context,
+    teaching_plan_fallback,
+    teaching_plan_valid,
+)
 from .tools import AGENT_TOOLS, ToolRuntimeContext, bind_tool_runtime, reset_tool_runtime
 
 
@@ -33,12 +46,14 @@ class AgentRuntime:
         model: ModelGateway | None = None,
         observability: LlmObservability | None = None,
         alerts: FallbackAlertManager | None = None,
+        prompts: PromptManager | None = None,
     ):
         self.settings = settings
         self.repository = repository
         self.observability = observability
         self.alerts = alerts or FallbackAlertManager(settings.llm_alert_webhook_url)
         self.model = model or ModelGateway(settings, observability, self.alerts)
+        self.prompts = prompts
         self.context_manager = ContextWindowManager(
             settings.agent_context_token_budget,
             settings.agent_recent_message_count,
@@ -101,7 +116,12 @@ class AgentRuntime:
 
     def _prepare_turn(self, request: AgentMessageRequest) -> tuple[ThreadRecord, Any, AgentPlan]:
         thread = self._get_or_create_thread(request)
-        self.repository.append_message(thread.thread_id, "user", request.message, {"intent": request.intent})
+        self.repository.append_message(
+            thread.thread_id,
+            "user",
+            request.message,
+            {"intent": request.intent, "taskType": request.task_type},
+        )
         stored = self.repository.list_messages(thread.thread_id)
         window = self.context_manager.build(stored, thread.summary)
         if window.compacted:
@@ -217,6 +237,8 @@ class AgentRuntime:
         compacted: bool,
         plan: AgentPlan,
     ) -> AgentMessageResponse:
+        if request.task_type != "CHAT":
+            return await self._run_structured_task(request, thread, compacted)
         executions: list[ToolExecution] = []
         model_attempts = self._model_attempts()
         for config, injected_agent in model_attempts:
@@ -309,6 +331,8 @@ class AgentRuntime:
         plan: AgentPlan,
         emit: EventSink,
     ) -> AgentMessageResponse:
+        if request.task_type != "CHAT":
+            return await self._stream_structured_task(request, thread, compacted, emit)
         primary = self._primary_model_config()
         emit(
             "run.started",
@@ -419,6 +443,196 @@ class AgentRuntime:
         self._emit_answer_chunks(result.answer, emit)
         return result
 
+    async def _run_structured_task(
+        self,
+        request: AgentMessageRequest,
+        thread: ThreadRecord,
+        compacted: bool,
+    ) -> AgentMessageResponse:
+        prompt_key, validator = self._structured_task_config(request)
+        selection, run_id = self._start_structured_prompt(prompt_key, request, thread)
+        started = asyncio.get_running_loop().time()
+        trace_context = LlmTraceContext(
+            feature=f"stateful-{request.task_type.lower()}",
+            user_id=request.owner_id,
+            session_id=thread.thread_id,
+            trace_id=run_id,
+            expected_json=True,
+            metadata={"taskType": request.task_type, "promptVersion": selection.version},
+        )
+        generated, metadata = await self.model.generate_json_with_metadata(
+            selection.content, trace_context, validator
+        )
+        if generated is None:
+            result = self._structured_fallback(request)
+            status = "degraded"
+            error_message = "model_unavailable_or_invalid_response"
+        else:
+            result = self._normalize_structured_result(generated, request)
+            status = "completed"
+            error_message = ""
+        if request.task_type == "TEACHING_PLAN":
+            result["promptVersion"] = selection.version
+            result["promptRunId"] = run_id
+            result["promptExperiment"] = selection.experiment_key
+            result["promptVariant"] = selection.variant
+        elapsed = round((asyncio.get_running_loop().time() - started) * 1000)
+        self._finish_structured_prompt(run_id, status, elapsed, result, error_message)
+        return self._structured_response(request, thread.thread_id, compacted, result, metadata, status)
+
+    async def _stream_structured_task(
+        self,
+        request: AgentMessageRequest,
+        thread: ThreadRecord,
+        compacted: bool,
+        emit: EventSink,
+    ) -> AgentMessageResponse:
+        prompt_key, validator = self._structured_task_config(request)
+        selection, prompt_run_id = self._start_structured_prompt(prompt_key, request, thread)
+        primary = self._primary_model_config()
+        emit(
+            "run.started",
+            {"threadId": thread.thread_id, "taskType": request.task_type, "provider": primary.provider, "model": primary.model},
+        )
+        started = asyncio.get_running_loop().time()
+        trace_context = LlmTraceContext(
+            feature=f"stateful-{request.task_type.lower()}-stream",
+            user_id=request.owner_id,
+            session_id=thread.thread_id,
+            trace_id=prompt_run_id,
+            expected_json=True,
+            metadata={"taskType": request.task_type, "promptVersion": selection.version},
+        )
+        generated: dict[str, Any] | None = None
+        metadata: dict[str, Any] = {}
+        error_message = ""
+        teaching_plan_parser = (
+            IncrementalTeachingPlanParser()
+            if request.task_type == "TEACHING_PLAN"
+            else None
+        )
+        async for event_name, data in self.model.stream_json_events(
+            selection.content, trace_context, validator
+        ):
+            if event_name == "attempt":
+                metadata = dict(data)
+                emit("model.started", data)
+            elif event_name == "token":
+                if teaching_plan_parser is not None:
+                    for patch in teaching_plan_parser.feed(str(data.get("delta") or "")):
+                        emit("plan.patch", {"patch": patch})
+                # 其他结构化任务仍不向前端发送原始 JSON 分片。
+                continue
+            elif event_name == "fallback":
+                error_message = str(data.get("errorType") or "model_failed")
+                emit("model.failed", data)
+            elif event_name == "complete":
+                generated = data.get("result") if isinstance(data.get("result"), dict) else None
+                metadata = {key: value for key, value in data.items() if key != "result"}
+                emit("model.completed", metadata)
+            elif event_name == "exhausted":
+                error_message = "fallback_exhausted"
+
+        if generated is None:
+            result = self._structured_fallback(request)
+            status = "degraded"
+        else:
+            result = self._normalize_structured_result(generated, request)
+            status = "completed"
+        if request.task_type == "TEACHING_PLAN":
+            result["promptVersion"] = selection.version
+            result["promptRunId"] = prompt_run_id
+            result["promptExperiment"] = selection.experiment_key
+            result["promptVariant"] = selection.variant
+        if request.task_type != "TEACHING_PLAN":
+            readable_text = structured_task_stream_text(request, result)
+            if readable_text:
+                self._emit_answer_chunks(readable_text, emit)
+        elapsed = round((asyncio.get_running_loop().time() - started) * 1000)
+        self._finish_structured_prompt(prompt_run_id, status, elapsed, result, error_message)
+        return self._structured_response(request, thread.thread_id, compacted, result, metadata, status)
+
+    def _structured_task_config(self, request: AgentMessageRequest):
+        if request.task_type == "TEACHING_PLAN":
+            return "teaching-plan", teaching_plan_valid
+        if request.task_type == "RESOURCE_DISCOVERY":
+            return "resource-discovery", resource_discovery_valid
+        raise ValueError(f"unsupported taskType: {request.task_type}")
+
+    def _start_structured_prompt(
+        self, prompt_key: str, request: AgentMessageRequest, thread: ThreadRecord
+    ):
+        if self.prompts is None:
+            raise RuntimeError("prompt_manager_unavailable")
+        subject_key = f"{request.scope_type}:{request.scope_id}"
+        selection = self.prompts.resolve(prompt_key, subject_key, task_context(request))
+        run_id = self.prompts.start_run(
+            selection, subject_key, self._primary_model_config().model, len(selection.content)
+        )
+        return selection, run_id
+
+    def _finish_structured_prompt(
+        self, run_id: str, status: str, elapsed: int, result: dict[str, Any], error_message: str
+    ) -> None:
+        if self.prompts is not None:
+            self.prompts.finish_run(
+                run_id, status, elapsed, len(json.dumps(result, ensure_ascii=False)), error_message
+            )
+
+    def _normalize_structured_result(
+        self, result: dict[str, Any], request: AgentMessageRequest
+    ) -> dict[str, Any]:
+        if request.task_type == "TEACHING_PLAN":
+            return normalize_teaching_plan(result, request)
+        return normalize_resource_discovery(result, request)
+
+    def _structured_fallback(self, request: AgentMessageRequest) -> dict[str, Any]:
+        if request.task_type == "TEACHING_PLAN":
+            return teaching_plan_fallback(request)
+        return resource_discovery_fallback(request)
+
+    def _structured_response(
+        self,
+        request: AgentMessageRequest,
+        thread_id: str,
+        compacted: bool,
+        result: dict[str, Any],
+        metadata: dict[str, Any],
+        status: str,
+    ) -> AgentMessageResponse:
+        response = AgentMessageResponse(
+            threadId=thread_id,
+            taskType=request.task_type,
+            answer=task_answer(request, result),
+            status=status,
+            generationStatus=status,
+            retrievalStatus=self._retrieval_status(request.context),
+            provider=metadata.get("provider"),
+            model=metadata.get("model"),
+            fallbackLevel=metadata.get("fallbackLevel"),
+            citations=self._task_citations(result, request.context),
+            relatedResources=result.get("relatedResources") or [],
+            followUpQuestions=(result.get("followUpSuggestions") or [])[:4],
+            contextCompacted=compacted,
+        )
+        if status == "degraded":
+            response.provider = "local"
+            response.model = "local"
+            response.fallback_level = "local"
+        if request.task_type == "TEACHING_PLAN":
+            response.teaching_plan = result
+        else:
+            response.resource_discovery = result
+        return response
+
+    def _task_citations(self, result: dict[str, Any], trusted: TrustedContext) -> list[Citation]:
+        allowed = self._allowed_citations(trusted)
+        values = []
+        for item in result.get("citations") or []:
+            if isinstance(item, dict) and item.get("citationId") in allowed:
+                values.append(self._citation_by_id(trusted, str(item["citationId"])))
+        return [item for item in values if item is not None]
+
     def _persist_response(self, thread: ThreadRecord, result: AgentMessageResponse) -> None:
         self.repository.append_message(
             thread.thread_id,
@@ -426,8 +640,11 @@ class AgentRuntime:
             result.answer,
             {
                 "status": result.status,
+                "taskType": result.task_type,
                 "citations": [item.citation_id for item in result.citations],
                 "toolExecutions": [item.model_dump(by_alias=True) for item in result.tool_executions],
+                "teachingPlan": result.teaching_plan,
+                "resourceDiscovery": result.resource_discovery,
             },
         )
 

@@ -21,6 +21,8 @@ public class AppMapProperties {
 
     private String amapWebServiceBaseUrl = "https://restapi.amap.com";
 
+    private Long amapRequestIntervalMs = 700L;
+
     private String llmServiceBaseUrl = "http://127.0.0.1:5050";
 
     private boolean agentRuntimeEnabled = true;

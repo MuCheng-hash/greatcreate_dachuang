@@ -26,6 +26,8 @@ public class AmapPoiClient {
     );
 
     private final AppMapProperties properties;
+    private final Object requestThrottleMonitor = new Object();
+    private long lastRequestStartedAt;
 
     public AmapPoiClient(AppMapProperties properties) {
         this.properties = properties;
@@ -36,6 +38,7 @@ public class AmapPoiClient {
         RestClient client = client();
         Map<String, PoiRecord> unique = new LinkedHashMap<>();
         for (String keywords : KEYWORD_GROUPS) {
+            waitForRequestSlot();
             JsonNode response = client.get()
                     .uri(builder -> builder.path("/v3/place/around")
                             .queryParam("key", properties.getAmapWebServiceKey())
@@ -63,6 +66,7 @@ public class AmapPoiClient {
         if (!StringUtils.hasText(properties.getAmapWebServiceKey()) || !StringUtils.hasText(providerPlaceId)) {
             return null;
         }
+        waitForRequestSlot();
         JsonNode response = client().get()
                 .uri(builder -> builder.path("/v3/place/detail")
                         .queryParam("key", properties.getAmapWebServiceKey())
@@ -81,6 +85,28 @@ public class AmapPoiClient {
         }
         if (school == null || school.getLongitude() == null || school.getLatitude() == null) {
             throw new IllegalArgumentException("school coordinates are required");
+        }
+    }
+
+    private void waitForRequestSlot() {
+        long intervalMs = properties.getAmapRequestIntervalMs() == null
+                ? 0L
+                : Math.max(0L, properties.getAmapRequestIntervalMs());
+        if (intervalMs == 0L) {
+            return;
+        }
+
+        synchronized (requestThrottleMonitor) {
+            long waitMs = lastRequestStartedAt + intervalMs - System.currentTimeMillis();
+            if (waitMs > 0) {
+                try {
+                    Thread.sleep(waitMs);
+                } catch (InterruptedException exception) {
+                    Thread.currentThread().interrupt();
+                    throw new IllegalStateException("AMap request interrupted", exception);
+                }
+            }
+            lastRequestStartedAt = System.currentTimeMillis();
         }
     }
 

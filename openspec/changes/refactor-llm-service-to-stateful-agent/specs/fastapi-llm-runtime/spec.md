@@ -14,12 +14,20 @@ The service SHALL expose a message endpoint that accepts trusted owner/scope con
 - **WHEN** a valid message is processed by the Agent runtime
 - **THEN** the endpoint returns the persisted conversation identifier and a structured Agent response
 
-### Requirement: Legacy endpoint compatibility
-The service SHALL preserve the existing town, school, teaching-plan, and resource-discovery route paths and their top-level response shapes during migration.
+### Requirement: Unified task protocol
+The service SHALL expose `/agent/messages` and `/agent/messages/stream` as the only model-facing task endpoints. Both endpoints SHALL accept `CHAT`, `TEACHING_PLAN`, and `RESOURCE_DISCOVERY` requests and return the shared task metadata plus the task-specific structured result.
 
-#### Scenario: Existing teaching-plan caller
-- **WHEN** an existing client calls `/llm/teaching-plan/generate` with a valid legacy payload
-- **THEN** the FastAPI service returns the compatible structured teaching-plan response
+#### Scenario: Old LLM route is removed
+- **WHEN** a client calls any removed `/llm/*` model-facing route
+- **THEN** FastAPI returns `404` and does not invoke a model or persist a new Agent turn
+
+#### Scenario: Teaching-plan task
+- **WHEN** an authenticated internal caller sends a valid `TEACHING_PLAN` request to `/agent/messages`
+- **THEN** the response includes the persisted `threadId`, `taskType=TEACHING_PLAN`, and a validated `teachingPlan` object
+
+#### Scenario: Resource-discovery task stream
+- **WHEN** an authenticated internal caller sends a valid `RESOURCE_DISCOVERY` request to `/agent/messages/stream`
+- **THEN** the SSE stream uses the unified run/model/token/final/done event family and the final response includes `resourceDiscovery`
 
 ### Requirement: Asynchronous model integration
 The service SHALL use a configured LangChain chat-model adapter for OpenAI-compatible providers and SHALL not perform blocking raw `urllib` model requests inside async request handlers.

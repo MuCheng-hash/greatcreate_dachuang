@@ -8,6 +8,8 @@ import java.util.List;
 @Data
 public class GeneratedTeachingPlanResponse {
 
+    private String threadId;
+
     private String generationStatus;
 
     private String retrievalStatus;

@@ -5,10 +5,10 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.redculture.platform.config.AgentProperties;
 import com.redculture.platform.config.AppMapProperties;
-import com.redculture.platform.vo.AgentCitationVO;
 import com.redculture.platform.vo.AuthCurrentUserVO;
-import com.redculture.platform.vo.ai.AgentRuntimeRequest;
-import com.redculture.platform.vo.ai.AgentRuntimeResponse;
+import com.redculture.platform.vo.AgentGenerationStatus;
+import com.redculture.platform.vo.ai.StatefulAgentRequest;
+import com.redculture.platform.vo.ai.StatefulAgentResponse;
 import com.redculture.platform.vo.request.AgentQaRequest;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
@@ -50,21 +50,6 @@ public class AgentRuntimeClient {
         this.internalServiceToken = agentProperties.getInternalServiceToken();
     }
 
-    public AgentRuntimeResponse run(AgentRuntimeRequest request) {
-        AgentRuntimeResponse response = restClient.post()
-                .uri("/llm/agent/run")
-                .headers(this::applyInternalServiceToken)
-                .contentType(MediaType.APPLICATION_JSON)
-                .accept(MediaType.APPLICATION_JSON)
-                .body(request)
-                .retrieve()
-                .body(AgentRuntimeResponse.class);
-        if (response == null || !StringUtils.hasText(response.getAnswer())) {
-            throw new IllegalStateException("agent runtime returned an empty response");
-        }
-        return response;
-    }
-
     /** Calls the stateful runtime after Java has resolved authorization and trusted context. */
     public AgentRuntimeResult generate(AgentQaRequest request,
                                        AuthCurrentUserVO user,
@@ -73,33 +58,27 @@ public class AgentRuntimeClient {
                 || !StringUtils.hasText(appMapProperties.getLlmServiceBaseUrl())) {
             return null;
         }
-        Map<String, Object> body = statefulBody(request, user, context);
+        StatefulAgentRequest body = chatRequest(request, user, context);
         try {
-            StatefulAgentRuntimeResponse response = restClient.post()
-                    .uri("/agent/messages")
-                    .headers(this::applyInternalServiceToken)
-                    .contentType(MediaType.APPLICATION_JSON)
-                    .accept(MediaType.APPLICATION_JSON)
-                    .body(body)
-                    .retrieve()
-                    .body(StatefulAgentRuntimeResponse.class);
+            StatefulAgentResponse response = send(body);
             if (response == null || !StringUtils.hasText(response.getAnswer())) {
                 return null;
             }
             List<String> citationIds = response.getCitations() == null ? new ArrayList<>()
                     : response.getCitations().stream()
-                    .map(AgentCitationVO::getCitationId)
+                    .map(item -> item.getCitationId())
                     .filter(StringUtils::hasText)
                     .toList();
             List<String> followUps = response.getFollowUpQuestions() == null ? new ArrayList<>()
                     : response.getFollowUpQuestions();
             List<String> toolNames = response.getToolExecutions() == null ? new ArrayList<>()
                     : response.getToolExecutions().stream()
-                    .map(ToolExecutionResponse::getName)
+                    .map(StatefulAgentResponse.ToolExecutionResponse::getName)
                     .filter(StringUtils::hasText)
                     .toList();
+            AgentGenerationStatus generationStatus = generationStatus(response);
             return new AgentRuntimeResult(
-                    new GeneratedAnswer(response.getAnswer(), citationIds, followUps),
+                    new GeneratedAnswer(response.getAnswer(), citationIds, followUps, generationStatus),
                     response.getThreadId(), response.getStatus(), toolNames
             );
         } catch (RuntimeException ignored) {
@@ -112,26 +91,27 @@ public class AgentRuntimeClient {
                                AuthCurrentUserVO user,
                                AgentAnswerContext context,
                                Consumer<StreamEvent> consumer) {
-        restClient.post()
-                .uri("/agent/messages/stream")
-                .headers(this::applyInternalServiceToken)
-                .contentType(MediaType.APPLICATION_JSON)
-                .accept(MediaType.TEXT_EVENT_STREAM)
-                .body(statefulBody(request, user, context))
-                .exchange((clientRequest, clientResponse) -> {
-                    if (!clientResponse.getStatusCode().is2xxSuccessful()) {
-                        throw new IllegalStateException(
-                                "stateful agent stream HTTP " + clientResponse.getStatusCode().value()
-                        );
-                    }
-                    readEvents(clientResponse.getBody(), consumer);
-                    return null;
-                });
+        stream(chatRequest(request, user, context), consumer);
     }
 
-    public void stream(AgentRuntimeRequest request, Consumer<StreamEvent> consumer) {
+    public StatefulAgentResponse send(StatefulAgentRequest request) {
+        StatefulAgentResponse response = restClient.post()
+                .uri("/agent/messages")
+                .headers(this::applyInternalServiceToken)
+                .contentType(MediaType.APPLICATION_JSON)
+                .accept(MediaType.APPLICATION_JSON)
+                .body(request)
+                .retrieve()
+                .body(StatefulAgentResponse.class);
+        if (response == null || !StringUtils.hasText(response.getAnswer())) {
+            throw new IllegalStateException("stateful agent returned an empty response");
+        }
+        return response;
+    }
+
+    public void stream(StatefulAgentRequest request, Consumer<StreamEvent> consumer) {
         restClient.post()
-                .uri("/llm/agent/stream")
+                .uri("/agent/messages/stream")
                 .headers(this::applyInternalServiceToken)
                 .contentType(MediaType.APPLICATION_JSON)
                 .accept(MediaType.TEXT_EVENT_STREAM)
@@ -147,6 +127,21 @@ public class AgentRuntimeClient {
                 });
     }
 
+    public void archive(String threadId, String ownerId) {
+        try {
+            restClient.post()
+                    .uri(uriBuilder -> uriBuilder
+                            .path("/agent/threads/{threadId}/archive")
+                            .queryParam("ownerId", ownerId)
+                            .build(threadId))
+                    .headers(this::applyInternalServiceToken)
+                    .retrieve()
+                    .toBodilessEntity();
+        } catch (RuntimeException ignored) {
+            // 归档失败不影响资源发现结果，审计数据仍保留在 Agent 线程中。
+        }
+    }
+
     private String ownerId(AuthCurrentUserVO user) {
         if (user.getAccountId() != null) {
             return "account:" + user.getAccountId();
@@ -154,26 +149,59 @@ public class AgentRuntimeClient {
         return "username:" + (user.getUsername() == null ? "unknown" : user.getUsername());
     }
 
-    private Map<String, Object> statefulBody(AgentQaRequest request,
-                                             AuthCurrentUserVO user,
-                                             AgentAnswerContext context) {
-        Map<String, Object> body = new LinkedHashMap<>();
-        body.put("ownerId", ownerId(user));
-        body.put("scopeType", context.getScopeType().name());
-        body.put("scopeId", context.getScopeId());
-        body.put("threadId", request.getThreadId());
-        body.put("message", context.getQuestion());
-        body.put("grade", context.getGrade());
-        body.put("theme", context.getTheme());
-        body.put("intent", context.getIntent() == null ? null : context.getIntent().name());
-        body.put("context", trustedContext(context));
+    public StatefulAgentRequest chatRequest(AgentQaRequest request,
+                                            AuthCurrentUserVO user,
+                                            AgentAnswerContext context) {
+        StatefulAgentRequest body = new StatefulAgentRequest();
+        body.setOwnerId(ownerId(user));
+        body.setScopeType(context.getScopeType().name());
+        body.setScopeId(context.getScopeId());
+        body.setThreadId(request.getThreadId());
+        body.setTaskType("CHAT");
+        body.setMessage(context.getQuestion());
+        body.setGrade(context.getGrade());
+        body.setTheme(context.getTheme());
+        body.setIntent(context.getIntent() == null ? null : context.getIntent().name());
+        body.setContext(trustedContext(context));
         return body;
+    }
+
+    public StatefulAgentRequest taskRequest(String ownerId,
+                                            String scopeType,
+                                            Long scopeId,
+                                            String threadId,
+                                            String taskType,
+                                            String message,
+                                            Map<String, Object> taskPayload,
+                                            Map<String, Object> context) {
+        StatefulAgentRequest request = new StatefulAgentRequest();
+        request.setOwnerId(ownerId);
+        request.setScopeType(scopeType);
+        request.setScopeId(scopeId);
+        request.setThreadId(threadId);
+        request.setTaskType(taskType);
+        request.setMessage(message);
+        request.setTaskPayload(taskPayload == null ? new LinkedHashMap<>() : taskPayload);
+        request.setContext(context == null ? new LinkedHashMap<>() : context);
+        return request;
     }
 
     private void applyInternalServiceToken(HttpHeaders headers) {
         if (StringUtils.hasText(internalServiceToken)) {
             headers.set("X-Agent-Service-Token", internalServiceToken);
         }
+    }
+
+    private AgentGenerationStatus generationStatus(StatefulAgentResponse response) {
+        if (StringUtils.hasText(response.getGenerationStatus())) {
+            try {
+                return AgentGenerationStatus.from(response.getGenerationStatus());
+            } catch (IllegalArgumentException ignored) {
+                // 非标准状态按顶层 status 继续归一化，避免远端扩展字段导致整次问答失败。
+            }
+        }
+        return "degraded".equalsIgnoreCase(response.getStatus())
+                ? AgentGenerationStatus.DEGRADED : AgentGenerationStatus.COMPLETED;
     }
 
     private Map<String, Object> trustedContext(AgentAnswerContext context) {
@@ -257,20 +285,4 @@ public class AgentRuntimeClient {
         }
     }
 
-    @lombok.Data
-    private static class StatefulAgentRuntimeResponse {
-        private String threadId;
-        private String answer;
-        private String status;
-        private List<AgentCitationVO> citations = new ArrayList<>();
-        private List<String> followUpQuestions = new ArrayList<>();
-        private List<ToolExecutionResponse> toolExecutions = new ArrayList<>();
-    }
-
-    @lombok.Data
-    private static class ToolExecutionResponse {
-        private String name;
-        private String status;
-        private Integer durationMs;
-    }
 }

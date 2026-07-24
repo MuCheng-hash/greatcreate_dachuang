@@ -22,25 +22,37 @@ describe("teaching plans view", () => {
     apiMock.get.mockResolvedValue({ records: [] });
   });
 
-  it("renders token deltas before replacing them with the final structured plan", async () => {
+  it("renders structured plan patches before the stream finishes", async () => {
     let finishStream;
     apiMock.stream.mockImplementation(async (path, body, options) => {
       expect(path).toBe("/api/ai/teaching-plans/generate/stream");
       expect(body).toEqual(expect.objectContaining({ schoolId: 1, theme: "敬老志愿服务" }));
-      options.onEvent("stage", { message: "正在调用模型" });
-      options.onEvent("token", { delta: "主模型残片" });
-      options.onEvent("fallback", { reset: true, nextModel: "qwen3:8b", message: "正在切换备用模型" });
-      options.onEvent("token", { delta: "{\"objectives\":[\"逐字生成目标" });
+      options.onEvent("run.started", { model: "qwen-plus", message: "正在调用 qwen-plus" });
+      options.onEvent("token", { delta: '{"theme":"敬老志愿服务"' });
+      options.onEvent("model.failed", { reset: true, nextModel: "qwen3:8b", message: "备用模型 qwen3:8b" });
+      options.onEvent("plan.patch", {
+        patch: {
+          theme: "敬老志愿服务",
+          grade: "四年级",
+          objectives: ["逐步认识身边的真实资源"]
+        }
+      });
       await new Promise((resolve) => { finishStream = resolve; });
-      options.onEvent("token", { delta: "\"]}" });
-      options.onEvent("result", {
-        generationStatus: "completed",
-        message: "教学方案已生成",
-        theme: "敬老志愿服务",
-        grade: "四年级",
-        durationMinutes: 120,
-        objectives: ["逐字生成目标"],
-        citations: []
+      options.onEvent("final", {
+        threadId: "thread-teaching-plan-1",
+        response: {
+          taskType: "TEACHING_PLAN",
+          status: "completed",
+          teachingPlan: {
+            generationStatus: "completed",
+            message: "教学方案已生成",
+            theme: "敬老志愿服务",
+            grade: "四年级",
+            durationMinutes: 120,
+            objectives: ["逐字生成目标"],
+            citations: []
+          }
+        }
       });
       options.onEvent("done", {});
     });
@@ -59,8 +71,12 @@ describe("teaching plans view", () => {
     await flushPromises();
 
     expect(wrapper.text()).toContain("正在生成教学方案");
-    expect(wrapper.text()).toContain("逐字生成目标");
-    expect(wrapper.text()).not.toContain("主模型残片");
+    expect(wrapper.text()).toContain("敬老志愿服务");
+    expect(wrapper.text()).toContain("教学目标");
+    expect(wrapper.text()).toContain("逐步认识身边的真实资源");
+    expect(wrapper.text()).not.toContain("qwen-plus");
+    expect(wrapper.text()).not.toContain("qwen3:8b");
+    expect(wrapper.text()).not.toContain("{\"theme\"");
     expect(wrapper.text()).toContain("停止生成");
 
     finishStream();
@@ -69,5 +85,44 @@ describe("teaching plans view", () => {
     expect(wrapper.text()).toContain("教学目标");
     expect(wrapper.text()).toContain("逐字生成目标");
     expect(wrapper.text()).toContain("保存草稿");
+  });
+
+  it("uses a Chinese degraded notice without exposing backend model errors", async () => {
+    apiMock.stream.mockImplementation(async (path, body, options) => {
+      options.onEvent("model.started", { model: "qwen-plus" });
+      options.onEvent("final", {
+        threadId: "thread-teaching-plan-degraded",
+        response: {
+          taskType: "TEACHING_PLAN",
+          status: "degraded",
+          teachingPlan: {
+            generationStatus: "degraded",
+            message: "LLM 服务不可用",
+            theme: "家乡文化",
+            grade: "四年级",
+            durationMinutes: 40,
+            objectives: ["认识身边的真实资源"],
+            citations: []
+          }
+        }
+      });
+    });
+
+    const wrapper = mount(TeachingPlansView, {
+      global: {
+        stubs: {
+          AppShell: { template: "<div><slot /></div>" },
+          InlineNotice: { template: "<div><slot /></div>" },
+          LoadingBlock: true
+        }
+      }
+    });
+    await flushPromises();
+    await wrapper.get("form").trigger("submit.prevent");
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("已生成基础教学方案，部分内容可能需要人工补充");
+    expect(wrapper.text()).not.toContain("LLM 服务不可用");
+    expect(wrapper.text()).not.toContain("qwen-plus");
   });
 });

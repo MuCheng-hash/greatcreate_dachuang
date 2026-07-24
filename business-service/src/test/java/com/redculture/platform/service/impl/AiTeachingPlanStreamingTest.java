@@ -2,10 +2,12 @@ package com.redculture.platform.service.impl;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.redculture.platform.config.AppMapProperties;
+import com.redculture.platform.config.AgentProperties;
 import com.redculture.platform.config.AuthContext;
 import com.redculture.platform.service.KnowledgeRetriever;
 import com.redculture.platform.service.SchoolMapService;
 import com.redculture.platform.service.TeachingActivityPlanService;
+import com.redculture.platform.service.agent.AgentRuntimeClient;
 import com.redculture.platform.controller.AiTeachingPlanController;
 import com.redculture.platform.vo.AuthCurrentUserVO;
 import com.redculture.platform.vo.SchoolMapDetailVO;
@@ -24,6 +26,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.hamcrest.Matchers.containsString;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
@@ -37,19 +40,25 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 class AiTeachingPlanStreamingTest {
 
     @Test
-    void proxiesTokensAndReturnsValidatedFinalResult() throws Exception {
+    void proxiesSafePlanPatchesAndReturnsValidatedFinalResult() throws Exception {
         AtomicReference<String> requestBody = new AtomicReference<>();
         HttpServer llmServer = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
-        llmServer.createContext("/llm/teaching-plan/generate/stream", exchange -> {
+        llmServer.createContext("/agent/messages/stream", exchange -> {
             requestBody.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
-            String events = "event: meta\ndata: {\"promptVersion\":\"v2\",\"promptRunId\":\"run-1\"}\n\n"
-                    + "event: token\ndata: {\"delta\":\"主模型残片\"}\n\n"
-                    + "event: fallback\ndata: {\"reset\":true,\"nextModel\":\"qwen3:8b\"}\n\n"
-                    + "event: token\ndata: {\"delta\":\"第一段\"}\n\n"
-                    + "event: result\ndata: {\"generationStatus\":\"completed\",\"message\":\"done\","
+            String events = "event: run.started\ndata: {\"threadId\":\"thread-1\",\"taskType\":\"TEACHING_PLAN\",\"model\":\"qwen-plus\"}\n\n"
+                    + "event: model.started\ndata: {\"model\":\"qwen-plus\"}\n\n"
+                    + "event: token\ndata: {\"delta\":\"{\\\"theme\\\":\\\"家乡文化\"}\"}\n\n"
+                    + "event: model.failed\ndata: {\"errorType\":\"timeout\",\"nextModel\":\"qwen3:8b\"}\n\n"
+                    + "event: plan.patch\ndata: {\"patch\":{\"theme\":\"家乡文化\",\"grade\":\"四年级\","
+                    + "\"activityFlow\":[{\"time\":\"0-20分钟\",\"content\":\"校内集合并完成导入\"}],"
+                    + "\"llmModel\":\"qwen-plus\",\"provider\":\"openai-compatible\"}}\n\n"
+                    + "event: final\ndata: {\"threadId\":\"thread-1\",\"response\":{"
+                    + "\"taskType\":\"TEACHING_PLAN\",\"answer\":\"done\",\"status\":\"completed\","
+                    + "\"generationStatus\":\"success\",\"teachingPlan\":{"
+                    + "\"generationStatus\":\"success\",\"message\":\"done\","
                     + "\"theme\":\"家乡文化\",\"grade\":\"四年级\",\"citations\":[],"
-                    + "\"promptVersion\":\"v2\",\"promptRunId\":\"run-1\"}\n\n"
-                    + "event: done\ndata: {\"promptRunId\":\"run-1\"}\n\n";
+                    + "\"activityFlow\":[{\"time\":\"0-20分钟\",\"content\":\"校内集合并完成导入\"}]}}}\n\n"
+                    + "event: done\ndata: {\"threadId\":\"thread-1\"}\n\n";
             byte[] response = events.getBytes(StandardCharsets.UTF_8);
             exchange.getResponseHeaders().set("Content-Type", "text/event-stream");
             exchange.sendResponseHeaders(200, response.length);
@@ -76,7 +85,12 @@ class AiTeachingPlanStreamingTest {
             properties.setLlmServiceBaseUrl("http://127.0.0.1:" + llmServer.getAddress().getPort());
             TeachingActivityPlanService plans = mock(TeachingActivityPlanService.class);
             AiTeachingPlanServiceImpl service = new AiTeachingPlanServiceImpl(
-                    schoolMapService, plans, knowledgeRetriever, properties, new ObjectMapper());
+                    schoolMapService,
+                    plans,
+                    knowledgeRetriever,
+                    properties,
+                    new AgentRuntimeClient(properties, new AgentProperties(), new ObjectMapper()),
+                    new ObjectMapper());
 
             AuthCurrentUserVO user = new AuthCurrentUserVO();
             user.setAccountId(17L);
@@ -96,16 +110,23 @@ class AiTeachingPlanStreamingTest {
                     .andReturn();
             pending.getAsyncResult(5_000);
 
-            mvc.perform(asyncDispatch(pending))
+            MvcResult streamingResult = mvc.perform(asyncDispatch(pending))
                     .andExpect(status().isOk())
-                    .andExpect(content().string(containsString("event:token")))
-                    .andExpect(content().string(containsString("event:fallback")))
-                    .andExpect(content().string(containsString("\\u7B2C\\u4E00\\u6BB5")))
-                    .andExpect(content().string(containsString("event:result")))
-                    .andExpect(content().string(containsString("\"promptVersion\":\"v2\"")))
-                    .andExpect(content().string(containsString("\"retrievalStatus\":\"ok\"")));
-            assertTrue(requestBody.get().contains("\"accountId\":17"));
-            assertTrue(requestBody.get().contains("\"sessionId\":"));
+                    .andExpect(content().string(containsString("event:plan.patch")))
+                    .andExpect(content().string(containsString("event:stage")))
+                    .andExpect(content().string(containsString("0-20")))
+                    .andExpect(content().string(containsString("event:final")))
+                    .andExpect(content().string(containsString("\"teachingPlan\"")))
+                    .andExpect(content().string(containsString("\"generationStatus\":\"completed\"")))
+                    .andExpect(content().string(containsString("\"retrievalStatus\":\"ok\"")))
+                    .andReturn();
+            String responseBody = streamingResult.getResponse().getContentAsString();
+            assertFalse(responseBody.contains("event:token"));
+            assertFalse(responseBody.contains("qwen-plus"));
+            assertFalse(responseBody.contains("qwen3:8b"));
+            assertFalse(responseBody.contains("LLM 服务不可用"));
+            assertTrue(requestBody.get().contains("\"ownerId\":\"account:17\""));
+            assertTrue(requestBody.get().contains("\"taskType\":\"TEACHING_PLAN\""));
         } finally {
             llmServer.stop(0);
         }

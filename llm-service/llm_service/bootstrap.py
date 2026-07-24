@@ -14,4 +14,3 @@ def create_application(
     if container is None:
         container = build_container(settings or load_settings())
     return create_app(container=container)
-

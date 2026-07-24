@@ -10,6 +10,4 @@ public class ClientMapConfigVO {
     private String amapKey;
 
     private String amapSecurityJsCode;
-
-    private String llmServiceBaseUrl;
 }

@@ -23,7 +23,7 @@
 
 ## 5. Verification and Documentation
 
-- [x] 5.1 Add Python tests for legacy compatibility, validation, multi-turn persistence, restart recovery, isolation, context compaction, tools, citations, and degraded mode.
+- [x] 5.1 Add Python tests for removed-route `404` behavior, validation, multi-turn persistence, restart recovery, isolation, context compaction, tools, citations, and degraded mode.
 - [x] 5.2 Add or update Java and frontend tests for the new runtime contract and thread lifecycle.
 - [x] 5.3 Update service and root documentation, sample configuration, and startup commands for FastAPI and the stateful Agent runtime.
 - [x] 5.4 Run focused Python, Maven, and frontend test suites and validate the OpenSpec change.

@@ -2,10 +2,12 @@
 
 红韵乡途是面向乡村学校周边思政教育资源的数字地图平台。本仓库按“业务服务 + LLM 服务 + 数据资料 + 脚本工具 + 设计文档”组织，避免把前端、后端、数据清洗和大模型能力混在根目录。
 
+> 本地启动、真实模型、RAG、Neo4j 与故障排查请优先阅读 [本地启动与配置指南](docs/本地启动与配置指南.md)。
+
 ## 目录说明
 
 - `business-service/`：Spring Boot 业务服务，负责学校、资源、地图、后台管理、Neo4j 图查询和静态前端页面。
-- `llm-service/`：独立 LLM 服务，负责问答、讲解和教学方案生成；当前不配置外部模型也可返回本地兜底结果。
+- `llm-service/`：FastAPI Stateful Agent 服务，统一负责问答、地图问答、教学方案和资源发现分类；当前不配置外部模型也可返回本地兜底结果。
 - `data/sql/`：MySQL 建表、初始化和样例数据脚本。
 - `data/templates/`：数据采集模板。
 - `data/raw/`：原始资料，如 PDF、政策或统计文件。
@@ -22,7 +24,7 @@
 | JDK | 21 | 是 | `business-service/pom.xml` 指定 Java 21 |
 | Maven | 可运行 `mvn` 命令 | 是 | 仓库暂未提供 Maven Wrapper |
 | MySQL | 8.0 | 是 | 初始化脚本使用 MySQL 8.0 排序规则和 JSON 类型 |
-| Python | 3.9 或更高版本 | 启动 LLM 时必需 | 用于 Flask LLM 服务和数据脚本 |
+| Python | 3.9 或更高版本 | 启动 LLM 时必需 | 用于 FastAPI Stateful Agent 服务和数据脚本 |
 | Neo4j | 支持 Bolt 连接 | 否 | 只在使用图谱查询和同步时需要 |
 
 首次启动前可以检查本机环境：
@@ -99,11 +101,10 @@ SOURCE D:/path/to/greatcreate_dachuang/data/sql/mysql_red_culture_all_in_one.sql
 | `AMAP_WEB_KEY` | 高德地图 Web 端 Key | 建议配置自己的 Key |
 | `AMAP_SECURITY_JS_CODE` | 高德地图安全密钥 | 默认空值 |
 | `AMAP_WEB_SERVICE_KEY` | 服务端高德 Web 服务 Key，用于周边 POI 检索和详情 | 空；未配置时仅显示正式资源 |
-| `LLM_SERVICE_BASE_URL` | 前端访问 LLM 服务的地址 | `http://127.0.0.1:5050` |
+| `LLM_SERVICE_BASE_URL` | Java 业务服务访问 FastAPI Agent 的内部地址，浏览器不直接访问 | `http://127.0.0.1:5050` |
 | `APP_AUTH_JWT_SECRET` | JWT 签名密钥，生产环境必须替换为至少 32 字节随机值 | 本地开发默认值 |
 | `APP_AUTH_COOKIE_SECURE` | 认证 Cookie 是否仅允许 HTTPS | `false`；生产环境必须为 `true` |
-| `AGENT_RUNTIME_MODE` | Agent 运行时 | `stateful`；可临时设为 `legacy` 回滚 |
-| `AGENT_INTERNAL_SERVICE_TOKEN` | Java 与 FastAPI Agent 的内部服务令牌 | 本地开发有共享默认值；部署时必须替换 |
+| `AGENT_INTERNAL_SERVICE_TOKEN` | Java 与 FastAPI Agent 必须一致的内部服务令牌 | 未配置时 FastAPI 拒绝 Agent 请求；部署时必须替换 |
 | `NEO4J_URI` | Neo4j Bolt 地址 | `bolt://127.0.0.1:7687` |
 | `NEO4J_USERNAME` | Neo4j 用户名 | `neo4j` |
 | `NEO4J_PASSWORD` | Neo4j 密码 | 本地开发默认值见配置文件 |
@@ -117,11 +118,14 @@ $env:APP_ADMIN_DISPLAY_NAME = "平台管理员"
 $env:AMAP_WEB_KEY = "请替换为高德地图 Web 端 Key"
 $env:AMAP_SECURITY_JS_CODE = "请替换为高德地图安全密钥"
 $env:AMAP_WEB_SERVICE_KEY = "请替换为具有 Web 服务权限的高德 Key"
+$env:AGENT_INTERNAL_SERVICE_TOKEN = "请替换为 Java 与 FastAPI 共用的随机令牌"
 ```
 
 默认管理员账号 `admin / admin123456` 仅用于本地开发。非本地环境必须通过 `APP_ADMIN_USERNAME` 和 `APP_ADMIN_PASSWORD` 覆盖默认值。
 
 `AMAP_WEB_SERVICE_KEY` 只由业务服务读取，不会返回浏览器。教师进入“地图资源”后会自动读取 24 小时缓存或启动周边候选发现；未配置该 Key 时，正式资源地图仍可正常使用。
+
+`AGENT_INTERNAL_SERVICE_TOKEN` 必须在 Spring Boot 和 FastAPI 两个进程的环境中保持完全一致；该令牌只用于服务间调用，不能放入浏览器代码。
 
 ### 3. 启动业务服务
 
@@ -134,7 +138,7 @@ mvn spring-boot:run
 
 看到服务启动完成后，业务服务默认监听 `http://localhost:8080`。静态前端由 Spring Boot 同源提供，不需要单独启动 Vite、Live Server 或其他前端开发服务器。
 
-### 4. 启动 LLM 服务（可选）
+### 4. 启动 FastAPI Agent 服务（可选）
 
 问答、讲解和教学方案生成功能需要独立 LLM 服务。打开另一个 PowerShell 窗口，从仓库根目录执行：
 
@@ -146,16 +150,20 @@ python -m pip install -r "requirements.txt"
 python "app.py"
 ```
 
-服务默认监听 `http://127.0.0.1:5050`。未配置外部模型时，当前实现会返回本地结构化兜底结果；如需调用 OpenAI-compatible 模型服务，可在启动前设置：
+服务默认监听 `http://127.0.0.1:5050`。未配置外部模型时，当前实现会返回本地结构化兜底结果；如需调用真实模型，推荐在 FastAPI 窗口中设置统一 Agent 模型链：
 
 | 环境变量 | 用途 | 默认值 |
 | --- | --- | --- |
-| `LLM_API_URL` | OpenAI-compatible Chat Completions 地址 | 空，表示不调用外部模型 |
-| `LLM_API_KEY` | 模型服务密钥 | 空 |
-| `LLM_MODEL` | 模型名称 | `qwen-plus` |
+| `AGENT_PRIMARY_PROVIDER` | 主模型供应商 | `openai-compatible` |
+| `AGENT_PRIMARY_BASE_URL` | 主模型 OpenAI-compatible 基础地址 | 空，表示不调用外部模型 |
+| `AGENT_PRIMARY_API_KEY` | 主模型密钥 | 空 |
+| `AGENT_PRIMARY_MODEL` | 主模型名称 | `qwen-plus` |
+| `AGENT_FALLBACK_PROVIDER` | 降级模型供应商 | 空 |
+| `AGENT_FALLBACK_BASE_URL` | 降级模型基础地址 | Ollama 时默认 `http://127.0.0.1:11434/v1` |
+| `AGENT_FALLBACK_MODEL` | 降级模型名称 | 空 |
 | `LLM_TIMEOUT_SECONDS` | 调用超时秒数 | `20` |
 
-不要把真实的 `LLM_API_KEY` 写入 README 或提交到仓库。
+`LLM_API_URL`、`LLM_API_KEY` 和 `LLM_MODEL` 仍作为配置别名兼容，但不代表旧 `/llm/*` 接口仍存在。不要把真实密钥写入 README 或提交到仓库。
 
 ### 5. 启动 Neo4j 并同步数据（可选）
 
@@ -184,17 +192,28 @@ python "scripts/sync_mysql_to_neo4j.py"
 
 `/api/auth/me` 返回 JSON 即表示业务服务已经响应；未登录时 `data` 为 `null` 属于正常情况。学校注册成功后，管理员可从同源的管理后台登录并审核申请。
 
-LLM 服务启动后，可以在 PowerShell 中发送一个最小请求：
+FastAPI Agent 启动后，可以在 PowerShell 中发送一个最小请求。内部令牌只由 Java 服务使用，不能暴露给浏览器：
 
 ```powershell
 $body = @{
-    regionName = "西柏坡镇"
-    question = "请介绍这里的红色文化"
-    markers = @()
-} | ConvertTo-Json
+    taskType = "CHAT"
+    taskPayload = @{}
+    ownerId = "account:1"
+    scopeType = "SCHOOL"
+    scopeId = 1
+    threadId = $null
+    message = "请介绍学校周边适合思政教学的资源"
+    context = @{
+        school = @{ schoolName = "里庄小学" }
+        resources = @()
+        retrieval = @{ retrievalStatus = "empty"; chunks = @(); graphFacts = @() }
+        citationCandidates = @()
+    }
+} | ConvertTo-Json -Depth 8
 
 Invoke-RestMethod -Method Post `
-    -Uri "http://127.0.0.1:5050/llm/town/ask" `
+    -Uri "http://127.0.0.1:5050/agent/messages" `
+    -Headers @{ "X-Agent-Service-Token" = $env:AGENT_INTERNAL_SERVICE_TOKEN } `
     -ContentType "application/json; charset=utf-8" `
     -Body $body
 ```

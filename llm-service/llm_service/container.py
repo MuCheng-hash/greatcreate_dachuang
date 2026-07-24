@@ -41,7 +41,7 @@ def build_container(
     alerts = alerts or FallbackAlertManager(settings.llm_alert_webhook_url)
     model_gateway = ModelGateway(settings, observability, alerts)
     prompts = PromptManager(settings.database_path, settings.prompt_root)
-    runtime = AgentRuntime(settings, repository, model_gateway, observability, alerts)
+    runtime = AgentRuntime(settings, repository, model_gateway, observability, alerts, prompts)
     legacy_agent_runtime = LegacyAgentRuntime(
         AgentSettings.from_settings(settings), observability, alerts
     )

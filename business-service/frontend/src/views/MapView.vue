@@ -15,12 +15,15 @@ const selected = ref(null);
 const detailLoading = ref(false);
 const mapStatus = ref("正在准备地图");
 const discoveryStatus = ref("");
+const discoveryInFlight = ref(false);
 const radiusKm = ref(5);
 const layers = reactive({ resources: true, candidates: true, connections: true });
+const DISCOVERY_COOLDOWN_MS = 30_000;
 let map;
 let AMapRef;
 let overlays = [];
 let discoveryToken = 0;
+let lastDiscoveryAt = 0;
 
 const selectedTitle = computed(() => {
   if (selected.value?.kind === "school") return schoolStore.school?.schoolName;
@@ -124,6 +127,18 @@ function renderOverlays() {
 }
 
 async function startDiscovery() {
+  const now = Date.now();
+  if (discoveryInFlight.value) {
+    discoveryStatus.value = "正在发现周边场所";
+    return;
+  }
+  if (now - lastDiscoveryAt < DISCOVERY_COOLDOWN_MS) {
+    discoveryStatus.value = "请求过于频繁，请稍后再试";
+    return;
+  }
+
+  discoveryInFlight.value = true;
+  lastDiscoveryAt = now;
   const token = ++discoveryToken;
   discoveryStatus.value = "正在发现周边场所";
   try {
@@ -145,6 +160,8 @@ async function startDiscovery() {
     }
   } catch (error) {
     if (token === discoveryToken) discoveryStatus.value = error.message || "发现服务暂不可用";
+  } finally {
+    discoveryInFlight.value = false;
   }
 }
 
@@ -231,14 +248,14 @@ function analysisLabel(item) {
         <div class="map-actions">
           <label class="radius-control">
             <span>范围</span>
-            <select v-model.number="radiusKm" aria-label="周边场所搜索范围" @change="changeRadius">
+            <select v-model.number="radiusKm" aria-label="周边场所搜索范围" :disabled="discoveryInFlight" @change="changeRadius">
               <option :value="1">1 km</option><option :value="3">3 km</option>
               <option :value="5">5 km</option><option :value="10">10 km</option>
             </select>
           </label>
           <span class="map-status">{{ mapStatus }}</span>
           <button class="icon-button" type="button" title="定位我的位置" @click="locateMe"><LocateFixed :size="18" /></button>
-          <button class="icon-button" type="button" title="刷新资源" @click="refresh"><RefreshCw :size="18" /></button>
+          <button class="icon-button" type="button" title="刷新资源" :disabled="discoveryInFlight" @click="refresh"><RefreshCw :size="18" /></button>
           <span class="layer-menu-wrap">
             <button class="icon-button" type="button" title="地图图层" @click="layerMenuOpen = !layerMenuOpen"><Layers3 :size="18" /></button>
             <span v-if="layerMenuOpen" class="layer-menu">

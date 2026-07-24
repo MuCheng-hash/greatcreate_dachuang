@@ -42,8 +42,7 @@ public class MapOverviewController {
     public ApiResponse<ClientMapConfigVO> clientConfig() {
         return ApiResponse.success(new ClientMapConfigVO(
             appMapProperties.getAmapKey(),
-            appMapProperties.getAmapSecurityJsCode(),
-            appMapProperties.getLlmServiceBaseUrl()
+            appMapProperties.getAmapSecurityJsCode()
         ));
     }
 

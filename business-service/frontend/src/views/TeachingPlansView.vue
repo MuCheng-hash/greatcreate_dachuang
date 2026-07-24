@@ -12,35 +12,39 @@ const auth = useAuthStore();
 const schoolStore = useSchoolStore();
 const form = reactive({ grade: "四年级", theme: "敬老志愿服务", activityType: "VOLUNTEER_SERVICE", durationMinutes: 120, practiceRequired: true });
 const generated = ref(null);
+const draftPlan = ref(null);
 const plans = ref([]);
 const loading = ref(false);
 const saving = ref(false);
 const historyLoading = ref(false);
 const notice = reactive({ tone: "", text: "" });
-const streamText = ref("");
 const streamStage = ref("");
 const activeAbortController = ref(null);
+const threadId = ref("");
 
-const streamPreview = computed(() => streamText.value
-  .replace(/\\n/g, "\n")
-  .replace(/"(?:generationStatus|message|theme|grade|activityType|durationMinutes|practiceRequired|objectives|resourceBasis|activityFlow|preparation|fieldTasks|safetyNotes|reflection|evaluation|citations|relatedResources|followUpSuggestions)"\s*:/g, "")
-  .replace(/[{}\[\]"]/g, "")
-  .replace(/,\s*/g, "\n")
-  .replace(/\n{3,}/g, "\n\n")
-  .trim());
-
-const sections = computed(() => generated.value ? [
-  ["教学目标", generated.value.objectives], ["资源依据", generated.value.resourceBasis], ["活动流程", generated.value.activityFlow],
-  ["课前准备", generated.value.preparation], ["现场任务", generated.value.fieldTasks], ["安全提示", generated.value.safetyNotes],
-  ["课后反思", generated.value.reflection], ["评价方式", generated.value.evaluation]
+const visiblePlan = computed(() => loading.value ? draftPlan.value : generated.value);
+const sections = computed(() => visiblePlan.value ? [
+  ["教学目标", visiblePlan.value.objectives], ["资源依据", visiblePlan.value.resourceBasis], ["活动流程", visiblePlan.value.activityFlow],
+  ["课前准备", visiblePlan.value.preparation], ["现场任务", visiblePlan.value.fieldTasks], ["安全提示", visiblePlan.value.safetyNotes],
+  ["课后反思", visiblePlan.value.reflection], ["评价方式", visiblePlan.value.evaluation]
 ].filter(([, items]) => Array.isArray(items) && items.length) : []);
 
 onMounted(async () => {
+  threadId.value = sessionStorage.getItem(threadStorageKey()) || "";
   await schoolStore.load();
   await loadPlans();
   const theme = schoolStore.resources.find((item) => item.educationThemeSummary)?.educationThemeSummary;
   if (theme) form.theme = theme.slice(0, 40);
 });
+
+function threadStorageKey() {
+  return `school-portal-teaching-plan-thread:${auth.user?.schoolId || "unknown"}`;
+}
+
+function mergePlanPatch(patch) {
+  if (!patch || typeof patch !== "object" || Array.isArray(patch)) return;
+  draftPlan.value = { ...(draftPlan.value || {}), ...patch };
+}
 
 async function loadPlans() {
   historyLoading.value = true;
@@ -61,38 +65,50 @@ async function generate() {
   }
   loading.value = true;
   generated.value = null;
-  streamText.value = "";
+  draftPlan.value = null;
   streamStage.value = "正在准备教学依据";
   const abortController = new AbortController();
   activeAbortController.value = abortController;
   try {
     const request = {
       schoolId: auth.user.schoolId, grade: form.grade.trim(), theme: form.theme.trim(), activityType: form.activityType,
-      durationMinutes: Number(form.durationMinutes), practiceRequired: form.practiceRequired
+      durationMinutes: Number(form.durationMinutes), practiceRequired: form.practiceRequired,
+      ...(threadId.value ? { threadId: threadId.value } : {})
     };
     let finalReceived = false;
     await api.stream("/api/ai/teaching-plans/generate/stream", request, {
       signal: abortController.signal,
       onEvent(eventName, data) {
         if (eventName === "stage") {
-          streamStage.value = data.message || "正在生成教学方案";
+          streamStage.value = data.stage === "retrieval" ? "正在检索教学依据" : "正在生成教学方案";
         } else if (eventName === "token") {
-          streamText.value += data.delta || "";
+          streamStage.value = "正在整理教学方案";
+        } else if (eventName === "plan.patch") {
+          mergePlanPatch(data.patch);
           streamStage.value = "正在生成教学方案";
-        } else if (eventName === "fallback") {
-          if (data.reset) streamText.value = "";
-          streamStage.value = data.message || "正在切换备用模型";
-        } else if (eventName === "result") {
-          generated.value = data;
+        } else if (eventName === "fallback" || eventName === "model.failed") {
+          streamStage.value = "正在切换备用生成方式";
+        } else if (eventName === "run.started" || eventName === "model.started") {
+          streamStage.value = "正在生成教学方案";
+        } else if (eventName === "final") {
+          const finalPlan = data.response?.teachingPlan || data.response || data.teachingPlan || data;
+          generated.value = finalPlan;
+          mergePlanPatch(finalPlan);
+          if (data.threadId || data.response?.threadId || generated.value.threadId) {
+            threadId.value = data.threadId || data.response?.threadId || generated.value.threadId;
+            sessionStorage.setItem(threadStorageKey(), threadId.value);
+          }
           finalReceived = true;
         } else if (eventName === "error") {
-          throw new Error(data.message || "教学方案流式生成失败");
+          throw new Error("教学方案流式生成失败");
         }
       }
     });
     if (!finalReceived) throw new Error("流式服务未返回最终方案");
-    notice.tone = generated.value.generationStatus === "completed" ? "success" : "info";
-    notice.text = generated.value.message || (generated.value.generationStatus === "completed" ? "教学方案已生成。" : "已生成可用的本地方案。 ");
+    const generationStatus = String(generated.value?.generationStatus || "").toLowerCase();
+    const completed = generationStatus === "completed" || generationStatus === "success";
+    notice.tone = completed ? "success" : "info";
+    notice.text = completed ? "教学方案已生成。" : "已生成基础教学方案，部分内容可能需要人工补充";
   } catch (error) {
     if (error?.name === "AbortError") {
       notice.tone = "info"; notice.text = "已停止生成。"; return;
@@ -154,14 +170,14 @@ function statusLabel(status) {
         <div class="panel-header"><div><h2>生成结果</h2><p>内容可保存为草稿，由管理员继续审核完善。</p></div><button class="secondary-button" type="button" :disabled="!generated || saving" @click="saveDraft"><Save :size="17" />{{ saving ? "保存中" : "保存草稿" }}</button></div>
         <div class="panel-body result-scroll">
           <InlineNotice v-if="notice.text" :tone="notice.tone">{{ notice.text }}</InlineNotice>
-          <div v-if="loading" class="streaming-plan" aria-live="polite">
-            <div class="streaming-status"><span class="streaming-dot"></span>{{ streamStage }}</div>
-            <div class="streaming-copy">{{ streamPreview }}<span class="streaming-caret"></span></div>
-          </div>
-          <div v-else-if="generated" class="generated-plan">
-            <header><div><span class="badge badge-red">{{ generated.grade }}</span><span class="badge">{{ generated.durationMinutes }} 分钟</span></div><h2>{{ generated.theme }}</h2></header>
-            <section v-for="([title, items]) in sections" :key="title"><h3>{{ title }}</h3><ul><li v-for="item in items" :key="item">{{ item }}</li></ul></section>
-            <section v-if="generated.citations?.length"><h3>引用来源</h3><div class="citation-list"><article v-for="item in generated.citations" :key="item.citationId"><strong>{{ item.title || item.citationId }}</strong><p>{{ item.excerpt }}</p></article></div></section>
+          <div v-if="loading || generated" :class="{ 'streaming-plan': loading }" aria-live="polite">
+            <div v-if="loading" class="streaming-status"><span class="streaming-dot"></span>{{ streamStage }}</div>
+            <div v-if="visiblePlan" class="generated-plan">
+              <header><div><span class="badge badge-red">{{ visiblePlan.grade }}</span><span class="badge">{{ visiblePlan.durationMinutes }} 分钟</span></div><h2>{{ visiblePlan.theme }}</h2></header>
+              <section v-for="([title, items]) in sections" :key="title"><h3>{{ title }}</h3><ul><li v-for="item in items" :key="item">{{ item }}</li></ul></section>
+              <section v-if="visiblePlan.citations?.length"><h3>引用来源</h3><div class="citation-list"><article v-for="item in visiblePlan.citations" :key="item.citationId"><strong>{{ item.title || item.citationId }}</strong><p>{{ item.excerpt }}</p></article></div></section>
+            </div>
+            <div v-else-if="loading" class="streaming-copy">正在等待结构化内容<span class="streaming-caret"></span></div>
           </div>
           <div v-else class="empty-state"><BookOpenCheck :size="40" /><span>填写左侧参数后生成教学方案</span></div>
         </div>

@@ -66,7 +66,6 @@ def citation_ids(payload: dict[str, Any]) -> list[str]:
         6,
     )
 
-
 def build_teaching_plan_fallback(payload: dict[str, Any], status: str = "degraded", message: Optional[str] = None) -> dict[str, Any]:
     req = payload.get("request") or {}
     school = payload.get("school") or {}
@@ -463,4 +462,3 @@ def stream_agent(
             "X-Accel-Buffering": "no",
         },
     )
-
