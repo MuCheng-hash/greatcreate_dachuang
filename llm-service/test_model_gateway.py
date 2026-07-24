@@ -92,6 +92,7 @@ class ModelGatewayFallbackTest(unittest.IsolatedAsyncioTestCase):
         names = [name for name, _data in events]
         self.assertIn("fallback", names)
         self.assertEqual("complete", names[-1])
+        self.assertLess(names.index("token"), names.index("complete"))
         fallback = next(data for name, data in events if name == "fallback")
         self.assertEqual("gpt-4", fallback["failedModel"])
         self.assertEqual("gpt-3.5", fallback["nextModel"])

@@ -88,7 +88,7 @@ def test_teaching_plan_stream_and_prompt_admin_api(tmp_path: Path):
 
         assert response.status_code == 200
         assert "event: run.started" in body
-        assert "event: token" in body
+        assert "event: token" not in body
         assert "event: final" in body
         assert "event: done" in body
         assert '"promptVersion": "v1"' in body

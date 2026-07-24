@@ -20,10 +20,12 @@ from .repository import ConversationRepository, ThreadRecord
 from .schemas import AgentMessageRequest, AgentMessageResponse, AgentModelOutput, Citation, ToolExecution, TrustedContext
 from .settings import ModelConfig, Settings
 from .structured_tasks import (
+    IncrementalTeachingPlanParser,
     normalize_resource_discovery,
     normalize_teaching_plan,
     resource_discovery_fallback,
     resource_discovery_valid,
+    structured_task_stream_text,
     task_answer,
     task_context,
     teaching_plan_fallback,
@@ -504,6 +506,11 @@ class AgentRuntime:
         generated: dict[str, Any] | None = None
         metadata: dict[str, Any] = {}
         error_message = ""
+        teaching_plan_parser = (
+            IncrementalTeachingPlanParser()
+            if request.task_type == "TEACHING_PLAN"
+            else None
+        )
         async for event_name, data in self.model.stream_json_events(
             selection.content, trace_context, validator
         ):
@@ -511,7 +518,11 @@ class AgentRuntime:
                 metadata = dict(data)
                 emit("model.started", data)
             elif event_name == "token":
-                emit("token", {"delta": str(data.get("delta") or "")})
+                if teaching_plan_parser is not None:
+                    for patch in teaching_plan_parser.feed(str(data.get("delta") or "")):
+                        emit("plan.patch", {"patch": patch})
+                # 其他结构化任务仍不向前端发送原始 JSON 分片。
+                continue
             elif event_name == "fallback":
                 error_message = str(data.get("errorType") or "model_failed")
                 emit("model.failed", data)
@@ -525,9 +536,6 @@ class AgentRuntime:
         if generated is None:
             result = self._structured_fallback(request)
             status = "degraded"
-            fallback_text = task_answer(request, result)
-            if fallback_text:
-                self._emit_answer_chunks(fallback_text, emit)
         else:
             result = self._normalize_structured_result(generated, request)
             status = "completed"
@@ -536,6 +544,10 @@ class AgentRuntime:
             result["promptRunId"] = prompt_run_id
             result["promptExperiment"] = selection.experiment_key
             result["promptVariant"] = selection.variant
+        if request.task_type != "TEACHING_PLAN":
+            readable_text = structured_task_stream_text(request, result)
+            if readable_text:
+                self._emit_answer_chunks(readable_text, emit)
         elapsed = round((asyncio.get_running_loop().time() - started) * 1000)
         self._finish_structured_prompt(prompt_run_id, status, elapsed, result, error_message)
         return self._structured_response(request, thread.thread_id, compacted, result, metadata, status)

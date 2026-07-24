@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from .schemas import AgentMessageRequest, TrustedContext
@@ -18,6 +19,21 @@ RESOURCE_CATEGORIES = {
     "social_practice",
     "other",
 }
+
+TEACHING_PLAN_PATCH_FIELDS = frozenset({
+    "generationStatus", "message", "theme", "grade", "activityType",
+    "durationMinutes", "practiceRequired", "objectives", "resourceBasis",
+    "activityFlow", "preparation", "fieldTasks", "safetyNotes", "reflection",
+    "evaluation", "citations", "relatedResources", "followUpSuggestions",
+})
+TEACHING_PLAN_LIST_FIELDS = frozenset({
+    "objectives", "resourceBasis", "activityFlow", "preparation", "fieldTasks",
+    "safetyNotes", "reflection", "evaluation", "relatedResources",
+    "followUpSuggestions",
+})
+TEACHING_PLAN_STRING_FIELDS = frozenset({
+    "message", "theme", "grade", "activityType",
+})
 
 
 def task_context(request: AgentMessageRequest) -> dict[str, Any]:
@@ -52,6 +68,176 @@ def resource_discovery_valid(value: dict[str, Any]) -> bool:
     return isinstance(value.get("results"), list)
 
 
+def _safe_plan_message(value: Any) -> str:
+    message = str(value or "").strip()
+    if not message:
+        return ""
+    if "LLM" in message or "服务不可用" in message:
+        return "已生成基础教学方案，部分内容可能需要人工补充"
+    return message
+
+
+def _canonical_generation_status(value: Any, fallback: str) -> str:
+    normalized = str(value or "").strip().lower()
+    if normalized in {"completed", "success", "succeeded", "ok"}:
+        return "completed"
+    if normalized in {"degraded", "fallback", "unavailable", "failed"}:
+        return "degraded"
+    return fallback
+
+
+def _readable_item(value: Any) -> str:
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, list):
+        return "、".join(item for item in (_readable_item(item) for item in value) if item)
+    if isinstance(value, dict):
+        time_text = _readable_item(value.get("time"))
+        content = value.get("content")
+        if content is None:
+            content = value.get("text")
+        if content is None:
+            content = value.get("description")
+        content_text = _readable_item(content)
+        if time_text and content_text:
+            return f"{time_text}：{content_text}"
+        if content_text:
+            return content_text
+        return "；".join(
+            f"{key}：{item_text}"
+            for key, item in value.items()
+            if (item_text := _readable_item(item))
+        )
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def _readable_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [item_text for item in value if (item_text := _readable_item(item))]
+
+
+def _safe_citations(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    fields = ("citationId", "title", "excerpt", "sourceType", "score")
+    citations: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        citation = {
+            field: item[field]
+            for field in fields
+            if field in item and item[field] not in (None, "")
+        }
+        if citation:
+            citations.append(citation)
+    return citations
+
+
+def normalize_teaching_plan_patch(value: dict[str, Any]) -> dict[str, Any]:
+    """只保留已经完整解析的、可以直接渲染到教学方案页面的字段。"""
+    patch: dict[str, Any] = {}
+    for field, raw_value in value.items():
+        if field not in TEACHING_PLAN_PATCH_FIELDS:
+            continue
+        if field == "generationStatus":
+            patch[field] = _canonical_generation_status(raw_value, "completed")
+        elif field == "message":
+            message = _safe_plan_message(raw_value) if isinstance(raw_value, str) else ""
+            if message:
+                patch[field] = message
+        elif field in TEACHING_PLAN_STRING_FIELDS:
+            text = raw_value.strip() if isinstance(raw_value, str) else ""
+            if text:
+                patch[field] = text
+        elif field == "durationMinutes":
+            if isinstance(raw_value, (int, float)) and not isinstance(raw_value, bool):
+                patch[field] = raw_value
+        elif field == "practiceRequired":
+            if isinstance(raw_value, bool):
+                patch[field] = raw_value
+        elif field == "citations":
+            patch[field] = _safe_citations(raw_value)
+        elif field in TEACHING_PLAN_LIST_FIELDS and isinstance(raw_value, list):
+            patch[field] = _readable_list(raw_value)
+    return patch
+
+
+class IncrementalTeachingPlanParser:
+    """按完整顶层字段解析严格 JSON，避免把半截 JSON 暴露给浏览器。"""
+
+    def __init__(self) -> None:
+        self._buffer = ""
+        self._index = 0
+        self._started = False
+        self._finished = False
+        self._emitted_fields: set[str] = set()
+        self._decoder = json.JSONDecoder()
+
+    def feed(self, delta: str) -> list[dict[str, Any]]:
+        if not delta or self._finished:
+            return []
+        self._buffer += delta
+        patches: list[dict[str, Any]] = []
+        while True:
+            if not self._started:
+                start = self._buffer.find("{")
+                if start < 0:
+                    break
+                self._started = True
+                self._index = start + 1
+
+            self._index = self._skip_whitespace(self._index)
+            if self._index >= len(self._buffer):
+                break
+            if self._buffer[self._index] == "}":
+                self._finished = True
+                self._index += 1
+                break
+            if self._buffer[self._index] == ",":
+                self._index += 1
+                continue
+
+            try:
+                key, key_end = self._decoder.raw_decode(self._buffer, self._index)
+            except json.JSONDecodeError:
+                break
+            if not isinstance(key, str):
+                break
+            value_start = self._skip_whitespace(key_end)
+            if value_start >= len(self._buffer) or self._buffer[value_start] != ":":
+                break
+            value_start = self._skip_whitespace(value_start + 1)
+            try:
+                value, value_end = self._decoder.raw_decode(self._buffer, value_start)
+            except json.JSONDecodeError:
+                break
+            if not self._value_boundary_complete(value, value_end):
+                break
+
+            self._index = value_end
+            if key not in self._emitted_fields:
+                self._emitted_fields.add(key)
+                patch = normalize_teaching_plan_patch({key: value})
+                if patch:
+                    patches.append(patch)
+        return patches
+
+    def _skip_whitespace(self, index: int) -> int:
+        while index < len(self._buffer) and self._buffer[index].isspace():
+            index += 1
+        return index
+
+    def _value_boundary_complete(self, value: Any, value_end: int) -> bool:
+        next_index = self._skip_whitespace(value_end)
+        if next_index < len(self._buffer):
+            return self._buffer[next_index] in ",}"
+        return isinstance(value, (str, list, dict))
+
+
 def normalize_teaching_plan(
     value: dict[str, Any], request: AgentMessageRequest, status: str = "completed"
 ) -> dict[str, Any]:
@@ -59,8 +245,12 @@ def normalize_teaching_plan(
     trusted = request.context
     school_name = (trusted.school or {}).get("schoolName") or "当前学校"
     result = dict(value)
-    result.setdefault("generationStatus", status)
-    result.setdefault("message", "已根据受控业务上下文生成结构化教学方案。")
+    result["generationStatus"] = _canonical_generation_status(
+        result.get("generationStatus"), _canonical_generation_status(status, "completed")
+    )
+    result["message"] = _safe_plan_message(
+        result.get("message") or "已根据受控业务上下文生成结构化教学方案。"
+    )
     result.setdefault("theme", payload.get("theme") or request.theme or "本土思政实践活动")
     result.setdefault("grade", payload.get("grade") or request.grade or "小学高年级")
     result.setdefault("activityType", payload.get("activityType") or "classroom")
@@ -73,6 +263,12 @@ def normalize_teaching_plan(
     ):
         if not isinstance(result.get(field), list):
             result[field] = []
+    for field in (
+        "objectives", "resourceBasis", "activityFlow", "preparation", "fieldTasks",
+        "safetyNotes", "reflection", "evaluation", "relatedResources",
+        "followUpSuggestions",
+    ):
+        result[field] = _readable_list(result[field])
     allowed = set(_citation_ids(trusted))
     result["citations"] = [
         item for item in result["citations"]
@@ -102,7 +298,7 @@ def teaching_plan_fallback(
         basis = [f"{school_name}周边资源数据较少，建议先补充可引用资源后再完善方案。"]
     return {
         "generationStatus": status,
-        "message": message or "当前模型不可用，已基于学校周边已审核资源生成本地结构化方案。",
+        "message": _safe_plan_message(message or "已生成基础教学方案，部分内容可能需要人工补充"),
         "theme": theme,
         "grade": grade,
         "activityType": payload.get("activityType") or "classroom",
@@ -190,6 +386,44 @@ def task_answer(request: AgentMessageRequest, result: dict[str, Any]) -> str:
     if request.task_type == "RESOURCE_DISCOVERY":
         return str(result.get("message") or "已完成候选资源分析。")
     return ""
+
+
+def teaching_plan_stream_text(result: dict[str, Any]) -> str:
+    lines: list[str] = []
+    for field, label in (("theme", "主题"), ("grade", "适用年级"), ("durationMinutes", "活动时长")):
+        value = result.get(field)
+        if value not in (None, ""):
+            suffix = " 分钟" if field == "durationMinutes" else ""
+            lines.append(f"{label}：{value}{suffix}")
+    if lines:
+        lines.append("")
+    for field, label in (
+        ("objectives", "教学目标"),
+        ("resourceBasis", "资源依据"),
+        ("activityFlow", "活动流程"),
+        ("preparation", "课前准备"),
+        ("fieldTasks", "实践任务"),
+        ("safetyNotes", "安全提示"),
+        ("reflection", "活动反思"),
+        ("evaluation", "评价方式"),
+        ("relatedResources", "相关资源"),
+        ("followUpSuggestions", "延伸建议"),
+    ):
+        items = _readable_list(result.get(field))
+        if not items:
+            continue
+        lines.append(label)
+        lines.extend(f"- {item}" for item in items)
+        lines.append("")
+    return "\n".join(lines).strip()
+
+
+def structured_task_stream_text(
+    request: AgentMessageRequest, result: dict[str, Any]
+) -> str:
+    if request.task_type == "TEACHING_PLAN":
+        return teaching_plan_stream_text(result)
+    return task_answer(request, result)
 
 
 def _resource_names(trusted: TrustedContext) -> list[str]:

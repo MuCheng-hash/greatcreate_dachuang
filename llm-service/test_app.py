@@ -10,8 +10,15 @@ from langchain_core.messages import AIMessage
 
 from llm_service.api import create_app
 from llm_service.repository import ConversationRepository
+from llm_service.prompt_manager import PromptManager
+from llm_service.runtime import AgentRuntime
 from llm_service.schemas import AgentMessageRequest, TrustedContext
 from llm_service.settings import Settings
+from llm_service.structured_tasks import (
+    IncrementalTeachingPlanParser,
+    normalize_teaching_plan,
+    teaching_plan_stream_text,
+)
 from llm_service.tools import ToolRuntimeContext, bind_tool_runtime, reset_tool_runtime, search_approved_resources
 
 
@@ -179,7 +186,7 @@ def test_teaching_plan_and_resource_discovery_streams_use_unified_protocol(tmp_p
         )
         assert plan_response.status_code == 200
         assert "event: run.started" in plan_response.text
-        assert "event: token" in plan_response.text
+        assert "event: token" not in plan_response.text
         assert "event: final" in plan_response.text
         plan_final = next(
             block for block in plan_response.text.split("\n\n") if block.startswith("event: final")
@@ -204,6 +211,107 @@ def test_teaching_plan_and_resource_discovery_streams_use_unified_protocol(tmp_p
         discovery_data = json.loads(discovery_final.split("data: ", 1)[1])
         assert discovery_data["response"]["taskType"] == "RESOURCE_DISCOVERY"
         assert discovery_data["response"]["resourceDiscovery"]["results"] == []
+
+
+def test_incremental_teaching_plan_patches_arrive_before_complete_without_raw_json():
+    parser = IncrementalTeachingPlanParser()
+    patches = []
+    chunks = [
+        '{"generationStatus":"succ',
+        'ess","theme":"家乡文化","activityFlow":[{"time":"0-20分钟","content":"校内集合',
+        '并完成导入"}],"objectives":["认识身边资源"]}',
+    ]
+    for chunk in chunks:
+        patches.extend(parser.feed(chunk))
+
+    assert patches[0] == {"generationStatus": "completed"}
+    assert patches[1] == {"theme": "家乡文化"}
+    assert patches[2]["activityFlow"] == ["0-20分钟：校内集合并完成导入"]
+    assert patches[3] == {"objectives": ["认识身边资源"]}
+    assert '"time"' not in str(patches)
+    assert "{" not in patches[2]["activityFlow"][0]
+
+
+def test_runtime_emits_plan_patch_before_final_without_token_fragments(tmp_path: Path):
+    class StreamingModel:
+        async def stream_json_events(self, _prompt, _trace_context, _validator):
+            yield "attempt", {"provider": "test", "model": "qwen-test"}
+            yield "token", {"delta": '{"generationStatus":"success","theme":"家乡'}
+            yield "token", {
+                "delta": '文化","activityFlow":[{"time":"0-20分钟","content":"校内集合"}],'
+            }
+            yield "token", {"delta": '"objectives":["认识真实资源"]}'}
+            yield "complete", {
+                "result": {
+                    "generationStatus": "success",
+                    "theme": "家乡文化",
+                    "objectives": ["认识真实资源"],
+                    "activityFlow": [{"time": "0-20分钟", "content": "校内集合"}],
+                },
+                "provider": "test",
+                "model": "qwen-test",
+            }
+
+    settings = settings_for(tmp_path, llm_model="qwen-test")
+    repository = ConversationRepository(settings.database_path)
+    runtime = AgentRuntime(
+        settings,
+        repository,
+        model=StreamingModel(),
+        prompts=PromptManager(settings.database_path, settings.prompt_root),
+    )
+    runtime._agent = object()
+    request = AgentMessageRequest.model_validate(message_payload(
+        taskType="TEACHING_PLAN",
+        taskPayload={"theme": "家乡文化", "grade": "四年级"},
+        message="请生成教学方案。",
+    ))
+
+    async def collect_events():
+        return [event async for event in runtime.stream_events(request)]
+
+    events = asyncio.run(collect_events())
+    names = [event.splitlines()[0].split(": ", 1)[1] for event in events]
+    patch_index = names.index("plan.patch")
+    final_index = names.index("final")
+    assert patch_index < final_index
+    assert "token" not in names
+    patch_events = [event for name, event in zip(names, events) if name == "plan.patch"]
+    patch_text = "\n".join(patch_events)
+    assert "qwen-test" not in patch_text
+    assert '"time"' not in patch_text
+    assert "0-20分钟：校内集合" in patch_text
+
+
+def test_teaching_plan_normalizes_success_and_object_activity_flow(tmp_path: Path):
+    request = AgentMessageRequest.model_validate(message_payload(
+        taskType="TEACHING_PLAN",
+        taskPayload={"theme": "家乡文化", "grade": "四年级"},
+        message="请生成教学方案。",
+    ))
+    result = normalize_teaching_plan(
+        {
+            "generationStatus": "success",
+            "theme": "家乡文化",
+            "objectives": ["认识身边的真实资源"],
+            "activityFlow": [
+                {"time": "0-20分钟", "content": "校内集合并完成活动导入"},
+                {"time": "20-40分钟", "content": "分组研读资源"},
+            ],
+        },
+        request,
+    )
+
+    assert result["generationStatus"] == "completed"
+    assert result["activityFlow"] == [
+        "0-20分钟：校内集合并完成活动导入",
+        "20-40分钟：分组研读资源",
+    ]
+    stream_text = teaching_plan_stream_text(result)
+    assert "活动流程" in stream_text
+    assert "0-20分钟：校内集合并完成活动导入" in stream_text
+    assert '"time"' not in stream_text
+    assert "{" not in stream_text
 
 
 def test_resource_discovery_filters_model_results_to_input_candidates(tmp_path: Path):
