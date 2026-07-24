@@ -11,6 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse, StreamingResponse
 
 from .container import AppContainer, build_container
+from .legacy_api import router as legacy_router
 from .legacy import (
     build_map_answer,
     build_resource_discovery_classification,
@@ -302,5 +303,6 @@ def create_app(
     async def classify_resource_discovery(payload: dict[str, Any]) -> dict[str, Any]:
         return await build_resource_discovery_classification(payload, model)
 
+    app.include_router(legacy_router)
     app.include_router(health_router)
     return app

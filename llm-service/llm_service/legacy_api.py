@@ -2,14 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
-import uvicorn
 from typing import Any, Optional
 
-from fastapi import Body, FastAPI, HTTPException
+from fastapi import APIRouter, Body, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import ValidationError
-from llm_service.api import create_app
 from llm_service.model_gateway import ModelGateway
 from llm_service.observability import (
     FallbackAlertManager,
@@ -17,27 +14,17 @@ from llm_service.observability import (
     LlmTraceContext,
     configure_json_logging,
 )
-from llm_service.settings import get_settings
+from llm_service.settings import Settings, get_settings
+from llm_service.container import AppContainer, get_container
 
-from agent.config import AgentSettings
-from agent.runtime import AgentRuntime
 
-settings = AgentSettings.from_env()
-service_settings = get_settings()
+router = APIRouter(tags=["legacy-agent"])
 configure_json_logging()
-observability = LlmObservability(
-    service_settings.database_path, service_settings.llm_model_pricing
-)
-alerts = FallbackAlertManager(service_settings.llm_alert_webhook_url)
-agent_runtime = AgentRuntime(settings, observability, alerts)
-app = create_app(service_settings, observability, alerts)
-
-
-LLM_API_URL = os.getenv("LLM_API_URL", "").strip()
-LLM_BASE_URL = os.getenv("LLM_BASE_URL", "").strip()
-LLM_API_KEY = os.getenv("LLM_API_KEY", "").strip()
-LLM_MODEL = os.getenv("LLM_MODEL", "qwen-plus").strip()
-LLM_TIMEOUT_SECONDS = float(os.getenv("LLM_TIMEOUT_SECONDS", "20"))
+service_settings = get_settings()
+LLM_API_URL = service_settings.llm_api_url
+LLM_BASE_URL = service_settings.openai_base_url
+LLM_API_KEY = service_settings.llm_api_key
+LLM_MODEL = service_settings.llm_model
 
 
 def compact_list(values: Any, limit: int = 6) -> list[str]:
@@ -138,8 +125,9 @@ def build_teaching_plan_fallback(payload: dict[str, Any], status: str = "degrade
     }
 
 
-def resolve_llm_api_url() -> Optional[str]:
-    configured_url = (LLM_API_URL or LLM_BASE_URL).strip()
+def resolve_llm_api_url(settings: Settings | None = None) -> Optional[str]:
+    settings = settings or service_settings
+    configured_url = (settings.llm_api_url or settings.openai_base_url).strip()
     if not configured_url:
         return None
     normalized = configured_url.rstrip("/")
@@ -164,18 +152,18 @@ def parse_model_json(content: Any) -> Optional[dict[str, Any]]:
 
 
 def call_openai_compatible(
-    prompt: str, trace_context: LlmTraceContext | None = None
+    prompt: str,
+    trace_context: LlmTraceContext | None = None,
+    gateway: ModelGateway | None = None,
 ) -> Optional[dict[str, Any]]:
     trace_context = trace_context or LlmTraceContext(feature="legacy-agent-answer")
-    router_settings = service_settings.model_copy(
-        update={
-            "llm_api_url": resolve_llm_api_url() or service_settings.llm_api_url,
-            "llm_api_key": LLM_API_KEY or service_settings.llm_api_key,
-            "llm_model": LLM_MODEL or service_settings.llm_model,
-        }
-    )
-    router = ModelGateway(router_settings, observability, alerts)
-    return asyncio.run(router.generate_json(
+    if gateway is None:
+        from llm_service.observability import FallbackAlertManager, LlmObservability
+
+        observability = LlmObservability(service_settings.database_path, service_settings.llm_model_pricing)
+        alerts = FallbackAlertManager(service_settings.llm_alert_webhook_url)
+        gateway = ModelGateway(service_settings, observability, alerts)
+    return asyncio.run(gateway.generate_json(
         prompt,
         trace_context,
         lambda value: bool(str(value.get("answer") or "").strip()),
@@ -402,7 +390,10 @@ def build_agent_answer_fallback(payload: dict[str, Any], message: Optional[str] 
     }
 
 
-def build_agent_answer(payload: dict[str, Any]) -> dict[str, Any]:
+def build_agent_answer(
+    payload: dict[str, Any],
+    gateway: ModelGateway | None = None,
+) -> dict[str, Any]:
     actor = payload.get("actor") if isinstance(payload.get("actor"), dict) else {}
     scope = payload.get("scope") if isinstance(payload.get("scope"), dict) else {}
     account_id = actor.get("accountId") or payload.get("accountId")
@@ -411,15 +402,14 @@ def build_agent_answer(payload: dict[str, Any]) -> dict[str, Any]:
         f"school:{school_id}" if school_id is not None else "anonymous"
     )
     session_id = str(payload.get("conversationId") or payload.get("sessionId") or "")
-    generated = call_openai_compatible(
-        build_agent_answer_prompt(payload),
-        LlmTraceContext(
-            feature="legacy-agent-answer",
-            user_id=user_id,
-            session_id=session_id,
-            metadata={"intent": payload.get("intent") or "UNKNOWN"},
-        ),
+    prompt = build_agent_answer_prompt(payload)
+    trace_context = LlmTraceContext(
+        feature="legacy-agent-answer",
+        user_id=user_id,
+        session_id=session_id,
+        metadata={"intent": payload.get("intent") or "UNKNOWN"},
     )
+    generated = call_openai_compatible(prompt, trace_context, gateway=gateway)
     available_ids = set(agent_evidence_citation_ids(payload))
     if isinstance(generated, dict) and generated.get("answer"):
         raw_ids = generated.get("citationIds") or []
@@ -438,45 +428,34 @@ def build_agent_answer(payload: dict[str, Any]) -> dict[str, Any]:
     return build_agent_answer_fallback(payload, "真实 LLM 未配置或响应不可用，已使用本地兜底回答。")
 
 
-@app.post("/llm/town/explain")
-def explain_town(payload: dict[str, Any] | None = Body(default=None)) -> Any:
-    return build_explain_answer(payload or {})
+@router.post("/llm/agent/answer")
+def answer_agent(
+    payload: dict[str, Any] | None = Body(default=None),
+    container: AppContainer = Depends(get_container),
+) -> Any:
+    return build_agent_answer(payload or {}, container.model_gateway)
 
 
-@app.post("/llm/town/ask")
-def ask_town(payload: dict[str, Any] | None = Body(default=None)) -> Any:
-    return build_ask_answer(payload or {})
-
-
-@app.post("/llm/school/explain")
-def explain_school(payload: dict[str, Any] | None = Body(default=None)) -> Any:
-    return build_school_explain_answer(payload or {})
-
-
-@app.post("/llm/school/ask")
-def ask_school(payload: dict[str, Any] | None = Body(default=None)) -> Any:
-    return build_school_ask_answer(payload or {})
-
-
-@app.post("/llm/agent/answer")
-def answer_agent(payload: dict[str, Any] | None = Body(default=None)) -> Any:
-    return build_agent_answer(payload or {})
-
-
-@app.post("/llm/agent/run")
-def run_agent(payload: dict[str, Any] | None = Body(default=None)) -> Any:
+@router.post("/llm/agent/run")
+def run_agent(
+    payload: dict[str, Any] | None = Body(default=None),
+    container: AppContainer = Depends(get_container),
+) -> Any:
     try:
-        return agent_runtime.run(payload or {})
+        return container.legacy_agent_runtime.run(payload or {})
     except ValidationError as exception:
         raise HTTPException(status_code=422, detail=exception.errors()) from exception
     except ValueError as exception:
         raise HTTPException(status_code=409, detail=str(exception)) from exception
 
 
-@app.post("/llm/agent/stream")
-def stream_agent(payload: dict[str, Any] | None = Body(default=None)) -> StreamingResponse:
+@router.post("/llm/agent/stream")
+def stream_agent(
+    payload: dict[str, Any] | None = Body(default=None),
+    container: AppContainer = Depends(get_container),
+) -> StreamingResponse:
     return StreamingResponse(
-        agent_runtime.stream_events(payload or {}),
+        container.legacy_agent_runtime.stream_events(payload or {}),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -484,29 +463,3 @@ def stream_agent(payload: dict[str, Any] | None = Body(default=None)) -> Streami
             "X-Accel-Buffering": "no",
         },
     )
-
-
-@app.get("/health/live")
-def health_live() -> dict[str, str]:
-    return {"status": "ok"}
-
-
-@app.get("/health/ready")
-def health_ready() -> dict[str, Any]:
-    model_chain = settings.model_chain()
-    primary = model_chain[0]
-    fallback = model_chain[1] if len(model_chain) > 1 else None
-    return {
-        "status": "ready" if settings.ready() else "not_ready",
-        "businessServiceBaseUrl": settings.internal_business_base_url,
-        "agentModelConfigured": settings.primary_model_configured(),
-        "primaryProvider": primary.provider,
-        "primaryModel": primary.model,
-        "fallbackModelConfigured": settings.fallback_model_configured(),
-        "fallbackProvider": fallback.provider if fallback else None,
-        "fallbackModel": fallback.model if fallback else None,
-    }
-
-
-if __name__ == "__main__":
-    uvicorn.run(app, host=settings.host, port=settings.port, workers=1)

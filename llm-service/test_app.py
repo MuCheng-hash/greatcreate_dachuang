@@ -11,6 +11,8 @@ from fastapi.testclient import TestClient
 from langchain_core.messages import AIMessage
 
 from llm_service.api import create_app
+from llm_service.container import build_container
+from llm_service import legacy_api
 from llm_service.repository import ConversationRepository
 from llm_service.schemas import AgentMessageRequest, TrustedContext
 from llm_service.settings import LlmModelTarget, Settings
@@ -38,7 +40,7 @@ class AgentAnswerEndpointTest(unittest.TestCase):
             },
         }
 
-    @patch.object(app, "call_openai_compatible", return_value=None)
+    @patch.object(legacy_api, "call_openai_compatible", return_value=None)
     def test_returns_degraded_fallback_with_valid_evidence_ids(self, _call):
         response = self.client.post("/llm/agent/answer", json=self.payload)
 
@@ -48,7 +50,7 @@ class AgentAnswerEndpointTest(unittest.TestCase):
         self.assertTrue(data["answer"])
         self.assertEqual(data["citationIds"], ["chunk:1", "graph:1"])
 
-    @patch.object(app, "call_openai_compatible", return_value={
+    @patch.object(legacy_api, "call_openai_compatible", return_value={
         "answer": "模型回答",
         "citationIds": ["chunk:1", "forged:citation"],
         "followUpQuestions": ["它适合哪个年级？"],
@@ -146,6 +148,49 @@ def test_health_and_legacy_routes(tmp_path: Path):
             json={"candidates": [{"providerPlaceId": "A1", "name": "候选地点"}]},
         )
         assert classification.json()["analysisStatus"] == "unavailable"
+
+
+def test_profile_configuration_is_overridden_by_environment(tmp_path: Path, monkeypatch):
+    override = tmp_path / "service.toml"
+    override.write_text("port = 6123\nllm_timeout_seconds = 7.0\n", encoding="utf-8")
+    monkeypatch.setenv("APP_ENV", "dev")
+    monkeypatch.setenv("APP_CONFIG_FILE", str(override))
+    monkeypatch.setenv("LLM_TIMEOUT_SECONDS", "9.0")
+
+    settings = Settings(_env_file=None)
+
+    assert settings.app_env == "dev"
+    assert settings.port == 6123
+    assert settings.llm_timeout_seconds == 9.0
+
+
+def test_production_profile_rejects_missing_admin_tokens(monkeypatch):
+    monkeypatch.setenv("APP_ENV", "prod")
+    monkeypatch.delenv("PROMPT_ADMIN_TOKEN", raising=False)
+    monkeypatch.delenv("OBSERVABILITY_ADMIN_TOKEN", raising=False)
+
+    with pytest.raises(ValueError, match="admin tokens"):
+        Settings(_env_file=None)
+
+
+def test_container_can_be_explicitly_injected_and_required_health_failure_is_503(tmp_path: Path):
+    settings = settings_for(
+        tmp_path,
+        internal_business_base_url="",
+        business_health_required=True,
+    )
+    container = build_container(settings)
+    application = create_app(container=container)
+
+    assert application.state.container is container
+    with TestClient(application) as client:
+        assert client.get("/health/live").status_code == 200
+        readiness = client.get("/health/ready")
+        assert readiness.status_code == 503
+        payload = readiness.json()
+        assert payload["dependencies"]["businessService"]["required"] is True
+        assert payload["dependencies"]["businessService"]["status"] == "down"
+        assert "test-key" not in str(payload)
 
 
 def test_validation_rejects_missing_owner_and_unknown_scope(tmp_path: Path):

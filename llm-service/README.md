@@ -19,6 +19,8 @@ The default address is `http://127.0.0.1:5050`.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
+| `APP_ENV` | `dev` | Configuration profile: `dev`, `staging`, or `prod` |
+| `APP_CONFIG_FILE` | empty | Optional TOML file loaded after the selected profile |
 | `LLM_API_URL` | empty | OpenAI-compatible Chat Completions URL; `/chat/completions` may be included |
 | `LLM_API_KEY` | empty | Provider credential |
 | `LLM_MODEL` | `qwen-plus` | Provider model name |
@@ -28,8 +30,23 @@ The default address is `http://127.0.0.1:5050`.
 | `ALLOWED_ORIGINS` | empty | Comma-separated browser origins; empty means no CORS middleware |
 | `AGENT_CONTEXT_TOKEN_BUDGET` | `6000` | Approximate input budget |
 | `AGENT_MAX_TOOL_ROUNDS` | `6` | Maximum model/tool loop rounds |
+| `INTERNAL_BUSINESS_BASE_URL` | `http://127.0.0.1:8080` | Java business-service address |
+| `AGENT_INTERNAL_SERVICE_TOKEN` | empty | Credential for internal tools and health checks |
+| `BUSINESS_HEALTH_PATH` | `/internal/agent/tools/health` | Business-service readiness endpoint |
+| `BUSINESS_HEALTH_REQUIRED` | profile value | Whether a failed business check makes readiness fail |
+| `REQUIRE_LLM_MODEL` | profile value | Whether a configured model chain is required for readiness |
 
 Without `LLM_API_URL` and `LLM_API_KEY`, the service still stores conversations and returns a clearly marked `degraded` answer based only on trusted business context.
+
+Configuration is loaded in this order, with later sources taking precedence:
+
+```text
+config/base.toml -> config/{APP_ENV}.toml -> APP_CONFIG_FILE -> .env -> process environment
+```
+
+`dev` permits optional business/model dependencies so local fallback flows remain usable. `staging` and `prod` require both dependencies. The production profile also rejects wildcard CORS, in-memory SQLite, and missing prompt/observability admin tokens.
+
+`GET /health/live` only verifies that the process can respond. `GET /health/ready` checks SQLite access, the active teaching-plan prompt, the model chain, and the authenticated Java business-service endpoint. It returns HTTP `503` when a required dependency is down; dependency details never include credentials.
 
 ## Stateful Agent API
 
