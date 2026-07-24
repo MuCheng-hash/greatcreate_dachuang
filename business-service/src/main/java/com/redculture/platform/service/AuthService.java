@@ -6,19 +6,17 @@ import com.redculture.platform.vo.request.AuthLoginRequest;
 import com.redculture.platform.vo.request.AuthPasswordChangeRequest;
 import com.redculture.platform.vo.request.AuthProfileUpdateRequest;
 import com.redculture.platform.vo.request.SchoolRegisterRequest;
-import jakarta.servlet.http.HttpSession;
 
 public interface AuthService {
 
     SchoolRegistrationSubmitVO registerSchool(SchoolRegisterRequest request);
 
-    AuthCurrentUserVO login(AuthLoginRequest request, HttpSession session);
+    AuthCurrentUserVO login(AuthLoginRequest request);
 
-    AuthCurrentUserVO currentUser(HttpSession session);
+    AuthCurrentUserVO currentUser(Long accountId);
 
-    AuthCurrentUserVO updateProfile(AuthProfileUpdateRequest request, HttpSession session);
+    AuthCurrentUserVO updateProfile(AuthProfileUpdateRequest request, Long accountId);
 
-    void changePassword(AuthPasswordChangeRequest request, HttpSession session);
+    void changePassword(AuthPasswordChangeRequest request, Long accountId);
 
-    void logout(HttpSession session);
 }

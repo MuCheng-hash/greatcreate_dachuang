@@ -2,11 +2,11 @@ package com.redculture.platform.controller;
 
 import com.redculture.platform.common.ApiResponse;
 import com.redculture.platform.service.AgentQaService;
-import com.redculture.platform.service.AuthService;
+import com.redculture.platform.config.AuthContext;
 import com.redculture.platform.vo.AgentQaResponse;
 import com.redculture.platform.vo.AuthCurrentUserVO;
 import com.redculture.platform.vo.request.AgentQaRequest;
-import jakarta.servlet.http.HttpSession;
+import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -22,16 +22,14 @@ import java.util.Map;
 public class AgentQaController {
 
     private final AgentQaService agentQaService;
-    private final AuthService authService;
 
-    public AgentQaController(AgentQaService agentQaService, AuthService authService) {
+    public AgentQaController(AgentQaService agentQaService) {
         this.agentQaService = agentQaService;
-        this.authService = authService;
     }
 
     @PostMapping("/ask")
-    public ApiResponse<AgentQaResponse> ask(@RequestBody AgentQaRequest request, HttpSession session) {
-        AuthCurrentUserVO currentUser = authService.currentUser(session);
+    public ApiResponse<AgentQaResponse> ask(@RequestBody AgentQaRequest request, HttpServletRequest servletRequest) {
+        AuthCurrentUserVO currentUser = AuthContext.currentUser(servletRequest);
         if (currentUser == null) {
             return ApiResponse.fail(401, "school account is required");
         }
@@ -43,8 +41,8 @@ public class AgentQaController {
     }
 
     @PostMapping(value = "/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
-    public SseEmitter stream(@RequestBody AgentQaRequest request, HttpSession session) {
-        AuthCurrentUserVO currentUser = authService.currentUser(session);
+    public SseEmitter stream(@RequestBody AgentQaRequest request, HttpServletRequest servletRequest) {
+        AuthCurrentUserVO currentUser = AuthContext.currentUser(servletRequest);
         if (currentUser == null) {
             return errorEmitter("AUTH_REQUIRED", "school account is required");
         }

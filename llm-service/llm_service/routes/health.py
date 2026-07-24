@@ -33,4 +33,3 @@ async def compatibility_health(
         "agentModelConfigured": container.settings.model_configured,
     })
     return JSONResponse(payload, status_code=200 if is_ready else 503)
-

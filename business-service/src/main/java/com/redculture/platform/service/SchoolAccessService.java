@@ -1,20 +1,12 @@
 package com.redculture.platform.service;
 
 import com.redculture.platform.vo.AuthCurrentUserVO;
-import jakarta.servlet.http.HttpSession;
 import org.springframework.stereotype.Service;
 
 @Service
 public class SchoolAccessService {
 
-    private final AuthService authService;
-
-    public SchoolAccessService(AuthService authService) {
-        this.authService = authService;
-    }
-
-    public AuthCurrentUserVO requireSchoolAccess(Long schoolId, HttpSession session) {
-        AuthCurrentUserVO user = authService.currentUser(session);
+    public AuthCurrentUserVO requireSchoolAccess(Long schoolId, AuthCurrentUserVO user) {
         if (user == null) {
             throw new IllegalArgumentException("authentication required");
         }

@@ -61,4 +61,3 @@ def build_container(
 
 def get_container(request: Request) -> AppContainer:
     return request.app.state.container
-

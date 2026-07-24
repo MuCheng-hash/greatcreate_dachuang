@@ -64,4 +64,4 @@ Rollback consists of disabling the configured Agent runtime client in Spring and
 ## Open Questions
 
 - Production checkpoint storage can be selected between Redis and PostgreSQL after deployment volume is known; this does not change the API contract.
-- SSE token streaming is left as a compatible future extension because the current UI can consume complete responses.
+- The compatible SSE extension is now implemented as `POST /agent/messages/stream`; it emits `run.started`, model/tool events, `token`, `final`, `error`, and `done` while keeping the same owner/scope checks and SQLite persistence.

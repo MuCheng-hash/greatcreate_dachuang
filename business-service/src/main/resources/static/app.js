@@ -2876,14 +2876,67 @@ function geoJsonToPathList(geoJson) {
     return [];
 }
 
-async function requestJson(url, options = {}) {
-    const response = await fetch(url, {
-        headers: {
-            Accept: "application/json",
-            ...(options.method === "POST" ? { "Content-Type": "application/json" } : {})
-        },
-        ...options
-    });
+function readCsrfToken() {
+    const item = document.cookie.split(";").map(value => value.trim()).find(value => value.startsWith("XSRF-TOKEN="));
+    if (!item) return "";
+    try { return decodeURIComponent(item.slice("XSRF-TOKEN=".length)); } catch { return item.slice("XSRF-TOKEN=".length); }
+}
+
+function waitForRetry(delayMs) {
+    return new Promise(resolve => window.setTimeout(resolve, delayMs));
+}
+
+async function refreshAuthCookies() {
+    try {
+        const response = await fetch("/api/auth/refresh", {
+            method: "POST",
+            credentials: "include",
+            headers: { Accept: "application/json" }
+        });
+        const data = await response.json();
+        return response.ok && data?.code === 200;
+    } catch {
+        return false;
+    }
+}
+
+async function requestJson(url, options = {}, state = { refreshAttempted: false, retries: 0 }) {
+    const config = { ...options, credentials: "include" };
+    const method = String(config.method || "GET").toUpperCase();
+    const headers = new Headers(config.headers || {});
+    headers.set("Accept", headers.get("Accept") || "application/json");
+    if (config.body !== undefined) {
+        headers.set("Content-Type", headers.get("Content-Type") || "application/json");
+        if (typeof config.body !== "string") config.body = JSON.stringify(config.body);
+    }
+    if (["POST", "PUT", "PATCH", "DELETE"].includes(method)) {
+        const csrfToken = readCsrfToken();
+        if (csrfToken) headers.set("X-CSRF-TOKEN", csrfToken);
+    }
+    config.headers = headers;
+
+    let response;
+    try {
+        response = await fetch(url, config);
+    } catch (error) {
+        if (method === "GET" && state.retries < 2) {
+            await waitForRetry(200 * 2 ** state.retries);
+            return requestJson(url, options, { ...state, retries: state.retries + 1 });
+        }
+        throw new Error(`request failed: ${error?.message || "network unavailable"}`);
+    }
+
+    if (response.status === 401 && !state.refreshAttempted && url !== "/api/auth/refresh") {
+        if (await refreshAuthCookies()) {
+            return requestJson(url, options, { ...state, refreshAttempted: true });
+        }
+        window.dispatchEvent(new CustomEvent("portal:unauthorized"));
+    }
+
+    if (method === "GET" && state.retries < 2 && ([408, 429].includes(response.status) || response.status >= 500)) {
+        await waitForRetry(200 * 2 ** state.retries);
+        return requestJson(url, options, { ...state, retries: state.retries + 1 });
+    }
 
     if (!response.ok) {
         throw new Error(`request failed: ${response.status}`);

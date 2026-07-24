@@ -33,6 +33,7 @@ class FakeModel:
 
 def router_settings() -> Settings:
     return Settings(
+        _env_file=None,
         llm_api_url="https://primary.example/v1",
         llm_api_key="primary-key",
         llm_model="gpt-4",

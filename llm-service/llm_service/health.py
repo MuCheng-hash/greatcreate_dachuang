@@ -132,4 +132,3 @@ class HealthService:
     @staticmethod
     def _safe_error(exc: Exception) -> str:
         return f"{type(exc).__name__}: dependency check failed"
-

@@ -40,6 +40,7 @@ DROP TABLE IF EXISTS resource_discovery_run_item;
 DROP TABLE IF EXISTS resource_discovery_candidate;
 DROP TABLE IF EXISTS resource_discovery_run;
 DROP TABLE IF EXISTS school_resource_rel;
+DROP TABLE IF EXISTS auth_refresh_token;
 DROP TABLE IF EXISTS school_user_account;
 DROP TABLE IF EXISTS school_registration;
 DROP TABLE IF EXISTS school_geo_record;
@@ -927,6 +928,27 @@ CREATE TABLE IF NOT EXISTS school_user_account (
     FOREIGN KEY (registration_id) REFERENCES school_registration(registration_id),
   KEY idx_school_user_account_status (status),
   KEY idx_school_user_account_role (role_code)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS auth_refresh_token (
+  token_id             BIGINT PRIMARY KEY AUTO_INCREMENT,
+  account_id           BIGINT NOT NULL,
+  token_hash           CHAR(64) NOT NULL,
+  token_family_id      VARCHAR(64) NOT NULL,
+  issued_at            DATETIME NOT NULL,
+  expires_at           DATETIME NOT NULL,
+  rotated_at           DATETIME NULL,
+  revoked_at           DATETIME NULL,
+  revoke_reason        VARCHAR(100) NULL,
+  user_agent           VARCHAR(512) NULL,
+  client_ip            VARCHAR(45) NULL,
+  created_at           DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at           DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  CONSTRAINT uk_auth_refresh_token_hash UNIQUE (token_hash),
+  CONSTRAINT fk_auth_refresh_token_account
+    FOREIGN KEY (account_id) REFERENCES school_user_account(account_id),
+  KEY idx_auth_refresh_token_account_status (account_id, revoked_at, expires_at),
+  KEY idx_auth_refresh_token_family (token_family_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 ALTER TABLE local_edu_resource

@@ -2,7 +2,7 @@ package com.redculture.platform.service.impl;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.redculture.platform.config.AppMapProperties;
-import com.redculture.platform.service.AuthService;
+import com.redculture.platform.config.AuthContext;
 import com.redculture.platform.service.KnowledgeRetriever;
 import com.redculture.platform.service.SchoolMapService;
 import com.redculture.platform.service.TeachingActivityPlanService;
@@ -78,17 +78,16 @@ class AiTeachingPlanStreamingTest {
             AiTeachingPlanServiceImpl service = new AiTeachingPlanServiceImpl(
                     schoolMapService, plans, knowledgeRetriever, properties, new ObjectMapper());
 
-            AuthService authService = mock(AuthService.class);
             AuthCurrentUserVO user = new AuthCurrentUserVO();
             user.setAccountId(17L);
             user.setRoleCode("platform_admin");
-            when(authService.currentUser(any())).thenReturn(user);
             MockMvc mvc = MockMvcBuilders.standaloneSetup(
-                    new AiTeachingPlanController(service, authService, plans)).build();
+                    new AiTeachingPlanController(service, plans)).build();
 
             MvcResult pending = mvc.perform(post("/api/ai/teaching-plans/generate/stream")
                             .contentType(MediaType.APPLICATION_JSON)
                             .accept(MediaType.TEXT_EVENT_STREAM)
+                            .requestAttr(AuthContext.CURRENT_USER_ATTRIBUTE, user)
                             .content("""
                                     {"schoolId":1,"grade":"四年级","theme":"家乡文化",
                                      "activityType":"CLASSROOM","durationMinutes":40,"practiceRequired":false}
