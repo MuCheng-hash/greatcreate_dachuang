@@ -13,4 +13,3 @@ llm_temperature = 0.2
 agent_max_iterations = 4
 agent_max_history_messages = 20
 agent_prompt_version = "v1"
-

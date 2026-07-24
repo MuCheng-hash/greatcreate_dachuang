@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import uvicorn
 
+from llm_service.api import create_app
 from llm_service.bootstrap import create_application
 from llm_service.container import build_container
 from llm_service.model_gateway import ModelGateway
@@ -26,6 +27,8 @@ from llm_service.observability import FallbackAlertManager, LlmObservability, Ll
 from llm_service.settings import get_settings
 
 
+settings = get_settings()
+app = create_app(settings)
 service_settings = get_settings()
 container = build_container(service_settings)
 settings = container.legacy_agent_runtime.settings
@@ -63,4 +66,5 @@ app = create_application(container=container)
 
 
 if __name__ == "__main__":
+    uvicorn.run(app, host="127.0.0.1", port=5050, workers=1)
     uvicorn.run(app, host=service_settings.host, port=service_settings.port, workers=1)

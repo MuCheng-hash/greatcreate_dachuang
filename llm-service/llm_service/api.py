@@ -1,15 +1,17 @@
 from __future__ import annotations
 
-from pathlib import Path
 import json
 import hmac
+import secrets
 import sqlite3
 from typing import Any
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse, StreamingResponse
+from pydantic import ValidationError
 
+from .legacy import build_agent_answer
 from .container import AppContainer, build_container
 from .legacy_api import router as legacy_router
 from .legacy import (
@@ -59,6 +61,7 @@ def create_app(
     model = container.model_gateway
     prompts = container.prompts
     runtime = container.runtime
+    legacy_runtime = container.legacy_agent_runtime
     app = FastAPI(title="Red Culture Stateful Agent", version="2.0.0")
     app.state.container = container
     app.state.settings = settings
@@ -67,6 +70,14 @@ def create_app(
     app.state.prompts = prompts
     app.state.observability = observability
     app.state.alerts = alerts
+    app.state.legacy_runtime = legacy_runtime
+
+    async def require_internal_agent_token(
+        token: str | None = Header(default=None, alias="X-Agent-Service-Token"),
+    ) -> None:
+        expected = settings.internal_service_token.strip()
+        if expected and not secrets.compare_digest(token or "", expected):
+            raise HTTPException(status_code=401, detail="agent service token is invalid")
 
     async def require_prompt_admin(x_prompt_admin_token: str = Header(default="")) -> None:
         if not settings.prompt_admin_token:
@@ -89,8 +100,8 @@ def create_app(
             allow_credentials=True,
             allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
             allow_headers=[
-                "Authorization", "Content-Type", "X-Prompt-Admin-Token",
-                "X-Observability-Admin-Token",
+                "Authorization", "Content-Type", "X-Agent-Service-Token",
+                "X-Prompt-Admin-Token", "X-Observability-Admin-Token",
             ],
         )
 
@@ -140,12 +151,18 @@ def create_app(
             "started_after": started_after, "started_before": started_before,
         })
 
-    @app.post("/agent/threads", response_model=ThreadResponse, status_code=201)
+    @app.post(
+        "/agent/threads", response_model=ThreadResponse, status_code=201,
+        dependencies=[Depends(require_internal_agent_token)],
+    )
     async def create_thread(request: ThreadCreateRequest) -> ThreadResponse:
         record = runtime.create_thread(request.owner_id, request.scope_type, request.scope_id)
         return _thread_response(runtime, record, include_messages=False)
 
-    @app.get("/agent/threads/{thread_id}", response_model=ThreadResponse)
+    @app.get(
+        "/agent/threads/{thread_id}", response_model=ThreadResponse,
+        dependencies=[Depends(require_internal_agent_token)],
+    )
     async def get_thread(
         thread_id: str,
         owner_id: str = Query(alias="ownerId"),
@@ -158,7 +175,10 @@ def create_app(
             raise HTTPException(status_code=404, detail="thread not found") from exc
         return _thread_response(runtime, record)
 
-    @app.post("/agent/threads/{thread_id}/messages", response_model=AgentMessageResponse)
+    @app.post(
+        "/agent/threads/{thread_id}/messages", response_model=AgentMessageResponse,
+        dependencies=[Depends(require_internal_agent_token)],
+    )
     async def send_thread_message(thread_id: str, request: AgentMessageRequest) -> AgentMessageResponse:
         if request.thread_id and request.thread_id != thread_id:
             raise HTTPException(status_code=400, detail="threadId does not match URL")
@@ -168,14 +188,42 @@ def create_app(
         except (ThreadNotFoundError, ThreadScopeError) as exc:
             raise HTTPException(status_code=404, detail="thread not found") from exc
 
-    @app.post("/agent/messages", response_model=AgentMessageResponse)
+    @app.post(
+        "/agent/messages", response_model=AgentMessageResponse,
+        dependencies=[Depends(require_internal_agent_token)],
+    )
     async def send_message(request: AgentMessageRequest) -> AgentMessageResponse:
         try:
             return await runtime.handle(request)
         except (ThreadNotFoundError, ThreadScopeError) as exc:
             raise HTTPException(status_code=404, detail="thread not found") from exc
 
-    @app.post("/agent/threads/{thread_id}/archive", response_model=ThreadResponse)
+    @app.post(
+        "/agent/messages/stream", response_class=StreamingResponse,
+        dependencies=[Depends(require_internal_agent_token)],
+    )
+    async def stream_message(request: AgentMessageRequest) -> StreamingResponse:
+        if request.thread_id:
+            try:
+                repository.require_thread(
+                    request.thread_id, request.owner_id, request.scope_type, request.scope_id
+                )
+            except (ThreadNotFoundError, ThreadScopeError) as exc:
+                raise HTTPException(status_code=404, detail="thread not found") from exc
+        return StreamingResponse(
+            runtime.stream_events(request),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
+    @app.post(
+        "/agent/threads/{thread_id}/archive", response_model=ThreadResponse,
+        dependencies=[Depends(require_internal_agent_token)],
+    )
     async def archive_thread(thread_id: str, owner_id: str = Query(alias="ownerId")) -> ThreadResponse:
         try:
             repository.archive_thread(thread_id, owner_id)
@@ -185,6 +233,40 @@ def create_app(
         except ThreadNotFoundError as exc:
             raise HTTPException(status_code=404, detail="thread not found") from exc
         return _thread_response(runtime, record)
+
+    @app.post(
+        "/llm/agent/answer",
+        dependencies=[Depends(require_internal_agent_token)],
+    )
+    async def answer_agent(payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        return await build_agent_answer(payload or {}, model)
+
+    @app.post(
+        "/llm/agent/run",
+        dependencies=[Depends(require_internal_agent_token)],
+    )
+    async def run_legacy_agent(payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        try:
+            return legacy_runtime.run(payload or {})
+        except ValidationError as exception:
+            raise HTTPException(status_code=422, detail=exception.errors()) from exception
+        except ValueError as exception:
+            raise HTTPException(status_code=409, detail=str(exception)) from exception
+
+    @app.post(
+        "/llm/agent/stream",
+        dependencies=[Depends(require_internal_agent_token)],
+    )
+    async def stream_legacy_agent(payload: dict[str, Any] | None = None) -> StreamingResponse:
+        return StreamingResponse(
+            legacy_runtime.stream_events(payload or {}),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
 
     # Legacy deterministic routes. They deliberately remain one-shot and do not share Agent state.
     @app.post("/llm/town/explain")

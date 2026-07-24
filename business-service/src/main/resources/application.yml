@@ -28,6 +28,16 @@ logging:
     com.redculture.platform.mapper: debug
 
 app:
+  auth:
+    jwt-secret: ${APP_AUTH_JWT_SECRET:red-culture-development-jwt-secret-change-me}
+    access-token-ttl-seconds: ${APP_AUTH_ACCESS_TTL_SECONDS:900}
+    refresh-token-ttl-seconds: ${APP_AUTH_REFRESH_TTL_SECONDS:604800}
+    cookie-secure: ${APP_AUTH_COOKIE_SECURE:false}
+    cookie-same-site: ${APP_AUTH_COOKIE_SAMESITE:Lax}
+    access-cookie-name: ${APP_AUTH_ACCESS_COOKIE_NAME:RC_ACCESS_TOKEN}
+    refresh-cookie-name: ${APP_AUTH_REFRESH_COOKIE_NAME:RC_REFRESH_TOKEN}
+    csrf-cookie-name: ${APP_AUTH_CSRF_COOKIE_NAME:XSRF-TOKEN}
+    csrf-header-name: ${APP_AUTH_CSRF_HEADER_NAME:X-CSRF-TOKEN}
   admin:
     username: ${APP_ADMIN_USERNAME:admin}
     password: ${APP_ADMIN_PASSWORD:admin123456}
@@ -41,7 +51,8 @@ app:
     amap-web-service-base-url: ${AMAP_WEB_SERVICE_BASE_URL:https://restapi.amap.com}
     llm-service-base-url: ${LLM_SERVICE_BASE_URL:http://127.0.0.1:5050}
   agent:
-    internal-service-token: ${AGENT_INTERNAL_SERVICE_TOKEN:}
+    internal-service-token: ${AGENT_INTERNAL_SERVICE_TOKEN:red-culture-agent-development-token-change-me}
+    runtime-mode: ${AGENT_RUNTIME_MODE:stateful}
     connect-timeout-ms: ${AGENT_CONNECT_TIMEOUT_MS:3000}
     read-timeout-ms: ${AGENT_READ_TIMEOUT_MS:30000}
     stream-timeout-ms: ${AGENT_STREAM_TIMEOUT_MS:65000}

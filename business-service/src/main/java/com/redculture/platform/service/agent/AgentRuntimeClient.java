@@ -10,6 +10,7 @@ import com.redculture.platform.vo.AuthCurrentUserVO;
 import com.redculture.platform.vo.ai.AgentRuntimeRequest;
 import com.redculture.platform.vo.ai.AgentRuntimeResponse;
 import com.redculture.platform.vo.request.AgentQaRequest;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.stereotype.Component;
@@ -35,6 +36,7 @@ public class AgentRuntimeClient {
     private final RestClient restClient;
     private final ObjectMapper objectMapper;
     private final AppMapProperties appMapProperties;
+    private final String internalServiceToken;
 
     public AgentRuntimeClient(AppMapProperties appMapProperties,
                               AgentProperties agentProperties,
@@ -45,11 +47,13 @@ public class AgentRuntimeClient {
                 .build();
         this.objectMapper = objectMapper;
         this.appMapProperties = appMapProperties;
+        this.internalServiceToken = agentProperties.getInternalServiceToken();
     }
 
     public AgentRuntimeResponse run(AgentRuntimeRequest request) {
         AgentRuntimeResponse response = restClient.post()
                 .uri("/llm/agent/run")
+                .headers(this::applyInternalServiceToken)
                 .contentType(MediaType.APPLICATION_JSON)
                 .accept(MediaType.APPLICATION_JSON)
                 .body(request)
@@ -69,19 +73,11 @@ public class AgentRuntimeClient {
                 || !StringUtils.hasText(appMapProperties.getLlmServiceBaseUrl())) {
             return null;
         }
-        Map<String, Object> body = new LinkedHashMap<>();
-        body.put("ownerId", ownerId(user));
-        body.put("scopeType", context.getScopeType().name());
-        body.put("scopeId", context.getScopeId());
-        body.put("threadId", request.getThreadId());
-        body.put("message", context.getQuestion());
-        body.put("grade", context.getGrade());
-        body.put("theme", context.getTheme());
-        body.put("intent", context.getIntent() == null ? null : context.getIntent().name());
-        body.put("context", trustedContext(context));
+        Map<String, Object> body = statefulBody(request, user, context);
         try {
             StatefulAgentRuntimeResponse response = restClient.post()
                     .uri("/agent/messages")
+                    .headers(this::applyInternalServiceToken)
                     .contentType(MediaType.APPLICATION_JSON)
                     .accept(MediaType.APPLICATION_JSON)
                     .body(body)
@@ -111,9 +107,32 @@ public class AgentRuntimeClient {
         }
     }
 
+    /** Calls the stateful SSE endpoint after Java has resolved authorization and trusted context. */
+    public void streamStateful(AgentQaRequest request,
+                               AuthCurrentUserVO user,
+                               AgentAnswerContext context,
+                               Consumer<StreamEvent> consumer) {
+        restClient.post()
+                .uri("/agent/messages/stream")
+                .headers(this::applyInternalServiceToken)
+                .contentType(MediaType.APPLICATION_JSON)
+                .accept(MediaType.TEXT_EVENT_STREAM)
+                .body(statefulBody(request, user, context))
+                .exchange((clientRequest, clientResponse) -> {
+                    if (!clientResponse.getStatusCode().is2xxSuccessful()) {
+                        throw new IllegalStateException(
+                                "stateful agent stream HTTP " + clientResponse.getStatusCode().value()
+                        );
+                    }
+                    readEvents(clientResponse.getBody(), consumer);
+                    return null;
+                });
+    }
+
     public void stream(AgentRuntimeRequest request, Consumer<StreamEvent> consumer) {
         restClient.post()
                 .uri("/llm/agent/stream")
+                .headers(this::applyInternalServiceToken)
                 .contentType(MediaType.APPLICATION_JSON)
                 .accept(MediaType.TEXT_EVENT_STREAM)
                 .body(request)
@@ -133,6 +152,28 @@ public class AgentRuntimeClient {
             return "account:" + user.getAccountId();
         }
         return "username:" + (user.getUsername() == null ? "unknown" : user.getUsername());
+    }
+
+    private Map<String, Object> statefulBody(AgentQaRequest request,
+                                             AuthCurrentUserVO user,
+                                             AgentAnswerContext context) {
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("ownerId", ownerId(user));
+        body.put("scopeType", context.getScopeType().name());
+        body.put("scopeId", context.getScopeId());
+        body.put("threadId", request.getThreadId());
+        body.put("message", context.getQuestion());
+        body.put("grade", context.getGrade());
+        body.put("theme", context.getTheme());
+        body.put("intent", context.getIntent() == null ? null : context.getIntent().name());
+        body.put("context", trustedContext(context));
+        return body;
+    }
+
+    private void applyInternalServiceToken(HttpHeaders headers) {
+        if (StringUtils.hasText(internalServiceToken)) {
+            headers.set("X-Agent-Service-Token", internalServiceToken);
+        }
     }
 
     private Map<String, Object> trustedContext(AgentAnswerContext context) {

@@ -62,22 +62,61 @@ class AgentSettings:
         legacy_api_url = settings.llm_api_url.strip()
         legacy_base_url = settings.openai_base_url.strip()
         legacy_key = settings.llm_api_key.strip()
-        primary_provider = settings.agent_primary_provider.strip() or "openai-compatible"
-        primary_model = settings.agent_primary_model.strip() or settings.llm_model.strip()
-        primary_base_url = settings.agent_primary_base_url.strip() or legacy_api_url or legacy_base_url
+        primary_provider = (
+            settings.agent_primary_provider.strip()
+            or settings.primary_provider.strip()
+            or settings.llm_provider.strip()
+            or "openai-compatible"
+        )
+        primary_model = (
+            settings.agent_primary_model.strip()
+            or settings.primary_model.strip()
+            or settings.llm_model.strip()
+        )
+        primary_base_url = (
+            settings.agent_primary_base_url.strip()
+            or settings.primary_base_url.strip()
+            or legacy_api_url
+            or legacy_base_url
+        )
         if not primary_base_url and primary_provider.lower() == "bailian":
             primary_base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-        fallback_provider = settings.agent_fallback_provider.strip()
-        fallback_model = settings.agent_fallback_model.strip()
-        fallback_base_url = settings.agent_fallback_base_url.strip()
-        fallback_api_key = settings.agent_fallback_api_key.strip()
+        fallback_provider = (
+            settings.agent_fallback_provider.strip()
+            or settings.fallback_provider.strip()
+            or settings.llm_fallback_provider.strip()
+        )
+        fallback_model = (
+            settings.agent_fallback_model.strip()
+            or settings.fallback_model.strip()
+            or settings.llm_fallback_model.strip()
+        )
+        fallback_base_url = (
+            settings.agent_fallback_base_url.strip()
+            or settings.fallback_base_url.strip()
+            or settings.llm_fallback_api_url.strip()
+        )
+        fallback_api_key = (
+            settings.agent_fallback_api_key.strip()
+            or settings.fallback_api_key.strip()
+            or settings.llm_fallback_api_key.strip()
+        )
         if fallback_provider.lower() == "ollama":
             fallback_base_url = fallback_base_url or "http://127.0.0.1:11434/v1"
             fallback_api_key = fallback_api_key or "ollama"
         lightweight_provider = settings.agent_lightweight_provider.strip() or "ollama"
-        lightweight_model = settings.agent_lightweight_model.strip()
-        lightweight_base_url = settings.agent_lightweight_base_url.strip()
-        lightweight_api_key = settings.agent_lightweight_api_key.strip()
+        lightweight_model = (
+            settings.agent_lightweight_model.strip()
+            or settings.llm_lightweight_model.strip()
+        )
+        lightweight_base_url = (
+            settings.agent_lightweight_base_url.strip()
+            or settings.llm_lightweight_api_url.strip()
+        )
+        lightweight_api_key = (
+            settings.agent_lightweight_api_key.strip()
+            or settings.llm_lightweight_api_key.strip()
+        )
         if lightweight_provider.lower() == "ollama" and lightweight_model:
             lightweight_base_url = lightweight_base_url or "http://127.0.0.1:11434/v1"
             lightweight_api_key = lightweight_api_key or "ollama"

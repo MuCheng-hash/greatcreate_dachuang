@@ -358,12 +358,42 @@ function setGlobalStatus(title, hint) {
     }
 }
 
-async function requestJson(url, options = {}) {
-    const config = { ...options };
-    const headers = { Accept: "application/json", ...(config.headers || {}) };
+function readCsrfToken() {
+    const item = document.cookie.split(";").map(value => value.trim()).find(value => value.startsWith("XSRF-TOKEN="));
+    if (!item) return "";
+    try { return decodeURIComponent(item.slice("XSRF-TOKEN=".length)); } catch { return item.slice("XSRF-TOKEN=".length); }
+}
+
+function waitForRetry(delayMs) {
+    return new Promise(resolve => window.setTimeout(resolve, delayMs));
+}
+
+async function refreshAuthCookies() {
+    try {
+        const response = await fetch("/api/auth/refresh", {
+            method: "POST",
+            credentials: "include",
+            headers: { Accept: "application/json" }
+        });
+        const data = await response.json();
+        return response.ok && data?.code === 200;
+    } catch {
+        return false;
+    }
+}
+
+async function requestJson(url, options = {}, state = { refreshAttempted: false, retries: 0 }) {
+    const config = { ...options, credentials: "include" };
+    const method = String(config.method || "GET").toUpperCase();
+    const headers = new Headers(config.headers || {});
+    headers.set("Accept", headers.get("Accept") || "application/json");
     if (config.body !== undefined) {
-        headers["Content-Type"] = "application/json";
-        config.body = JSON.stringify(config.body);
+        headers.set("Content-Type", headers.get("Content-Type") || "application/json");
+        if (typeof config.body !== "string") config.body = JSON.stringify(config.body);
+    }
+    if (["POST", "PUT", "PATCH", "DELETE"].includes(method)) {
+        const csrfToken = readCsrfToken();
+        if (csrfToken) headers.set("X-CSRF-TOKEN", csrfToken);
     }
     config.headers = headers;
 
@@ -371,7 +401,18 @@ async function requestJson(url, options = {}) {
     try {
         response = await fetch(url, config);
     } catch (error) {
+        if (method === "GET" && state.retries < 2) {
+            await waitForRetry(200 * 2 ** state.retries);
+            return requestJson(url, options, { ...state, retries: state.retries + 1 });
+        }
         throw new Error("后台服务不可达，请从 http://localhost:8080/admin.html 打开页面，并确认业务服务已启动。");
+    }
+
+    if (response.status === 401 && !state.refreshAttempted && url !== "/api/auth/refresh") {
+        if (await refreshAuthCookies()) {
+            return requestJson(url, options, { ...state, refreshAttempted: true });
+        }
+        window.dispatchEvent(new CustomEvent("portal:unauthorized"));
     }
 
     let data;
@@ -379,6 +420,11 @@ async function requestJson(url, options = {}) {
         data = await response.json();
     } catch (error) {
         throw new Error(`后台服务返回了无法解析的响应（HTTP ${response.status}）。`);
+    }
+
+    if (method === "GET" && state.retries < 2 && ([408, 429].includes(response.status) || response.status >= 500)) {
+        await waitForRetry(200 * 2 ** state.retries);
+        return requestJson(url, options, { ...state, retries: state.retries + 1 });
     }
 
     if (!response.ok || data.code !== 200) {

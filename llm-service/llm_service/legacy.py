@@ -293,6 +293,121 @@ async def build_resource_discovery_classification(payload: dict[str, Any], model
     return generated
 
 
+def agent_evidence_citation_ids(payload: dict[str, Any]) -> list[str]:
+    retrieval = payload.get("retrievalResult") or {}
+    values: list[str] = []
+    for key in ("citationCandidates", "chunks", "graphFacts"):
+        items = retrieval.get(key) or []
+        values.extend(
+            item.get("citationId")
+            for item in items
+            if isinstance(item, dict) and item.get("citationId")
+        )
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        citation_id = str(value).strip()
+        if citation_id and citation_id not in seen:
+            result.append(citation_id)
+            seen.add(citation_id)
+        if len(result) >= 8:
+            break
+    return result
+
+
+def build_agent_answer_prompt(payload: dict[str, Any]) -> str:
+    scope = payload.get("scope") or {}
+    business = payload.get("businessContext") or {}
+    retrieval = payload.get("retrievalResult") or {}
+    context = {
+        "question": payload.get("question") or "",
+        "intent": payload.get("intent") or "UNKNOWN",
+        "scope": scope,
+        "grade": payload.get("grade"),
+        "theme": payload.get("theme"),
+        "businessContext": {
+            "school": business.get("school"),
+            "resources": (business.get("resources") or [])[:8],
+            "activityPlans": (business.get("activityPlans") or [])[:6],
+            "resource": business.get("resource"),
+            "matchedResource": business.get("matchedResource"),
+        },
+        "evidence": {
+            "chunks": (retrieval.get("chunks") or [])[:8],
+            "graphFacts": (retrieval.get("graphFacts") or [])[:8],
+            "citationCandidateIds": agent_evidence_citation_ids(payload),
+        },
+    }
+    return (
+        "你是学校本土思政教育 Agent 的答案生成器。只能依据给定的业务上下文和检索证据回答，"
+        "不能编造学校、资源、人物、来源或引用。请只输出严格 JSON，字段必须包含 answer、"
+        "citationIds、relatedResources、followUpQuestions。citationIds 只能使用 evidence 中的值。"
+        f"\n上下文：{json.dumps(context, ensure_ascii=False)}"
+    )
+
+
+def build_agent_answer_fallback(payload: dict[str, Any], message: str | None = None) -> dict[str, Any]:
+    scope = payload.get("scope") or {}
+    business = payload.get("businessContext") or {}
+    question = payload.get("question") or "当前问题"
+    school = business.get("school") or {}
+    school_name = school.get("schoolName") or scope.get("name") or "当前学校"
+    resources = business.get("resources") or []
+    names = [
+        (item.get("resource") or {}).get("resourceName")
+        for item in resources
+        if isinstance(item, dict)
+        and isinstance(item.get("resource"), dict)
+        and (item.get("resource") or {}).get("resourceName")
+    ]
+    intent = payload.get("intent") or "UNKNOWN"
+    if intent == "NEARBY_RESOURCE":
+        answer = (
+            f"围绕“{question}”，{school_name}当前查询到 {len(names)} 个已关联周边资源。"
+            f"可以优先从{('、'.join(names[:5]) if names else '已审核的本土教育资源')}中，"
+            "结合学生年级、距离和活动主题进行选择。"
+        )
+    elif intent == "TEACHING_SUGGESTION":
+        answer = f"可以围绕{school_name}周边资源设计“课堂导入、现场观察、实践体验、反思展示”的活动闭环。"
+    elif intent == "RESOURCE_EXPLANATION":
+        answer = f"当前可以结合{school_name}的周边资源和检索证据，进一步说明资源背景、教育价值及适用年级。"
+    elif intent == "RELATION_QUERY":
+        answer = f"当前可以依据{school_name}的学校、资源和图谱关系证据，回答具体人物、学校与资源之间的关联。"
+    else:
+        answer = "请补充具体学校、资源或教学问题，我会结合已授权的业务数据进行回答。"
+    return {
+        "answer": answer,
+        "citationIds": agent_evidence_citation_ids(payload)[:5],
+        "relatedResources": names[:5],
+        "followUpQuestions": [
+            f"{school_name}有哪些资源适合四年级学生？",
+            f"如何利用{school_name}周边资源设计一次实践活动？",
+        ],
+        "generationStatus": "degraded",
+        "message": message or "当前使用 LLM 服务本地结构化兜底结果。",
+    }
+
+
+async def build_agent_answer(payload: dict[str, Any], model: ModelGateway) -> dict[str, Any]:
+    generated = await model.generate_json(build_agent_answer_prompt(payload))
+    available_ids = set(agent_evidence_citation_ids(payload))
+    if isinstance(generated, dict) and generated.get("answer"):
+        raw_ids = generated.get("citationIds") or []
+        citation_ids = [
+            str(item) for item in raw_ids
+            if item is not None and str(item) in available_ids
+        ] if isinstance(raw_ids, list) else []
+        return {
+            "answer": str(generated.get("answer")),
+            "citationIds": compact_list(citation_ids, 5),
+            "relatedResources": compact_list(generated.get("relatedResources") or [], 8),
+            "followUpQuestions": compact_list(generated.get("followUpQuestions") or [], 4),
+            "generationStatus": "completed",
+            "message": "已根据受控业务上下文和检索证据生成回答。",
+        }
+    return build_agent_answer_fallback(payload, "真实 LLM 未配置或响应不可用，已使用本地兜底回答。")
+
+
 def build_map_answer(payload: dict[str, Any], school_mode: bool, ask_mode: bool) -> dict[str, Any]:
     if school_mode:
         school = payload.get("school") or {}

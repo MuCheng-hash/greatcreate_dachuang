@@ -12,7 +12,7 @@ from .observability import (
     LlmTraceContext,
     classify_llm_error,
 )
-from .settings import LlmModelTarget, Settings
+from .settings import LlmModelTarget, ModelConfig, Settings
 
 
 def message_text(content: Any) -> str:
@@ -45,15 +45,55 @@ class ModelGateway:
         self.chat_model = self.chat_models[0][1] if self.chat_models else None
 
     def _build_model(self, target: LlmModelTarget) -> ChatOpenAI:
-        return ChatOpenAI(
-            model=target.model,
-            api_key=target.api_key,
-            base_url=target.base_url,
-            timeout=self.settings.llm_timeout_seconds,
-            max_retries=self.settings.llm_max_retries,
-            temperature=self.settings.llm_temperature,
-            stream_usage=True,
+        kwargs: dict[str, Any] = {
+            "model": target.model,
+            "api_key": target.api_key,
+            "timeout": self.settings.llm_timeout_seconds,
+            "max_retries": self.settings.llm_max_retries,
+            "temperature": self.settings.llm_temperature,
+            "stream_usage": True,
+        }
+        if target.base_url:
+            kwargs["base_url"] = target.base_url
+        if target.provider.strip().lower() == "ollama":
+            kwargs["reasoning_effort"] = "none"
+            kwargs["max_tokens"] = self.settings.llm_max_output_tokens
+        return ChatOpenAI(**kwargs)
+
+    @property
+    def model(self) -> ChatOpenAI | None:
+        """兼容旧调用方的模型访问属性。"""
+        return self.chat_model
+
+    def model_configs(self) -> tuple[ModelConfig, ...]:
+        return tuple(
+            ModelConfig(
+                provider=target.provider,
+                model=target.model,
+                base_url=target.base_url,
+                api_key=target.api_key,
+                fallback_level=target.fallback_level,
+            )
+            for target, _model in self.chat_models
         )
+
+    def build_model(self, config: ModelConfig) -> ChatOpenAI:
+        for target, model in self.chat_models:
+            if target.model == config.model and target.fallback_level == config.fallback_level:
+                return model
+        target = LlmModelTarget(
+            role="fallback" if config.fallback_level == 1 else (
+                "lightweight" if config.fallback_level >= 2 else "primary"
+            ),
+            provider=config.provider,
+            model=config.model,
+            api_url=config.base_url,
+            api_key=config.api_key,
+            fallback_level=config.fallback_level,
+        )
+        model = self._build_model(target)
+        self.chat_models.append((target, model))
+        return model
 
     async def generate_json(
         self,

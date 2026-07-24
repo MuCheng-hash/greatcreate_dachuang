@@ -15,6 +15,9 @@ python app.py
 
 The default address is `http://127.0.0.1:5050`.
 
+项目只保留一个 FastAPI 应用：`app.py` 是兼容启动命令的薄壳，实际应用工厂为
+`llm_service.api:create_app`。不要再启动另一个独立的 Agent 进程。
+
 ## Configuration
 
 | Variable | Default | Purpose |
@@ -25,8 +28,11 @@ The default address is `http://127.0.0.1:5050`.
 | `LLM_API_KEY` | empty | Provider credential |
 | `LLM_MODEL` | `qwen-plus` | Provider model name |
 | `LLM_TIMEOUT_SECONDS` | `20` | Model request timeout |
+| `LLM_MAX_OUTPUT_TOKENS` | `512` | Ollama fallback maximum output tokens |
 | `DATABASE_PATH` | `data/agent-state.sqlite3` | Durable local conversation store |
 | `PROMPT_ADMIN_TOKEN` | empty | Required token for prompt-management APIs |
+| `OBSERVABILITY_ADMIN_TOKEN` | empty | Required token for observability APIs |
+| `AGENT_INTERNAL_SERVICE_TOKEN` | empty | Internal token for Agent thread/message APIs |
 | `ALLOWED_ORIGINS` | empty | Comma-separated browser origins; empty means no CORS middleware |
 | `AGENT_CONTEXT_TOKEN_BUDGET` | `6000` | Approximate input budget |
 | `AGENT_MAX_TOOL_ROUNDS` | `6` | Maximum model/tool loop rounds |
@@ -82,6 +88,10 @@ Content-Type: application/json
 
 The response contains `threadId`, `status`, `citations`, `toolExecutions`, related resources, and follow-up questions. Reuse the returned `threadId` for subsequent turns. The public Spring endpoint remains `/api/ai/qa/ask`; Spring supplies the authenticated owner and trusted context before calling this service.
 
+流式问答使用 `POST /agent/messages/stream`，事件统一为
+`run.started`、`model.started`、`tool.started`、`tool.completed`、`token`、`final`、`error`、`done`。
+调用 Agent 接口时应携带 `X-Agent-Service-Token`；服务端不会信任外部请求伪造的 `ownerId` 或学校范围。
+
 ## Legacy workflows
 
 These deterministic routes remain compatible during migration:
@@ -95,6 +105,7 @@ These deterministic routes remain compatible during migration:
 - `POST /llm/agent/stream`
 - `POST /llm/teaching-plan/generate`
 - `POST /llm/teaching-plan/generate/stream`（SSE：`meta`、`token`、`result`、`done`）
+- `POST /llm/resource-discovery/classify`
 - `GET /health/live`
 - `GET /health/ready`
 
@@ -103,8 +114,6 @@ LangChain Agent，根据受控工具结果生成结构化答案；`/llm/agent/st
 返回运行、工具、模型和最终结果事件。Agent 不执行 SQL 或 Cypher，引用只能来自
 工具返回的证据。未配置真实模型或模型响应不可用时，接口返回
 `generationStatus=degraded` 和本地结构化兜底答案。
-- `POST /llm/resource-discovery/classify`
-
 Teaching-plan generation and POI classification are structured workflows, not open-ended conversations. They use the same asynchronous LangChain model adapter and retain local fallbacks.
 
 ## Prompt 管理与效果评估

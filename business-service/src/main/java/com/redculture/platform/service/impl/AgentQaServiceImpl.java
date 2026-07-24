@@ -42,6 +42,7 @@ import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -138,7 +139,7 @@ public class AgentQaServiceImpl implements AgentQaService {
             throw new IllegalArgumentException("school account is required");
         }
 
-        if (agentRuntimeClient != null) {
+        if (agentRuntimeClient != null && agentProperties.isLegacyRuntime()) {
             try {
                 return askWithAgentRuntime(request, currentUser);
             } catch (IllegalArgumentException exception) {
@@ -148,7 +149,7 @@ public class AgentQaServiceImpl implements AgentQaService {
             }
         }
 
-        return askWithLegacyPipeline(request, currentUser);
+        return askWithLegacyPipeline(request, currentUser, !agentProperties.isLegacyRuntime());
     }
 
     @Override
@@ -172,16 +173,19 @@ public class AgentQaServiceImpl implements AgentQaService {
             return emitter;
         }
 
-        if (agentRuntimeClient == null) {
-            startLegacyStream(emitter, request, currentUser);
+        if (agentRuntimeClient == null || agentProperties.isLegacyRuntime()) {
+            startLegacyStream(emitter, request, currentUser, false);
             return emitter;
         }
 
-        AgentRuntimeRequest runtimeRequest = toRuntimeRequest(
-                request,
-                currentUser,
-                new Scope(scopeResolution.type(), scopeResolution.id())
-        );
+        String question = request.getQuestion().trim();
+        AgentIntent intent = intentRecognizer.recognize(question);
+        if (intent == AgentIntent.UNKNOWN) {
+            startLegacyStream(emitter, request, currentUser, false);
+            return emitter;
+        }
+        Scope scope = new Scope(scopeResolution.type(), scopeResolution.id());
+        AgentAnswerContext context = buildAgentContext(request, currentUser, question, intent, scope);
         AtomicBoolean finished = new AtomicBoolean(false);
         AtomicReference<Thread> workerRef = new AtomicReference<>();
         Runnable cancelWorker = () -> {
@@ -200,11 +204,15 @@ public class AgentQaServiceImpl implements AgentQaService {
         Thread thread = new Thread(() -> {
             boolean[] upstreamDone = {false};
             try {
-                agentRuntimeClient.stream(runtimeRequest, event -> {
+                agentRuntimeClient.streamStateful(request, currentUser, context, event -> {
                     if ("done".equals(event.event())) {
                         upstreamDone[0] = true;
                     }
-                    sendEvent(emitter, event.event(), event.safeData());
+                    Map<String, Object> data = event.safeData();
+                    if ("final".equals(event.event())) {
+                        data = normalizeStatefulFinalEvent(data, request, context);
+                    }
+                    sendEvent(emitter, event.event(), data);
                 });
                 if (!upstreamDone[0]) {
                     sendEvent(emitter, "done", Collections.emptyMap());
@@ -215,13 +223,9 @@ public class AgentQaServiceImpl implements AgentQaService {
                 if (isClientDisconnected(exception)) {
                     return;
                 }
-                finished.set(true);
-                sendEvent(emitter, "error", Map.of(
-                        "errorType", "agent_runtime_error",
-                        "message", exception.getMessage() == null ? "agent stream failed" : exception.getMessage()
-                ));
-                sendEvent(emitter, "done", Collections.emptyMap());
-                emitter.completeWithError(exception);
+                // Stateful FastAPI 不可用时退回本地 Java 生成链路，仍然保持流式协议。
+                startLegacyStream(emitter, request, currentUser, false);
+                return;
             } finally {
                 finished.set(true);
             }
@@ -343,12 +347,13 @@ public class AgentQaServiceImpl implements AgentQaService {
 
     private void startLegacyStream(SseEmitter emitter,
                                    AgentQaRequest request,
-                                   AuthCurrentUserVO currentUser) {
+                                   AuthCurrentUserVO currentUser,
+                                   boolean useStatefulRuntime) {
         Thread thread = new Thread(() -> {
             String runId = java.util.UUID.randomUUID().toString();
             try {
                 sendEvent(emitter, "run.started", Map.of("runId", runId));
-                AgentQaResponse response = askWithLegacyPipeline(request, currentUser);
+                AgentQaResponse response = askWithLegacyPipeline(request, currentUser, useStatefulRuntime);
                 response.setRunId(runId);
                 if (!StringUtils.hasText(response.getConversationId())) {
                     response.setConversationId(StringUtils.hasText(request.getConversationId())
@@ -378,6 +383,116 @@ public class AgentQaServiceImpl implements AgentQaService {
         thread.start();
     }
 
+    private Map<String, Object> normalizeStatefulFinalEvent(Map<String, Object> eventData,
+                                                             AgentQaRequest request,
+                                                             AgentAnswerContext context) {
+        Map<String, Object> normalized = new LinkedHashMap<>(eventData);
+        Object rawResponse = eventData.get("response");
+        Map<?, ?> responseMap = rawResponse instanceof Map<?, ?> map ? map : Collections.emptyMap();
+        AgentQaResponse response = new AgentQaResponse();
+        String answer = textValue(responseMap.get("answer"));
+        response.setAnswer(StringUtils.hasText(answer) ? answer : "暂时无法生成有效回答。");
+        response.setThreadId(firstText(responseMap.get("threadId"), eventData.get("threadId")));
+        response.setStatus(firstText(responseMap.get("status"), "degraded"));
+        response.setRunId(textValue(eventData.get("runId")));
+        response.setConversationId(request.getConversationId());
+        response.setIntent(context.getIntent());
+        response.setScopeType(context.getScopeType());
+        response.setScopeId(context.getScopeId());
+
+        KnowledgeRetrieveResult retrieval = context.getRetrieval() == null
+                ? KnowledgeRetrieveResult.empty() : context.getRetrieval();
+        response.setRetrievalStatus(retrieval.getRetrievalStatus());
+        AgentGenerationStatus generationStatus = "completed".equalsIgnoreCase(response.getStatus())
+                ? AgentGenerationStatus.COMPLETED : AgentGenerationStatus.DEGRADED;
+        response.setGenerationStatus(generationStatus);
+
+        List<String> citationIds = citationIds(responseMap.get("citations"));
+        List<String> followUps = textList(responseMap.get("followUpQuestions"));
+        GeneratedAnswer generated = new GeneratedAnswer(
+                response.getAnswer(), citationIds, followUps, generationStatus
+        );
+        response.setCitations(validatedCitations(generated, retrieval));
+        response.setRelatedResources(textList(responseMap.get("relatedResources")));
+        response.setFollowUpQuestions(followUps);
+        response.setToolExecutions(toolNames(responseMap.get("toolExecutions")));
+        normalized.put("threadId", response.getThreadId());
+        normalized.put("response", response);
+        return normalized;
+    }
+
+    private List<String> citationIds(Object value) {
+        if (!(value instanceof List<?> values)) {
+            return new ArrayList<>();
+        }
+        List<String> ids = new ArrayList<>();
+        for (Object item : values) {
+            if (item instanceof Map<?, ?> map) {
+                String id = textValue(map.get("citationId"));
+                if (StringUtils.hasText(id)) {
+                    ids.add(id);
+                }
+            } else if (item instanceof String id && StringUtils.hasText(id)) {
+                ids.add(id);
+            }
+        }
+        return ids;
+    }
+
+    private List<String> toolNames(Object value) {
+        if (!(value instanceof List<?> values)) {
+            return new ArrayList<>();
+        }
+        List<String> names = new ArrayList<>();
+        for (Object item : values) {
+            if (item instanceof Map<?, ?> map) {
+                String name = firstText(map.get("name"), map.get("toolName"));
+                if (StringUtils.hasText(name)) {
+                    names.add(name);
+                }
+            } else if (item instanceof String name && StringUtils.hasText(name)) {
+                names.add(name);
+            }
+        }
+        return names;
+    }
+
+    private List<String> textList(Object value) {
+        if (!(value instanceof List<?> values)) {
+            return new ArrayList<>();
+        }
+        return values.stream()
+                .map(this::textValue)
+                .filter(StringUtils::hasText)
+                .toList();
+    }
+
+    private String firstText(Object first, Object fallback) {
+        String value = textValue(first);
+        return StringUtils.hasText(value) ? value : textValue(fallback);
+    }
+
+    private String textValue(Object value) {
+        return value == null ? null : String.valueOf(value);
+    }
+
+    private AgentAnswerContext buildAgentContext(AgentQaRequest request,
+                                                 AuthCurrentUserVO currentUser,
+                                                 String question,
+                                                 AgentIntent intent,
+                                                 Scope scope) {
+        AgentAnswerContext context = new AgentAnswerContext();
+        context.setQuestion(question);
+        context.setIntent(intent);
+        context.setScopeType(scope.type());
+        context.setScopeId(scope.id());
+        context.setGrade(resolveGrade(request.getGrade(), question));
+        context.setTheme(clean(request.getTheme()));
+        loadBusinessContext(context);
+        context.setRetrieval(retrieve(context, request.getTopK()));
+        return context;
+    }
+
     private void sendEvent(SseEmitter emitter, String eventName, Object data) {
         try {
             emitter.send(SseEmitter.event().name(eventName).data(data));
@@ -392,7 +507,9 @@ public class AgentQaServiceImpl implements AgentQaService {
                 || (message != null && message.contains("client disconnected"));
     }
 
-    private AgentQaResponse askWithLegacyPipeline(AgentQaRequest request, AuthCurrentUserVO currentUser) {
+    private AgentQaResponse askWithLegacyPipeline(AgentQaRequest request,
+                                                  AuthCurrentUserVO currentUser,
+                                                  boolean useStatefulRuntime) {
 
         String question = request.getQuestion().trim();
         AgentIntent intent = intentRecognizer.recognize(question);
@@ -408,19 +525,11 @@ public class AgentQaServiceImpl implements AgentQaService {
         }
         Scope scope = scopeResolution.scope();
 
-        AgentAnswerContext context = new AgentAnswerContext();
-        context.setQuestion(question);
-        context.setIntent(intent);
-        context.setScopeType(scope.type());
-        context.setScopeId(scope.id());
-        context.setGrade(resolveGrade(request.getGrade(), question));
-        context.setTheme(clean(request.getTheme()));
-        loadBusinessContext(context);
+        AgentAnswerContext context = buildAgentContext(request, currentUser, question, intent, scope);
+        KnowledgeRetrieveResult retrieval = context.getRetrieval();
 
-        KnowledgeRetrieveResult retrieval = retrieve(context, request.getTopK());
-        context.setRetrieval(retrieval);
-
-        AgentRuntimeResult remote = agentRuntimeClient == null ? null : agentRuntimeClient.generate(request, currentUser, context);
+        AgentRuntimeResult remote = !useStatefulRuntime || agentRuntimeClient == null
+                ? null : agentRuntimeClient.generate(request, currentUser, context);
         GeneratedAnswer generated = remote == null ? null : remote.getAnswer();
         if (generated == null) {
             try {
@@ -456,6 +565,7 @@ public class AgentQaServiceImpl implements AgentQaService {
         response.setCitations(validatedCitations(generated, retrieval));
         response.setFollowUpQuestions(nonNullList(generated.getFollowUpQuestions()));
         response.setThreadId(remote == null ? request.getThreadId() : remote.getThreadId());
+        response.setConversationId(request.getConversationId());
         response.setStatus(remote == null ? "degraded" : remote.getStatus());
         response.setToolExecutions(remote == null ? new ArrayList<>() : nonNullList(remote.getToolExecutions()));
         return response;

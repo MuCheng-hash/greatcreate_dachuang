@@ -39,8 +39,24 @@ class LlmModelTarget:
         return value[: -len(suffix)] if value.endswith(suffix) else value
 
 
+@dataclass(frozen=True, slots=True)
+class ModelConfig:
+    """兼容 stateful Agent runtime 使用的模型配置视图。"""
+
+    provider: str
+    model: str
+    base_url: str
+    api_key: str
+    fallback_level: int = 0
+
+    def configured(self) -> bool:
+        return bool(self.model and self.api_key)
+
+
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_file=".env", extra="ignore", populate_by_name=True
+    )
 
     app_env: str = "dev"
     service_name: str = "red-culture-agent-service"
@@ -58,6 +74,7 @@ class Settings(BaseSettings):
     )
 
     llm_api_url: str = ""
+    llm_base_url: str = ""
     llm_api_key: str = ""
     llm_model: str = "qwen-plus"
     llm_provider: str = "openai-compatible"
@@ -72,6 +89,7 @@ class Settings(BaseSettings):
     llm_timeout_seconds: float = 20.0
     llm_max_retries: int = 1
     llm_temperature: float = 0.2
+    llm_max_output_tokens: int = 512
 
     internal_business_base_url: str = "http://127.0.0.1:8080"
     internal_service_token: str = Field(
@@ -82,7 +100,7 @@ class Settings(BaseSettings):
     health_check_timeout_seconds: float = 2.0
     require_llm_model: bool = False
 
-    agent_primary_provider: str = "openai-compatible"
+    agent_primary_provider: str = ""
     agent_primary_model: str = ""
     agent_primary_base_url: str = ""
     agent_primary_api_key: str = ""
@@ -97,6 +115,17 @@ class Settings(BaseSettings):
     agent_max_iterations: int = 4
     agent_max_history_messages: int = 20
     agent_prompt_version: str = "v1"
+
+    # 兼容早期 AGENT_* 配置对象和测试构造方式，统一模型链时会与上面的
+    # llm_*、agent_* 配置按优先级合并。
+    primary_provider: str = ""
+    primary_model: str = ""
+    primary_base_url: str = ""
+    primary_api_key: str = ""
+    fallback_provider: str = ""
+    fallback_model: str = ""
+    fallback_base_url: str = ""
+    fallback_api_key: str = ""
 
     agent_max_tool_rounds: int = 6
     agent_context_token_budget: int = 6000
@@ -189,25 +218,91 @@ class Settings(BaseSettings):
 
     @property
     def model_chain(self) -> tuple[LlmModelTarget, ...]:
+        primary_provider = (
+            self.agent_primary_provider.strip()
+            or self.primary_provider.strip()
+            or self.llm_provider.strip()
+            or "openai-compatible"
+        )
+        primary_model = (
+            self.agent_primary_model.strip()
+            or self.primary_model.strip()
+            or self.llm_model.strip()
+        )
+        primary_api_url = (
+            self.agent_primary_base_url.strip()
+            or self.primary_base_url.strip()
+            or self.llm_api_url.strip()
+            or self.llm_base_url.strip()
+        )
+        primary_api_key = (
+            self.agent_primary_api_key.strip()
+            or self.primary_api_key.strip()
+            or self.llm_api_key.strip()
+        )
+        if primary_provider.lower() == "bailian" and not primary_api_url:
+            primary_api_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+        if primary_provider.lower() == "ollama":
+            primary_api_url = primary_api_url or "http://127.0.0.1:11434/v1"
+            primary_api_key = primary_api_key or "ollama"
+
+        fallback_provider = (
+            self.agent_fallback_provider.strip()
+            or self.fallback_provider.strip()
+            or self.llm_fallback_provider.strip()
+            or "openai-compatible"
+        )
+        fallback_model = (
+            self.agent_fallback_model.strip()
+            or self.fallback_model.strip()
+            or self.llm_fallback_model.strip()
+        )
+        fallback_api_url = (
+            self.agent_fallback_base_url.strip()
+            or self.fallback_base_url.strip()
+            or self.llm_fallback_api_url.strip()
+        )
+        fallback_api_key = (
+            self.agent_fallback_api_key.strip()
+            or self.fallback_api_key.strip()
+            or self.llm_fallback_api_key.strip()
+        )
+        if fallback_provider.lower() == "ollama":
+            fallback_api_url = fallback_api_url or "http://127.0.0.1:11434/v1"
+            fallback_api_key = fallback_api_key or "ollama"
+
+        lightweight_provider = (
+            self.agent_lightweight_provider.strip()
+            or self.llm_lightweight_provider.strip()
+            or "ollama"
+        )
+        lightweight_model = (
+            self.agent_lightweight_model.strip() or self.llm_lightweight_model.strip()
+        )
+        lightweight_api_url = (
+            self.agent_lightweight_base_url.strip()
+            or self.llm_lightweight_api_url.strip()
+        )
+        lightweight_api_key = (
+            self.agent_lightweight_api_key.strip()
+            or self.llm_lightweight_api_key.strip()
+        )
+        if lightweight_provider.lower() == "ollama" and lightweight_model:
+            lightweight_api_url = lightweight_api_url or "http://127.0.0.1:11434/v1"
+            lightweight_api_key = lightweight_api_key or "ollama"
+
         targets = (
             LlmModelTarget(
-                "primary", self.llm_provider, self.llm_model,
-                self.llm_api_url, self.llm_api_key, 0,
+                "primary", primary_provider, primary_model,
+                primary_api_url, primary_api_key, 0,
             ),
             LlmModelTarget(
-                "fallback", self.llm_fallback_provider, self.llm_fallback_model,
-                self.llm_fallback_api_url, self.llm_fallback_api_key, 1,
+                "fallback", fallback_provider, fallback_model,
+                fallback_api_url, fallback_api_key, 1,
             ),
             LlmModelTarget(
-                "lightweight", self.llm_lightweight_provider, self.llm_lightweight_model,
-                self.llm_lightweight_api_url or (
-                    "http://127.0.0.1:11434/v1"
-                    if self.llm_lightweight_provider.lower() == "ollama"
-                    and self.llm_lightweight_model else ""
-                ),
-                self.llm_lightweight_api_key or (
-                    "ollama" if self.llm_lightweight_provider.lower() == "ollama" else ""
-                ),
+                "lightweight", lightweight_provider, lightweight_model,
+                lightweight_api_url, lightweight_api_key,
                 2,
             ),
         )
@@ -222,10 +317,22 @@ class Settings(BaseSettings):
 
     @property
     def openai_base_url(self) -> str:
-        return LlmModelTarget(
-            "primary", self.llm_provider, self.llm_model,
-            self.llm_api_url, self.llm_api_key, 0,
-        ).base_url
+        value = (self.llm_api_url or self.llm_base_url).rstrip("/")
+        suffix = "/chat/completions"
+        return value[: -len(suffix)] if value.endswith(suffix) else value
+
+    @property
+    def prompt_path(self) -> Path:
+        return self.prompt_root / "agent" / self.agent_prompt_version / "system.md"
+
+    def primary_model_configured(self) -> bool:
+        return any(target.fallback_level == 0 and target.configured for target in self.model_chain)
+
+    def fallback_model_configured(self) -> bool:
+        return any(target.fallback_level == 1 and target.configured for target in self.model_chain)
+
+    def lightweight_model_configured(self) -> bool:
+        return any(target.fallback_level == 2 and target.configured for target in self.model_chain)
 
 
 def load_settings() -> Settings:
