@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import hmac
 import secrets
 import sqlite3
@@ -9,16 +8,7 @@ from typing import Any
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse, StreamingResponse
-from pydantic import ValidationError
-
-from .legacy import build_agent_answer
 from .container import AppContainer, build_container
-from .legacy import (
-    build_map_answer,
-    build_resource_discovery_classification,
-    build_structured_teaching_plan,
-    stream_structured_teaching_plan,
-)
 from .observability import FallbackAlertManager, LlmObservability
 from .repository import ThreadNotFoundError, ThreadScopeError
 from .routes import health_router
@@ -60,7 +50,6 @@ def create_app(
     model = container.model_gateway
     prompts = container.prompts
     runtime = container.runtime
-    legacy_runtime = container.legacy_agent_runtime
     app = FastAPI(title="Red Culture Stateful Agent", version="2.0.0")
     app.state.container = container
     app.state.settings = settings
@@ -69,13 +58,14 @@ def create_app(
     app.state.prompts = prompts
     app.state.observability = observability
     app.state.alerts = alerts
-    app.state.legacy_runtime = legacy_runtime
 
     async def require_internal_agent_token(
         token: str | None = Header(default=None, alias="X-Agent-Service-Token"),
     ) -> None:
         expected = settings.internal_service_token.strip()
-        if expected and not secrets.compare_digest(token or "", expected):
+        if not expected:
+            raise HTTPException(status_code=503, detail="AGENT_INTERNAL_SERVICE_TOKEN is not configured")
+        if not secrets.compare_digest(token or "", expected):
             raise HTTPException(status_code=401, detail="agent service token is invalid")
 
     async def require_prompt_admin(x_prompt_admin_token: str = Header(default="")) -> None:
@@ -233,73 +223,6 @@ def create_app(
             raise HTTPException(status_code=404, detail="thread not found") from exc
         return _thread_response(runtime, record)
 
-    @app.post(
-        "/llm/agent/answer",
-        dependencies=[Depends(require_internal_agent_token)],
-    )
-    async def answer_agent(payload: dict[str, Any] | None = None) -> dict[str, Any]:
-        return await build_agent_answer(payload or {}, model)
-
-    @app.post(
-        "/llm/agent/run",
-        dependencies=[Depends(require_internal_agent_token)],
-    )
-    async def run_legacy_agent(payload: dict[str, Any] | None = None) -> dict[str, Any]:
-        try:
-            return legacy_runtime.run(payload or {})
-        except ValidationError as exception:
-            raise HTTPException(status_code=422, detail=exception.errors()) from exception
-        except ValueError as exception:
-            raise HTTPException(status_code=409, detail=str(exception)) from exception
-
-    @app.post(
-        "/llm/agent/stream",
-        dependencies=[Depends(require_internal_agent_token)],
-    )
-    async def stream_legacy_agent(payload: dict[str, Any] | None = None) -> StreamingResponse:
-        return StreamingResponse(
-            legacy_runtime.stream_events(payload or {}),
-            media_type="text/event-stream",
-            headers={
-                "Cache-Control": "no-cache",
-                "Connection": "keep-alive",
-                "X-Accel-Buffering": "no",
-            },
-        )
-
-    # Legacy deterministic routes. They deliberately remain one-shot and do not share Agent state.
-    @app.post("/llm/town/explain")
-    async def explain_town(payload: dict[str, Any]) -> dict[str, Any]:
-        return build_map_answer(payload, school_mode=False, ask_mode=False)
-
-    @app.post("/llm/town/ask")
-    async def ask_town(payload: dict[str, Any]) -> dict[str, Any]:
-        return build_map_answer(payload, school_mode=False, ask_mode=True)
-
-    @app.post("/llm/school/explain")
-    async def explain_school(payload: dict[str, Any]) -> dict[str, Any]:
-        return build_map_answer(payload, school_mode=True, ask_mode=False)
-
-    @app.post("/llm/school/ask")
-    async def ask_school(payload: dict[str, Any]) -> dict[str, Any]:
-        return build_map_answer(payload, school_mode=True, ask_mode=True)
-
-    @app.post("/llm/teaching-plan/generate")
-    async def generate_teaching_plan(payload: dict[str, Any]) -> dict[str, Any]:
-        return await build_structured_teaching_plan(payload, model, prompts)
-
-    @app.post("/llm/teaching-plan/generate/stream")
-    async def stream_teaching_plan(payload: dict[str, Any]) -> StreamingResponse:
-        async def events():
-            async for event_name, data in stream_structured_teaching_plan(payload, model, prompts):
-                yield f"event: {event_name}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
-
-        return StreamingResponse(
-            events(),
-            media_type="text/event-stream",
-            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-        )
-
     @app.get("/admin/prompts/{prompt_key}/versions")
     async def list_prompt_versions(
         prompt_key: str, _admin: None = Depends(require_prompt_admin)
@@ -379,10 +302,6 @@ def create_app(
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except LookupError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
-
-    @app.post("/llm/resource-discovery/classify")
-    async def classify_resource_discovery(payload: dict[str, Any]) -> dict[str, Any]:
-        return await build_resource_discovery_classification(payload, model)
 
     app.include_router(health_router)
     return app

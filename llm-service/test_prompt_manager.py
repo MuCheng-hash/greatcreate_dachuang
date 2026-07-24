@@ -54,6 +54,7 @@ def test_teaching_plan_stream_and_prompt_admin_api(tmp_path: Path):
         database_path=tmp_path / "service.sqlite3",
         prompt_root=PROMPT_ROOT,
         prompt_admin_token="admin-secret",
+        internal_service_token="agent-secret",
         llm_api_url="",
         llm_api_key="",
     )
@@ -72,15 +73,23 @@ def test_teaching_plan_stream_and_prompt_admin_api(tmp_path: Path):
 
         with client.stream(
             "POST",
-            "/llm/teaching-plan/generate/stream",
-            json={"request": {"schoolId": 1, "theme": "家乡文化", "grade": "四年级"}},
+            "/agent/messages/stream",
+            headers={"X-Agent-Service-Token": "agent-secret"},
+            json={
+                "ownerId": "account:1",
+                "scopeType": "SCHOOL",
+                "scopeId": 1,
+                "taskType": "TEACHING_PLAN",
+                "taskPayload": {"schoolId": 1, "theme": "家乡文化", "grade": "四年级"},
+                "message": "请生成结构化教学方案。",
+            },
         ) as response:
             body = "".join(response.iter_text())
 
         assert response.status_code == 200
-        assert "event: meta" in body
+        assert "event: run.started" in body
         assert "event: token" in body
-        assert "event: result" in body
+        assert "event: final" in body
         assert "event: done" in body
         assert '"promptVersion": "v1"' in body
 

@@ -30,7 +30,7 @@ The default address is `http://127.0.0.1:5050`.
 | `DATABASE_PATH` | `data/agent-state.sqlite3` | Durable local conversation store |
 | `PROMPT_ADMIN_TOKEN` | empty | Required token for prompt-management APIs |
 | `OBSERVABILITY_ADMIN_TOKEN` | empty | Required token for observability APIs |
-| `AGENT_INTERNAL_SERVICE_TOKEN` | empty | Internal token for Agent thread/message APIs |
+| `AGENT_INTERNAL_SERVICE_TOKEN` | empty | Required internal token for Agent thread/message APIs; missing configuration returns `503` |
 | `ALLOWED_ORIGINS` | empty | Comma-separated browser origins; empty means no CORS middleware |
 | `AGENT_CONTEXT_TOKEN_BUDGET` | `6000` | Approximate input budget |
 | `AGENT_MAX_TOOL_ROUNDS` | `6` | Maximum model/tool loop rounds |
@@ -75,33 +75,37 @@ The response contains `threadId`, `status`, `citations`, `toolExecutions`, relat
 `run.started`、`model.started`、`tool.started`、`tool.completed`、`token`、`final`、`error`、`done`。
 调用 Agent 接口时应携带 `X-Agent-Service-Token`；服务端不会信任外部请求伪造的 `ownerId` 或学校范围。
 
-## Legacy workflows
+## Unified task workflows
 
-These deterministic routes remain compatible during migration:
+FastAPI 只保留一套 Stateful Agent 接口族，所有任务共用线程持久化、owner/scope
+隔离、LangChain 工具、PromptManager、观测和模型降级链路：
 
-- `POST /llm/town/explain`
-- `POST /llm/town/ask`
-- `POST /llm/school/explain`
-- `POST /llm/school/ask`
-- `POST /llm/agent/answer`
-- `POST /llm/agent/run`
-- `POST /llm/agent/stream`
-- `POST /llm/teaching-plan/generate`
-- `POST /llm/teaching-plan/generate/stream`（SSE：`meta`、`token`、`result`、`done`）
-- `POST /llm/resource-discovery/classify`
-- `GET /health/live`
-- `GET /health/ready`
+- `POST /agent/messages`：同步任务入口
+- `POST /agent/messages/stream`：SSE 流式任务入口
+- `GET /health/live`、`GET /health/ready`：健康检查
 
-`/llm/agent/answer` 保留为兼容接口。新的 `/llm/agent/run` 会使用
-LangChain Agent，根据受控工具结果生成结构化答案；`/llm/agent/stream` 通过 SSE
-返回运行、工具、模型和最终结果事件。Agent 不执行 SQL 或 Cypher，引用只能来自
-工具返回的证据。未配置真实模型或模型响应不可用时，接口返回
-`generationStatus=degraded` 和本地结构化兜底答案。
-Teaching-plan generation and POI classification are structured workflows, not open-ended conversations. They use the same asynchronous LangChain model adapter and retain local fallbacks.
+请求通过 `taskType` 区分任务：
+
+- `CHAT`：智能问答和地图问答
+- `TEACHING_PLAN`：教学方案生成，参数放在 `taskPayload` 中
+- `RESOURCE_DISCOVERY`：候选地点思政教育价值分类，参数放在 `taskPayload` 中
+
+同步响应统一包含 `threadId`、`taskType`、`status`、`answer`、`citations` 和
+`toolExecutions`；教学方案结果位于 `teachingPlan`，资源发现结果位于
+`resourceDiscovery`。流式事件统一为 `run.started`、`model.started`、
+`tool.started`、`tool.completed`、`token`、`final`、`error`、`done`。
+
+调用 `/agent/messages*` 必须携带 `X-Agent-Service-Token`。Java 业务服务负责
+JWT、学校范围和可信上下文校验，再向 FastAPI 转发；浏览器不能直接调用 FastAPI。
+未配置真实模型或模型响应不可用时，接口返回 `generationStatus=degraded` 并使用
+可信业务数据生成有意义的本地兜底响应。旧 `/llm/*` 路径已删除，调用会返回 `404`。
 
 ## Prompt 管理与效果评估
 
-教学方案 prompt 不再写在 Python 源码中。仓库中的 `prompts/teaching-plan/v1/system.md` 只负责首次初始化；运行时版本、活动版本、实验配置和调用记录均保存在 `DATABASE_PATH` 指向的 SQLite 数据库中。管理操作需要请求头：
+教学方案和资源发现 prompt 不再写在 Python 源码中。仓库中的
+`prompts/teaching-plan/v1/system.md` 与 `prompts/resource-discovery/v1/system.md`
+只负责首次初始化；运行时版本和调用记录均保存在 `DATABASE_PATH` 指向的 SQLite
+数据库中。管理操作需要请求头：
 
 ```http
 X-Prompt-Admin-Token: <PROMPT_ADMIN_TOKEN>
@@ -141,22 +145,25 @@ Content-Type: application/json
 
 教学方案最终响应会包含 `promptVersion`、`promptRunId`、`promptExperiment` 和 `promptVariant`，用于把用户反馈准确归因到版本和实验组。
 
-- `LLM_API_URL`：模型接口地址
-- `LLM_BASE_URL`：可选的兼容接口基础地址；配置后服务会自动补充 `/chat/completions`
-- `LLM_API_KEY`：模型密钥
-- `LLM_MODEL`：模型名称，默认 `qwen-plus`
-- `LLM_TIMEOUT_SECONDS`：调用超时秒数，默认 `20`
+推荐使用 `AGENT_PRIMARY_*` 和 `AGENT_FALLBACK_*` 配置统一模型链。`LLM_API_URL`、
+`LLM_BASE_URL`、`LLM_API_KEY` 和 `LLM_MODEL` 仅作为配置别名保留，不代表旧
+`/llm/*` 接口仍存在。
 
-例如使用阿里云百炼兼容接口时，可以在启动 LLM 服务前配置：
+例如使用阿里云百炼主模型、Ollama 降级模型时，可以在启动 FastAPI Agent 前配置：
 
 ```powershell
-$env:LLM_API_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
-$env:LLM_API_KEY = "你的百炼API_KEY"
-$env:LLM_MODEL = "qwen-plus"
+$env:AGENT_PRIMARY_PROVIDER = "bailian"
+$env:AGENT_PRIMARY_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+$env:AGENT_PRIMARY_API_KEY = "你的百炼API_KEY"
+$env:AGENT_PRIMARY_MODEL = "qwen-plus"
+$env:AGENT_FALLBACK_PROVIDER = "ollama"
+$env:AGENT_FALLBACK_BASE_URL = "http://127.0.0.1:11434/v1"
+$env:AGENT_FALLBACK_MODEL = "本地已有模型名"
 python app.py
 ```
 
-也可以只配置 `LLM_BASE_URL`，服务会自动补充 `/chat/completions`。API Key 仅通过环境变量传入，不能写入仓库。
+API Key 仅通过环境变量传入，不能写入仓库；Ollama 不需要下载新模型，`AGENT_FALLBACK_MODEL`
+必须填写为本机已经存在的模型名。
 
 Agent 运行时支持为主模型和降级模型分别配置 provider、模型、地址和密钥。推荐的真实 Agent 链路是“百炼 qwen-plus → Ollama qwen3:8b → 本地结构化兜底”：
 
@@ -176,8 +183,7 @@ python app.py
 其中 API Key 只通过环境变量传入，不写入仓库。Ollama 的 `api_key` 只是兼容
 `ChatOpenAI` 接口所需的占位值，不是密钥。未配置降级模型时，仍然使用本地结构化兜底。
 
-模型配置优先级为 `AGENT_*` 专用配置，未配置时回退到旧的 `LLM_API_URL`、
-`LLM_BASE_URL`、`LLM_API_KEY` 和 `LLM_MODEL`，因此旧启动方式保持兼容。
+模型配置优先级为 `AGENT_*` 专用配置，未配置时才读取上述 `LLM_*` 配置别名。
 
 Agent 运行时通用配置：
 
@@ -197,7 +203,7 @@ Agent 运行时通用配置：
 
 兼容模型服务配置：
 
-首版使用内存 Checkpointer，服务重启后会话状态会丢失；生产环境再替换为 Redis 或其他持久化 Checkpointer。
+当前本地运行使用 SQLite 持久化 thread、message 和工具审计；生产环境可在不改变 HTTP 协议的前提下替换为 Redis 或 PostgreSQL 等持久化后端。
 运行日志会携带 `runId`、`conversationId`、模型、提示词版本、工具名称、耗时、token usage、
 生成/检索状态、降级级别和错误类型；模型未返回 usage 时保持为空，不伪造统计数据。
 
@@ -286,6 +292,6 @@ For the tool-based Agent use the equivalent `AGENT_PRIMARY_*`, `AGENT_FALLBACK_*
 `AGENT_LIGHTWEIGHT_*` variables. Ollama uses `http://127.0.0.1:11434/v1` and the placeholder
 API key `ollama` automatically when its lightweight model is configured.
 
-Streaming fallback emits a `fallback` or `model.fallback` SSE event with `reset=true` after
-partial output. Java forwards the boundary and the Vue clients clear the incomplete draft
-before rendering tokens from the next model.
+Streaming fallback emits a `model.failed` SSE event with `reset=true` after partial output.
+Java forwards the boundary and the Vue clients clear the incomplete draft before rendering
+tokens from the next model.

@@ -32,6 +32,9 @@ class PromptManager:
         self._lock = threading.RLock()
         self._initialize()
         self._seed_file_prompt("teaching-plan", "v1", self.prompt_root / "teaching-plan" / "v1" / "system.md")
+        self._seed_file_prompt(
+            "resource-discovery", "v1", self.prompt_root / "resource-discovery" / "v1" / "system.md"
+        )
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.database_path, timeout=10)

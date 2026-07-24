@@ -6,6 +6,9 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
+TaskType = Literal["CHAT", "TEACHING_PLAN", "RESOURCE_DISCOVERY"]
+
+
 class ApiModel(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="ignore")
 
@@ -25,6 +28,8 @@ class AgentMessageRequest(ApiModel):
     scope_id: str | int = Field(alias="scopeId")
     message: str = Field(min_length=1, max_length=12000)
     thread_id: str | None = Field(default=None, alias="threadId", max_length=64)
+    task_type: TaskType = Field(default="CHAT", alias="taskType")
+    task_payload: dict[str, Any] = Field(default_factory=dict, alias="taskPayload")
     intent: str | None = Field(default=None, max_length=64)
     grade: str | None = Field(default=None, max_length=100)
     theme: str | None = Field(default=None, max_length=200)
@@ -77,6 +82,7 @@ class ToolExecution(ApiModel):
 
 class AgentMessageResponse(ApiModel):
     thread_id: str = Field(alias="threadId")
+    task_type: TaskType = Field(default="CHAT", alias="taskType")
     answer: str
     status: Literal["completed", "degraded", "incomplete"]
     generation_status: Literal["completed", "degraded", "skipped"] | None = Field(
@@ -91,6 +97,8 @@ class AgentMessageResponse(ApiModel):
     follow_up_questions: list[str] = Field(default_factory=list, alias="followUpQuestions")
     tool_executions: list[ToolExecution] = Field(default_factory=list, alias="toolExecutions")
     context_compacted: bool = Field(default=False, alias="contextCompacted")
+    teaching_plan: dict[str, Any] | None = Field(default=None, alias="teachingPlan")
+    resource_discovery: dict[str, Any] | None = Field(default=None, alias="resourceDiscovery")
 
 
 class StoredMessage(ApiModel):
