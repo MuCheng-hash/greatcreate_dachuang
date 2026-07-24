@@ -3,12 +3,16 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 from fastapi.testclient import TestClient
 from langchain_core.messages import AIMessage
+import pytest
 
+from llm_service import legacy_api
 from llm_service.api import create_app
+from llm_service.container import build_container
+from llm_service import legacy_api
 from llm_service.repository import ConversationRepository
 from llm_service.prompt_manager import PromptManager
 from llm_service.runtime import AgentRuntime
@@ -66,7 +70,7 @@ def message_payload(**overrides):
     return payload
 
 
-def test_unified_tasks_and_old_routes_are_removed(tmp_path: Path):
+def test_unified_tasks_and_legacy_routes_coexist(tmp_path: Path):
     settings = settings_for(tmp_path)
     with build_client(settings) as client:
         health = client.get("/health")
@@ -102,7 +106,7 @@ def test_unified_tasks_and_old_routes_are_removed(tmp_path: Path):
         assert classification.status_code == 200
         assert classification.json()["resourceDiscovery"]["analysisStatus"] == "unavailable"
 
-        for old_path in (
+        legacy_paths = (
             "/llm/agent/answer",
             "/llm/agent/run",
             "/llm/agent/stream",
@@ -113,8 +117,52 @@ def test_unified_tasks_and_old_routes_are_removed(tmp_path: Path):
             "/llm/teaching-plan/generate",
             "/llm/teaching-plan/generate/stream",
             "/llm/resource-discovery/classify",
-        ):
-            assert client.post(old_path, json={}).status_code == 404
+        )
+        registered_paths = client.get("/openapi.json").json()["paths"]
+        assert all(path in registered_paths for path in legacy_paths)
+
+
+def test_profile_configuration_is_overridden_by_environment(tmp_path: Path, monkeypatch):
+    override = tmp_path / "service.toml"
+    override.write_text("port = 6123\nllm_timeout_seconds = 7.0\n", encoding="utf-8")
+    monkeypatch.setenv("APP_ENV", "dev")
+    monkeypatch.setenv("APP_CONFIG_FILE", str(override))
+    monkeypatch.setenv("LLM_TIMEOUT_SECONDS", "9.0")
+
+    settings = Settings(_env_file=None)
+
+    assert settings.app_env == "dev"
+    assert settings.port == 6123
+    assert settings.llm_timeout_seconds == 9.0
+
+
+def test_production_profile_rejects_missing_admin_tokens(monkeypatch):
+    monkeypatch.setenv("APP_ENV", "prod")
+    monkeypatch.delenv("PROMPT_ADMIN_TOKEN", raising=False)
+    monkeypatch.delenv("OBSERVABILITY_ADMIN_TOKEN", raising=False)
+
+    with pytest.raises(ValueError, match="admin tokens"):
+        Settings(_env_file=None)
+
+
+def test_container_can_be_explicitly_injected_and_required_health_failure_is_503(tmp_path: Path):
+    settings = settings_for(
+        tmp_path,
+        internal_business_base_url="",
+        business_health_required=True,
+    )
+    container = build_container(settings)
+    application = create_app(container=container)
+
+    assert application.state.container is container
+    with TestClient(application) as client:
+        assert client.get("/health/live").status_code == 200
+        readiness = client.get("/health/ready")
+        assert readiness.status_code == 503
+        payload = readiness.json()
+        assert payload["dependencies"]["businessService"]["required"] is True
+        assert payload["dependencies"]["businessService"]["status"] == "down"
+        assert "test-key" not in str(payload)
 
 
 def test_validation_rejects_missing_owner_and_unknown_scope(tmp_path: Path):

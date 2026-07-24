@@ -7,6 +7,7 @@ import com.redculture.platform.service.AgentToolService;
 import com.redculture.platform.vo.ai.AgentToolRequest;
 import com.redculture.platform.vo.ai.KnowledgeRetrieveResult;
 import org.springframework.util.StringUtils;
+import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestHeader;
@@ -29,6 +30,15 @@ public class AgentToolController {
     public AgentToolController(AgentProperties agentProperties, AgentToolService agentToolService) {
         this.agentProperties = agentProperties;
         this.agentToolService = agentToolService;
+    }
+
+    @GetMapping("/health")
+    public ApiResponse<Map<String, Object>> health(
+            @RequestHeader(value = SERVICE_TOKEN_HEADER, required = false) String token) {
+        if (!authorized(token)) {
+            return ApiResponse.fail(403, "agent service token is invalid");
+        }
+        return ApiResponse.success(Map.of("status", "up", "service", "business-service"));
     }
 
     @PostMapping("/school-context")

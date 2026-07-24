@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import hmac
 import secrets
 import sqlite3
@@ -8,7 +9,15 @@ from typing import Any
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse, StreamingResponse
+
 from .container import AppContainer, build_container
+from .legacy_api import router as legacy_router
+from .legacy import (
+    build_map_answer,
+    build_resource_discovery_classification,
+    build_structured_teaching_plan,
+    stream_structured_teaching_plan,
+)
 from .observability import FallbackAlertManager, LlmObservability
 from .repository import ThreadNotFoundError, ThreadScopeError
 from .routes import health_router
@@ -50,6 +59,7 @@ def create_app(
     model = container.model_gateway
     prompts = container.prompts
     runtime = container.runtime
+    legacy_runtime = container.legacy_agent_runtime
     app = FastAPI(title="Red Culture Stateful Agent", version="2.0.0")
     app.state.container = container
     app.state.settings = settings
@@ -58,6 +68,7 @@ def create_app(
     app.state.prompts = prompts
     app.state.observability = observability
     app.state.alerts = alerts
+    app.state.legacy_runtime = legacy_runtime
 
     async def require_internal_agent_token(
         token: str | None = Header(default=None, alias="X-Agent-Service-Token"),
@@ -303,5 +314,46 @@ def create_app(
         except LookupError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
+    # 兼容历史接口，统一由旧接口模块承载，避免影响新的 Stateful Agent 协议。
+    @app.post("/llm/town/explain")
+    async def explain_town(payload: dict[str, Any]) -> dict[str, Any]:
+        return build_map_answer(payload, school_mode=False, ask_mode=False)
+
+    @app.post("/llm/town/ask")
+    async def ask_town(payload: dict[str, Any]) -> dict[str, Any]:
+        return build_map_answer(payload, school_mode=False, ask_mode=True)
+
+    @app.post("/llm/school/explain")
+    async def explain_school(payload: dict[str, Any]) -> dict[str, Any]:
+        return build_map_answer(payload, school_mode=True, ask_mode=False)
+
+    @app.post("/llm/school/ask")
+    async def ask_school(payload: dict[str, Any]) -> dict[str, Any]:
+        return build_map_answer(payload, school_mode=True, ask_mode=True)
+
+    @app.post("/llm/teaching-plan/generate")
+    async def generate_teaching_plan(payload: dict[str, Any]) -> dict[str, Any]:
+        return await build_structured_teaching_plan(payload, model, prompts)
+
+    @app.post("/llm/teaching-plan/generate/stream")
+    async def stream_teaching_plan(payload: dict[str, Any]) -> StreamingResponse:
+        async def events():
+            async for event_name, data in stream_structured_teaching_plan(payload, model, prompts):
+                yield f"event: {event_name}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+        return StreamingResponse(
+            events(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    @app.post("/llm/resource-discovery/classify")
+    async def classify_resource_discovery(payload: dict[str, Any]) -> dict[str, Any]:
+        return await build_resource_discovery_classification(payload, model)
+
+    app.include_router(
+        legacy_router,
+        dependencies=[Depends(require_internal_agent_token)],
+    )
     app.include_router(health_router)
     return app

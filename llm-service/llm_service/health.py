@@ -106,7 +106,8 @@ class HealthService:
         url = f"{self.settings.internal_business_base_url}{self.settings.business_health_path}"
         try:
             async with self.http_client_factory(
-                timeout=self.settings.health_check_timeout_seconds
+                timeout=self.settings.health_check_timeout_seconds,
+                trust_env=False,
             ) as client:
                 response = await client.get(url, headers=headers)
             if response.status_code >= 400:

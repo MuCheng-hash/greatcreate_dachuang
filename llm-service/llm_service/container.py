@@ -4,6 +4,9 @@ from dataclasses import dataclass
 
 from fastapi import Request
 
+from agent.config import AgentSettings
+from agent.runtime import AgentRuntime as LegacyAgentRuntime
+
 from .health import HealthService
 from .model_gateway import ModelGateway
 from .observability import FallbackAlertManager, LlmObservability
@@ -22,6 +25,7 @@ class AppContainer:
     model_gateway: ModelGateway
     prompts: PromptManager
     runtime: AgentRuntime
+    legacy_agent_runtime: LegacyAgentRuntime
     health: HealthService
 
 
@@ -38,6 +42,9 @@ def build_container(
     model_gateway = ModelGateway(settings, observability, alerts)
     prompts = PromptManager(settings.database_path, settings.prompt_root)
     runtime = AgentRuntime(settings, repository, model_gateway, observability, alerts, prompts)
+    legacy_agent_runtime = LegacyAgentRuntime(
+        AgentSettings.from_settings(settings), observability, alerts
+    )
     health = HealthService(settings, prompts)
     return AppContainer(
         settings=settings,
@@ -47,6 +54,7 @@ def build_container(
         model_gateway=model_gateway,
         prompts=prompts,
         runtime=runtime,
+        legacy_agent_runtime=legacy_agent_runtime,
         health=health,
     )
 

@@ -44,4 +44,18 @@ class AgentToolControllerTest {
         assertEquals(200, response.getCode());
         verify(service).knowledgeRetrieve(org.mockito.ArgumentMatchers.any());
     }
+
+    @Test
+    void healthCheckRequiresServiceTokenAndReportsUp() {
+        AgentProperties properties = new AgentProperties();
+        properties.setInternalServiceToken("secret");
+        AgentToolController controller = new AgentToolController(
+                properties, mock(AgentToolService.class)
+        );
+
+        assertEquals(403, controller.health("wrong").getCode());
+        ApiResponse<?> response = controller.health("secret");
+        assertEquals(200, response.getCode());
+        assertEquals("up", ((java.util.Map<?, ?>) response.getData()).get("status"));
+    }
 }
