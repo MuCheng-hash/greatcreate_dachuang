@@ -6,6 +6,8 @@ import lombok.Data;
 @Data
 public class TeachingPlanGenerateRequest {
 
+    private String threadId;
+
     private Long schoolId;
 
     private String grade;

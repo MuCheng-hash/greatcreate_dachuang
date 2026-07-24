@@ -3,13 +3,12 @@ package com.redculture.platform.service.discovery;
 import com.redculture.platform.config.AppMapProperties;
 import com.redculture.platform.entity.ResourceDiscoveryCandidate;
 import com.redculture.platform.entity.School;
+import com.redculture.platform.service.agent.AgentRuntimeClient;
 import com.redculture.platform.vo.discovery.DiscoveryClassificationResponse;
-import org.springframework.http.MediaType;
-import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.stereotype.Component;
 import org.springframework.util.StringUtils;
-import org.springframework.web.client.RestClient;
 
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -18,24 +17,24 @@ import java.util.Map;
 public class DiscoveryLlmClient {
 
     private final AppMapProperties properties;
+    private final AgentRuntimeClient agentRuntimeClient;
 
-    public DiscoveryLlmClient(AppMapProperties properties) {
+    public DiscoveryLlmClient(AppMapProperties properties, AgentRuntimeClient agentRuntimeClient) {
         this.properties = properties;
+        this.agentRuntimeClient = agentRuntimeClient;
     }
 
     public DiscoveryClassificationResponse classify(School school, List<ResourceDiscoveryCandidate> candidates) {
         if (!StringUtils.hasText(properties.getLlmServiceBaseUrl()) || candidates == null || candidates.isEmpty()) {
             return null;
         }
-        Map<String, Object> body = new LinkedHashMap<>();
-        body.put("school", Map.of(
-                "schoolId", school.getSchoolId(),
-                "schoolName", school.getSchoolName(),
-                "address", school.getAddress() == null ? "" : school.getAddress(),
-                "longitude", school.getLongitude(),
-                "latitude", school.getLatitude()
-        ));
-        body.put("candidates", candidates.stream().map(candidate -> {
+        Map<String, Object> schoolPayload = new LinkedHashMap<>();
+        schoolPayload.put("schoolId", school.getSchoolId());
+        schoolPayload.put("schoolName", school.getSchoolName());
+        schoolPayload.put("address", school.getAddress() == null ? "" : school.getAddress());
+        schoolPayload.put("longitude", school.getLongitude());
+        schoolPayload.put("latitude", school.getLatitude());
+        List<Map<String, Object>> candidatePayload = candidates.stream().map(candidate -> {
             Map<String, Object> item = new LinkedHashMap<>();
             item.put("providerPlaceId", candidate.getProviderPlaceId());
             item.put("name", candidate.getPlaceName());
@@ -46,20 +45,35 @@ public class DiscoveryLlmClient {
             item.put("typeName", candidate.getProviderTypeName());
             item.put("distanceMeters", candidate.getDistanceMeters());
             return item;
-        }).toList());
+        }).toList();
+        Map<String, Object> taskPayload = new LinkedHashMap<>();
+        taskPayload.put("candidates", candidatePayload);
+        Map<String, Object> context = new LinkedHashMap<>();
+        context.put("school", schoolPayload);
+        context.put("resources", new ArrayList<>());
+        context.put("citationCandidates", new ArrayList<>());
+        String ownerId = "service:resource-discovery:" + school.getSchoolId();
+        String threadId = null;
         try {
-            SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
-            factory.setConnectTimeout(5_000);
-            factory.setReadTimeout(25_000);
-            return RestClient.builder().baseUrl(properties.getLlmServiceBaseUrl()).requestFactory(factory).build().post()
-                    .uri("/llm/resource-discovery/classify")
-                    .contentType(MediaType.APPLICATION_JSON)
-                    .accept(MediaType.APPLICATION_JSON)
-                    .body(body)
-                    .retrieve()
-                    .body(DiscoveryClassificationResponse.class);
+            var request = agentRuntimeClient.taskRequest(
+                    ownerId,
+                    "SCHOOL",
+                    school.getSchoolId(),
+                    null,
+                    "RESOURCE_DISCOVERY",
+                    "请分析候选地点是否具有思政教育价值。",
+                    taskPayload,
+                    context
+            );
+            var response = agentRuntimeClient.send(request);
+            threadId = response.getThreadId();
+            return response.getResourceDiscovery();
         } catch (Exception exception) {
             return null;
+        } finally {
+            if (StringUtils.hasText(threadId)) {
+                agentRuntimeClient.archive(threadId, ownerId);
+            }
         }
     }
 }

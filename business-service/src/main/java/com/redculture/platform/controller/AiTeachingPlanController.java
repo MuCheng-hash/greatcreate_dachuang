@@ -39,7 +39,7 @@ public class AiTeachingPlanController {
             AuthCurrentUserVO user = AuthContext.requireUser(servletRequest);
             requireSchoolAccess(request == null ? null : request.getSchoolId(), user);
             return ApiResponse.success(aiTeachingPlanService.generatePlan(
-                    request, user.getAccountId(), null));
+                    request, user.getAccountId(), request == null ? null : request.getThreadId()));
         } catch (IllegalArgumentException exception) {
             return ApiResponse.fail(exception.getMessage());
         }
@@ -50,7 +50,8 @@ public class AiTeachingPlanController {
                                      HttpServletRequest servletRequest) {
         AuthCurrentUserVO user = AuthContext.requireUser(servletRequest);
         requireSchoolAccess(request == null ? null : request.getSchoolId(), user);
-        return aiTeachingPlanService.generatePlanStream(request, user.getAccountId(), null);
+        return aiTeachingPlanService.generatePlanStream(
+                request, user.getAccountId(), request == null ? null : request.getThreadId());
     }
 
     @PostMapping("/save-draft")

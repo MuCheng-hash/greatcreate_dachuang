@@ -13,18 +13,10 @@ public class AgentProperties {
      */
     private String internalServiceToken = "red-culture-agent-development-token-change-me";
 
-    /**
-     * stateful 为默认运行时，legacy 仅用于旧 Agent 链路回滚。
-     */
-    private String runtimeMode = "stateful";
-
     private int connectTimeoutMs = 3000;
 
     private int readTimeoutMs = 30000;
 
     private long streamTimeoutMs = 65000L;
 
-    public boolean isLegacyRuntime() {
-        return "legacy".equalsIgnoreCase(runtimeMode);
-    }
 }

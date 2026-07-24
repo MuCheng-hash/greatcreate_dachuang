@@ -1,6 +1,5 @@
 package com.redculture.platform.service.impl;
 
-import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.ObjectWriter;
 import com.fasterxml.jackson.core.json.JsonWriteFeature;
@@ -10,6 +9,7 @@ import com.redculture.platform.service.AiTeachingPlanService;
 import com.redculture.platform.service.KnowledgeRetriever;
 import com.redculture.platform.service.SchoolMapService;
 import com.redculture.platform.service.TeachingActivityPlanService;
+import com.redculture.platform.service.agent.AgentRuntimeClient;
 import com.redculture.platform.vo.GeneratedTeachingPlanCitationVO;
 import com.redculture.platform.vo.GeneratedTeachingPlanResponse;
 import com.redculture.platform.vo.SchoolMapDetailVO;
@@ -22,28 +22,19 @@ import com.redculture.platform.vo.ai.KnowledgeGraphFactVO;
 import com.redculture.platform.vo.ai.KnowledgeRetrieveRequest;
 import com.redculture.platform.vo.ai.KnowledgeRetrieveResult;
 import com.redculture.platform.vo.ai.KnowledgeScopeType;
+import com.redculture.platform.vo.ai.StatefulAgentRequest;
 import com.redculture.platform.vo.ai.TeachingPlanContextVO;
 import com.redculture.platform.vo.request.GeneratedTeachingPlanSaveRequest;
 import com.redculture.platform.vo.request.TeachingActivityPlanCreateRequest;
 import com.redculture.platform.vo.request.TeachingPlanGenerateRequest;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.http.MediaType;
-import org.springframework.http.client.SimpleClientHttpRequestFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
-import org.springframework.web.client.RestClient;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
-import java.io.BufferedReader;
-import java.io.InputStreamReader;
-import java.net.URI;
-import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
-import java.nio.charset.StandardCharsets;
 import java.time.LocalDateTime;
-import java.time.Duration;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -64,20 +55,33 @@ public class AiTeachingPlanServiceImpl implements AiTeachingPlanService {
     private final TeachingActivityPlanService teachingActivityPlanService;
     private final KnowledgeRetriever knowledgeRetriever;
     private final AppMapProperties appMapProperties;
+    private final AgentRuntimeClient agentRuntimeClient;
     private final ObjectMapper objectMapper;
     private final ObjectWriter sseObjectWriter;
+
+    @Autowired
+    public AiTeachingPlanServiceImpl(SchoolMapService schoolMapService,
+                                     TeachingActivityPlanService teachingActivityPlanService,
+                                     KnowledgeRetriever knowledgeRetriever,
+                                     AppMapProperties appMapProperties,
+                                     AgentRuntimeClient agentRuntimeClient,
+                                     ObjectMapper objectMapper) {
+        this.schoolMapService = schoolMapService;
+        this.teachingActivityPlanService = teachingActivityPlanService;
+        this.knowledgeRetriever = knowledgeRetriever;
+        this.appMapProperties = appMapProperties;
+        this.agentRuntimeClient = agentRuntimeClient;
+        this.objectMapper = objectMapper;
+        this.sseObjectWriter = objectMapper.writer().with(JsonWriteFeature.ESCAPE_NON_ASCII);
+    }
 
     public AiTeachingPlanServiceImpl(SchoolMapService schoolMapService,
                                      TeachingActivityPlanService teachingActivityPlanService,
                                      KnowledgeRetriever knowledgeRetriever,
                                      AppMapProperties appMapProperties,
                                      ObjectMapper objectMapper) {
-        this.schoolMapService = schoolMapService;
-        this.teachingActivityPlanService = teachingActivityPlanService;
-        this.knowledgeRetriever = knowledgeRetriever;
-        this.appMapProperties = appMapProperties;
-        this.objectMapper = objectMapper;
-        this.sseObjectWriter = objectMapper.writer().with(JsonWriteFeature.ESCAPE_NON_ASCII);
+        this(schoolMapService, teachingActivityPlanService, knowledgeRetriever,
+                appMapProperties, null, objectMapper);
     }
 
     @Override
@@ -255,41 +259,24 @@ public class AiTeachingPlanServiceImpl implements AiTeachingPlanService {
         try {
             sendEvent(emitter, "stage", Map.of("stage", "retrieval", "message", "正在检索教学依据"));
             context = buildContext(request, accountId, sessionId);
+            TeachingPlanContextVO taskContext = context;
             sendEvent(emitter, "stage", Map.of("stage", "generation", "message", "正在生成教学方案"));
 
-            if (!StringUtils.hasText(appMapProperties.getLlmServiceBaseUrl())) {
+            if (agentRuntimeClient == null || !StringUtils.hasText(appMapProperties.getLlmServiceBaseUrl())) {
                 sendFinalEvent(emitter, finalizeResponse(null, context));
                 resultSent = true;
             } else {
-                HttpResponse<java.io.InputStream> response = openTeachingPlanStream(context);
-                if (response.statusCode() < 200 || response.statusCode() >= 300) {
-                    throw new IllegalStateException("LLM stream returned HTTP " + response.statusCode());
-                }
-                try (BufferedReader reader = new BufferedReader(
-                        new InputStreamReader(response.body(), StandardCharsets.UTF_8))) {
-                    String eventName = "message";
-                    StringBuilder data = new StringBuilder();
-                    String line;
-                    while ((line = reader.readLine()) != null) {
-                        if (line.isEmpty()) {
-                            if (!data.isEmpty()) {
-                                resultSent = forwardLlmEvent(emitter, eventName, data.toString(), context) || resultSent;
-                            }
-                            eventName = "message";
-                            data.setLength(0);
-                        } else if (line.startsWith("event:")) {
-                            eventName = line.substring(6).trim();
-                        } else if (line.startsWith("data:")) {
-                            if (!data.isEmpty()) {
-                                data.append('\n');
-                            }
-                            data.append(line.substring(5).trim());
+                final boolean[] finalEventSent = {false};
+                agentRuntimeClient.stream(buildAgentTaskRequest(taskContext), event -> {
+                    try {
+                        if (forwardAgentEvent(emitter, event, taskContext)) {
+                            finalEventSent[0] = true;
                         }
+                    } catch (Exception exception) {
+                        throw new IllegalStateException("teaching-plan SSE event forwarding failed", exception);
                     }
-                    if (!data.isEmpty()) {
-                        resultSent = forwardLlmEvent(emitter, eventName, data.toString(), context) || resultSent;
-                    }
-                }
+                });
+                resultSent = finalEventSent[0];
             }
             if (!resultSent) {
                 sendFinalEvent(emitter, finalizeResponse(null, context));
@@ -313,41 +300,51 @@ public class AiTeachingPlanServiceImpl implements AiTeachingPlanService {
         }
     }
 
-    private HttpResponse<java.io.InputStream> openTeachingPlanStream(TeachingPlanContextVO context) throws Exception {
-        String baseUrl = appMapProperties.getLlmServiceBaseUrl().replaceAll("/+$", "");
-        HttpRequest request = HttpRequest.newBuilder()
-                .uri(URI.create(baseUrl + "/llm/teaching-plan/generate/stream"))
-                .timeout(Duration.ofSeconds(110))
-                .header("Accept", MediaType.TEXT_EVENT_STREAM_VALUE)
-                .header("Content-Type", MediaType.APPLICATION_JSON_VALUE)
-                .POST(HttpRequest.BodyPublishers.ofString(
-                        objectMapper.writeValueAsString(context), StandardCharsets.UTF_8))
-                .build();
-        return HttpClient.newBuilder()
-                .connectTimeout(Duration.ofSeconds(3))
-                .build()
-                .send(request, HttpResponse.BodyHandlers.ofInputStream());
-    }
-
-    private boolean forwardLlmEvent(SseEmitter emitter,
-                                    String eventName,
-                                    String data,
-                                    TeachingPlanContextVO context) throws Exception {
-        JsonNode payload = objectMapper.readTree(data);
-        if ("result".equals(eventName)) {
-            GeneratedTeachingPlanResponse response = objectMapper.treeToValue(payload, GeneratedTeachingPlanResponse.class);
+    private boolean forwardAgentEvent(SseEmitter emitter,
+                                      AgentRuntimeClient.StreamEvent event,
+                                      TeachingPlanContextVO context) throws Exception {
+        String eventName = event.event();
+        Map<String, Object> payload = event.safeData();
+        if ("final".equals(eventName)) {
+            Object rawResponse = payload.get("response");
+            if (!(rawResponse instanceof Map<?, ?> responseMap)) {
+                return false;
+            }
+            Object rawPlan = responseMap.get("teachingPlan");
+            if (!(rawPlan instanceof Map<?, ?>)) {
+                return false;
+            }
+            GeneratedTeachingPlanResponse response = objectMapper.convertValue(
+                    rawPlan, GeneratedTeachingPlanResponse.class
+            );
+            response.setThreadId(textValue(payload.get("threadId"), textValue(responseMap.get("threadId"), "")));
             sendFinalEvent(emitter, finalizeResponse(response, context));
             return true;
         }
-        if ("token".equals(eventName) || "meta".equals(eventName)
-                || "stage".equals(eventName) || "fallback".equals(eventName)) {
+        if ("run.started".equals(eventName) || "model.started".equals(eventName)
+                || "model.completed".equals(eventName) || "model.failed".equals(eventName)
+                || "tool.started".equals(eventName) || "tool.completed".equals(eventName)
+                || "token".equals(eventName) || "error".equals(eventName)) {
             sendEvent(emitter, eventName, payload);
         }
         return false;
     }
 
     private void sendFinalEvent(SseEmitter emitter, GeneratedTeachingPlanResponse response) throws Exception {
-        sendEvent(emitter, "result", response);
+        Map<String, Object> agentResponse = new LinkedHashMap<>();
+        agentResponse.put("threadId", response.getThreadId());
+        agentResponse.put("taskType", "TEACHING_PLAN");
+        agentResponse.put("answer", response.getMessage());
+        agentResponse.put("status", "completed".equalsIgnoreCase(response.getGenerationStatus())
+                ? "completed" : "degraded");
+        agentResponse.put("generationStatus", response.getGenerationStatus());
+        agentResponse.put("retrievalStatus", response.getRetrievalStatus());
+        agentResponse.put("teachingPlan", response);
+        agentResponse.put("citations", response.getCitations());
+        sendEvent(emitter, "final", Map.of(
+                "threadId", response.getThreadId() == null ? "" : response.getThreadId(),
+                "response", agentResponse
+        ));
     }
 
     private void sendEvent(SseEmitter emitter, String eventName, Object data) throws Exception {
@@ -357,29 +354,53 @@ public class AiTeachingPlanServiceImpl implements AiTeachingPlanService {
     }
 
     private GeneratedTeachingPlanResponse callLlmService(TeachingPlanContextVO context) {
-        if (!StringUtils.hasText(appMapProperties.getLlmServiceBaseUrl())) {
+        if (agentRuntimeClient == null || !StringUtils.hasText(appMapProperties.getLlmServiceBaseUrl())) {
             return null;
         }
         try {
-            SimpleClientHttpRequestFactory requestFactory = new SimpleClientHttpRequestFactory();
-            requestFactory.setConnectTimeout(3_000);
-            requestFactory.setReadTimeout(60_000);
-            return RestClient.builder()
-                    .baseUrl(appMapProperties.getLlmServiceBaseUrl())
-                    .requestFactory(requestFactory)
-                    .build()
-                    .post()
-                    .uri("/llm/teaching-plan/generate")
-                    .contentType(MediaType.APPLICATION_JSON)
-                    .accept(MediaType.APPLICATION_JSON)
-                    .body(context)
-                    .retrieve()
-                    .body(GeneratedTeachingPlanResponse.class);
+            var response = agentRuntimeClient.send(buildAgentTaskRequest(context));
+            GeneratedTeachingPlanResponse plan = response.getTeachingPlan();
+            if (plan != null) {
+                plan.setThreadId(response.getThreadId());
+            }
+            return plan;
         } catch (Exception exception) {
-            log.warn("LLM teaching-plan request failed for endpoint {}: {}",
-                    appMapProperties.getLlmServiceBaseUrl(), exception.getMessage(), exception);
+            log.warn("Stateful Agent teaching-plan request failed: {}", exception.getMessage(), exception);
             return null;
         }
+    }
+
+    private StatefulAgentRequest buildAgentTaskRequest(TeachingPlanContextVO context) {
+        Map<String, Object> taskPayload = objectMapper.convertValue(context.getRequest(), Map.class);
+        Map<String, Object> trustedContext = new LinkedHashMap<>();
+        trustedContext.put("school", context.getSchool());
+        trustedContext.put("resources", context.getResources());
+        Map<String, Object> retrieval = new LinkedHashMap<>();
+        retrieval.put("retrievalStatus", context.getRetrievalStatus());
+        retrieval.put("chunks", context.getContentChunks());
+        retrieval.put("graphFacts", context.getGraphFacts());
+        trustedContext.put("retrieval", retrieval);
+        trustedContext.put("citationCandidates", context.getCitationCandidates());
+
+        Long accountId = context.getActor() == null ? null : context.getActor().getAccountId();
+        String ownerId = accountId == null
+                ? "school:" + context.getRequest().getSchoolId()
+                : "account:" + accountId;
+        return agentRuntimeClient.taskRequest(
+                ownerId,
+                KnowledgeScopeType.SCHOOL.name(),
+                context.getRequest().getSchoolId(),
+                context.getSessionId(),
+                "TEACHING_PLAN",
+                "请根据任务参数和受控资源生成结构化教学方案。",
+                taskPayload,
+                trustedContext
+        );
+    }
+
+    private String textValue(Object value, String fallback) {
+        return StringUtils.hasText(value == null ? null : String.valueOf(value))
+                ? String.valueOf(value) : fallback;
     }
 
     private GeneratedTeachingPlanResponse normalizeResponse(GeneratedTeachingPlanResponse response,

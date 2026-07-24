@@ -52,7 +52,6 @@ app:
     llm-service-base-url: ${LLM_SERVICE_BASE_URL:http://127.0.0.1:5050}
   agent:
     internal-service-token: ${AGENT_INTERNAL_SERVICE_TOKEN:red-culture-agent-development-token-change-me}
-    runtime-mode: ${AGENT_RUNTIME_MODE:stateful}
     connect-timeout-ms: ${AGENT_CONNECT_TIMEOUT_MS:3000}
     read-timeout-ms: ${AGENT_READ_TIMEOUT_MS:30000}
     stream-timeout-ms: ${AGENT_STREAM_TIMEOUT_MS:65000}

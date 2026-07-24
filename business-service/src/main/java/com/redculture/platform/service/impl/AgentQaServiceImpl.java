@@ -29,10 +29,6 @@ import com.redculture.platform.vo.ai.KnowledgeRetrieveRequest;
 import com.redculture.platform.vo.ai.KnowledgeRetrieveResult;
 import com.redculture.platform.vo.ai.KnowledgeRetrievalStatus;
 import com.redculture.platform.vo.ai.KnowledgeScopeType;
-import com.redculture.platform.vo.ai.AgentActorVO;
-import com.redculture.platform.vo.ai.AgentRuntimeRequest;
-import com.redculture.platform.vo.ai.AgentRuntimeResponse;
-import com.redculture.platform.vo.ai.AgentScopeVO;
 import com.redculture.platform.vo.request.AgentQaRequest;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
@@ -139,17 +135,7 @@ public class AgentQaServiceImpl implements AgentQaService {
             throw new IllegalArgumentException("school account is required");
         }
 
-        if (agentRuntimeClient != null && agentProperties.isLegacyRuntime()) {
-            try {
-                return askWithAgentRuntime(request, currentUser);
-            } catch (IllegalArgumentException exception) {
-                throw exception;
-            } catch (RuntimeException exception) {
-                // FastAPI 不可用时保留已有 Java 业务链路，保证兼容接口仍能回答。
-            }
-        }
-
-        return askWithLegacyPipeline(request, currentUser, !agentProperties.isLegacyRuntime());
+        return askWithAgentPipeline(request, currentUser);
     }
 
     @Override
@@ -173,15 +159,15 @@ public class AgentQaServiceImpl implements AgentQaService {
             return emitter;
         }
 
-        if (agentRuntimeClient == null || agentProperties.isLegacyRuntime()) {
-            startLegacyStream(emitter, request, currentUser, false);
+        if (agentRuntimeClient == null) {
+            startLocalFallbackStream(emitter, request, currentUser);
             return emitter;
         }
 
         String question = request.getQuestion().trim();
         AgentIntent intent = intentRecognizer.recognize(question);
         if (intent == AgentIntent.UNKNOWN) {
-            startLegacyStream(emitter, request, currentUser, false);
+            startLocalFallbackStream(emitter, request, currentUser);
             return emitter;
         }
         Scope scope = new Scope(scopeResolution.type(), scopeResolution.id());
@@ -224,7 +210,7 @@ public class AgentQaServiceImpl implements AgentQaService {
                     return;
                 }
                 // Stateful FastAPI 不可用时退回本地 Java 生成链路，仍然保持流式协议。
-                startLegacyStream(emitter, request, currentUser, false);
+                startLocalFallbackStream(emitter, request, currentUser);
                 return;
             } finally {
                 finished.set(true);
@@ -236,124 +222,14 @@ public class AgentQaServiceImpl implements AgentQaService {
         return emitter;
     }
 
-    private AgentQaResponse askWithAgentRuntime(AgentQaRequest request, AuthCurrentUserVO currentUser) {
-        AgentAccessGuard.ScopeResolution scopeResolution = accessGuard.resolveScope(
-                request.getScopeType(), request.getScopeId(), currentUser, request.getQuestion().trim()
-        );
-        if (scopeResolution.clarificationRequired()) {
-            return clarificationResponse(AgentIntent.UNKNOWN, scopeResolution.message(), scopeResolution.options());
-        }
-        Scope scope = new Scope(scopeResolution.type(), scopeResolution.id());
-        AgentRuntimeResponse runtimeResponse = agentRuntimeClient.run(
-                toRuntimeRequest(request, currentUser, scope)
-        );
-        return mapRuntimeResponse(runtimeResponse, scope);
-    }
-
-    private AgentRuntimeRequest toRuntimeRequest(AgentQaRequest request,
-                                                 AuthCurrentUserVO currentUser,
-                                                 Scope scope) {
-        AgentActorVO actor = new AgentActorVO();
-        actor.setAccountId(currentUser.getAccountId());
-        actor.setRoleCode(currentUser.getRoleCode());
-        actor.setSchoolId(currentUser.getSchoolId());
-
-        AgentScopeVO agentScope = new AgentScopeVO();
-        agentScope.setScopeType(scope.type().name());
-        agentScope.setScopeId(scope.id());
-        if (scope.type() == KnowledgeScopeType.SCHOOL) {
-            agentScope.setName(currentUser.getSchoolName());
-        }
-
-        AgentRuntimeRequest runtimeRequest = new AgentRuntimeRequest();
-        runtimeRequest.setQuestion(request.getQuestion().trim());
-        runtimeRequest.setConversationId(request.getConversationId());
-        runtimeRequest.setActor(actor);
-        runtimeRequest.setScope(agentScope);
-        runtimeRequest.setGrade(resolveGrade(request.getGrade(), request.getQuestion()));
-        runtimeRequest.setTheme(clean(request.getTheme()));
-        runtimeRequest.setTopK(normalizeTopK(request.getTopK()));
-        return runtimeRequest;
-    }
-
-    private AgentQaResponse mapRuntimeResponse(AgentRuntimeResponse runtimeResponse, Scope fallbackScope) {
-        if (runtimeResponse == null || !StringUtils.hasText(runtimeResponse.getAnswer())) {
-            throw new IllegalStateException("agent runtime returned an empty response");
-        }
-        AgentQaResponse response = new AgentQaResponse();
-        response.setAnswer(runtimeResponse.getAnswer());
-        response.setConversationId(runtimeResponse.getConversationId());
-        response.setRunId(runtimeResponse.getRunId());
-        response.setFallbackLevel(runtimeResponse.getFallbackLevel());
-        response.setIntent(parseIntent(runtimeResponse.getIntent()));
-        response.setGenerationStatus(parseGenerationStatus(runtimeResponse.getGenerationStatus()));
-        response.setRetrievalStatus(parseRetrievalStatus(runtimeResponse.getRetrievalStatus()));
-        response.setScopeType(parseScopeType(runtimeResponse.getScopeType(), fallbackScope.type()));
-        response.setScopeId(runtimeResponse.getScopeId() == null
-                ? fallbackScope.id() : runtimeResponse.getScopeId());
-        response.setRelatedResources(nonNullList(runtimeResponse.getRelatedResources()));
-        response.setCitations(runtimeResponse.getCitations() == null
-                ? new ArrayList<>() : runtimeResponse.getCitations());
-        response.setFollowUpQuestions(nonNullList(runtimeResponse.getFollowUpQuestions()));
-        response.setClarificationRequired(runtimeResponse.isClarificationRequired());
-        response.setClarificationMessage(runtimeResponse.getClarificationMessage());
-        response.setClarificationOptions(nonNullList(runtimeResponse.getClarificationOptions()));
-        return response;
-    }
-
-    private AgentIntent parseIntent(String value) {
-        if (!StringUtils.hasText(value)) {
-            return AgentIntent.UNKNOWN;
-        }
-        try {
-            return AgentIntent.valueOf(value.trim().toUpperCase(Locale.ROOT));
-        } catch (IllegalArgumentException exception) {
-            return AgentIntent.UNKNOWN;
-        }
-    }
-
-    private AgentGenerationStatus parseGenerationStatus(String value) {
-        if (!StringUtils.hasText(value)) {
-            return AgentGenerationStatus.DEGRADED;
-        }
-        try {
-            return AgentGenerationStatus.from(value);
-        } catch (IllegalArgumentException exception) {
-            return AgentGenerationStatus.DEGRADED;
-        }
-    }
-
-    private KnowledgeRetrievalStatus parseRetrievalStatus(String value) {
-        if (!StringUtils.hasText(value)) {
-            return KnowledgeRetrievalStatus.EMPTY;
-        }
-        for (KnowledgeRetrievalStatus status : KnowledgeRetrievalStatus.values()) {
-            if (status.getValue().equalsIgnoreCase(value.trim())
-                    || status.name().equalsIgnoreCase(value.trim())) {
-                return status;
-            }
-        }
-        return KnowledgeRetrievalStatus.DEGRADED;
-    }
-
-    private KnowledgeScopeType parseScopeType(String value, KnowledgeScopeType fallback) {
-        try {
-            KnowledgeScopeType parsed = KnowledgeScopeType.from(value);
-            return parsed == null ? fallback : parsed;
-        } catch (IllegalArgumentException exception) {
-            return fallback;
-        }
-    }
-
-    private void startLegacyStream(SseEmitter emitter,
+    private void startLocalFallbackStream(SseEmitter emitter,
                                    AgentQaRequest request,
-                                   AuthCurrentUserVO currentUser,
-                                   boolean useStatefulRuntime) {
+                                   AuthCurrentUserVO currentUser) {
         Thread thread = new Thread(() -> {
             String runId = java.util.UUID.randomUUID().toString();
             try {
                 sendEvent(emitter, "run.started", Map.of("runId", runId));
-                AgentQaResponse response = askWithLegacyPipeline(request, currentUser, useStatefulRuntime);
+                AgentQaResponse response = askWithLocalFallbackPipeline(request, currentUser);
                 response.setRunId(runId);
                 if (!StringUtils.hasText(response.getConversationId())) {
                     response.setConversationId(StringUtils.hasText(request.getConversationId())
@@ -372,13 +248,13 @@ public class AgentQaServiceImpl implements AgentQaService {
             } catch (RuntimeException exception) {
                 sendEvent(emitter, "error", Map.of(
                         "runId", runId,
-                        "errorType", "legacy_stream_error",
+                        "errorType", "local_fallback_stream_error",
                         "message", exception.getMessage() == null ? "agent stream failed" : exception.getMessage()
                 ));
                 sendEvent(emitter, "done", Map.of("runId", runId));
                 emitter.completeWithError(exception);
             }
-        }, "legacy-agent-sse");
+        }, "local-agent-sse");
         thread.setDaemon(true);
         thread.start();
     }
@@ -507,9 +383,19 @@ public class AgentQaServiceImpl implements AgentQaService {
                 || (message != null && message.contains("client disconnected"));
     }
 
-    private AgentQaResponse askWithLegacyPipeline(AgentQaRequest request,
-                                                  AuthCurrentUserVO currentUser,
-                                                  boolean useStatefulRuntime) {
+    private AgentQaResponse askWithAgentPipeline(AgentQaRequest request,
+                                                  AuthCurrentUserVO currentUser) {
+        return askWithPipeline(request, currentUser, true);
+    }
+
+    private AgentQaResponse askWithLocalFallbackPipeline(AgentQaRequest request,
+                                                          AuthCurrentUserVO currentUser) {
+        return askWithPipeline(request, currentUser, false);
+    }
+
+    private AgentQaResponse askWithPipeline(AgentQaRequest request,
+                                             AuthCurrentUserVO currentUser,
+                                             boolean allowRemoteAgent) {
 
         String question = request.getQuestion().trim();
         AgentIntent intent = intentRecognizer.recognize(question);
@@ -528,7 +414,7 @@ public class AgentQaServiceImpl implements AgentQaService {
         AgentAnswerContext context = buildAgentContext(request, currentUser, question, intent, scope);
         KnowledgeRetrieveResult retrieval = context.getRetrieval();
 
-        AgentRuntimeResult remote = !useStatefulRuntime || agentRuntimeClient == null
+        AgentRuntimeResult remote = !allowRemoteAgent || agentRuntimeClient == null
                 ? null : agentRuntimeClient.generate(request, currentUser, context);
         GeneratedAnswer generated = remote == null ? null : remote.getAnswer();
         if (generated == null) {
