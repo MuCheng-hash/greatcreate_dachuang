@@ -1,3 +1,5 @@
 app_env = "dev"
 business_health_required = false
 require_llm_model = false
+# Matches the business-service local-development default. Environment variables override it.
+internal_service_token = "red-culture-agent-development-token-change-me"

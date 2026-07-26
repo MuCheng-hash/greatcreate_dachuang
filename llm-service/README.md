@@ -14,6 +14,10 @@ python app.py
 ```
 
 The default address is `http://127.0.0.1:5050`.
+The `dev` profile already includes the same local-only Agent service token as
+`business-service`, so no per-session token setup is required for the default
+local configuration. If `AGENT_INTERNAL_SERVICE_TOKEN` is overridden for the
+business service, set the same environment variable before starting this service.
 
 项目只保留一个 FastAPI 应用：`app.py` 是兼容启动命令的薄壳，实际应用工厂为
 `llm_service.api:create_app`。不要再启动另一个独立的 Agent 进程。

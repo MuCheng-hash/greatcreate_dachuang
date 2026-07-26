@@ -1090,10 +1090,18 @@ ON DUPLICATE KEY UPDATE
   review_status = VALUES(review_status),
   is_active = VALUES(is_active);
 
-DELETE sgr
-FROM school_geo_record sgr
-JOIN school s ON s.school_id = sgr.school_id
-WHERE s.school_code IN ('SCH_SJZ_GC_0001', 'SCH_SJZ_PS_0001', 'SCH_BD_YX_0001');
+-- Temporarily disable safe updates for this targeted cleanup, then restore the prior setting.
+SET @old_sql_safe_updates = @@SQL_SAFE_UPDATES;
+SET SQL_SAFE_UPDATES = 0;
+
+DELETE FROM school_geo_record
+WHERE school_id IN (
+  SELECT school_id
+  FROM school
+  WHERE school_code IN ('SCH_SJZ_GC_0001', 'SCH_SJZ_PS_0001', 'SCH_BD_YX_0001')
+);
+
+SET SQL_SAFE_UPDATES = @old_sql_safe_updates;
 
 INSERT INTO school_geo_record
   (school_id, longitude, latitude, source_type, poi_name, poi_address, poi_type, confidence_level,
