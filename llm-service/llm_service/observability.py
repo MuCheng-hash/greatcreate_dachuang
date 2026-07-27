@@ -361,10 +361,26 @@ class LlmObservability:
         json_rows = [row for row in completed if row["valid_json"] is not None]
         costs = [float(row["cost_usd"]) for row in completed if row["cost_usd"] is not None]
         errors: dict[str, int] = {}
+        fallback_by_level: dict[str, int] = {}
+        fallback_reasons: dict[str, int] = {}
+        fallback_calls = 0
         for row in completed:
+            metadata = json.loads(row["metadata_json"] or "{}")
+            fallback_level = metadata.get("fallbackLevel")
+            level_key = str(fallback_level) if fallback_level is not None else ""
+            is_fallback = level_key.lower() == "local"
+            if not is_fallback:
+                try:
+                    is_fallback = int(fallback_level) > 0
+                except (TypeError, ValueError):
+                    is_fallback = False
+            if is_fallback:
+                fallback_calls += 1
+                fallback_by_level[level_key] = fallback_by_level.get(level_key, 0) + 1
             if row["error_type"]:
                 key = str(row["error_type"])
                 errors[key] = errors.get(key, 0) + 1
+                fallback_reasons[key] = fallback_reasons.get(key, 0) + 1
         return {
             "calls": len(completed),
             "inFlightCalls": len(rows) - len(completed),
@@ -388,6 +404,9 @@ class LlmObservability:
             "pricedCalls": len(costs),
             "unpricedCalls": len(completed) - len(costs),
             "errors": errors,
+            "fallbackCalls": fallback_calls,
+            "fallbackByLevel": fallback_by_level,
+            "fallbackReasons": fallback_reasons,
             "breakdown": {
                 "byUser": self._breakdown(completed, "user_id", "userId"),
                 "bySession": self._breakdown(completed, "session_id", "sessionId"),

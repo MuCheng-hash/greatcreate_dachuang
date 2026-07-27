@@ -44,6 +44,7 @@ class LlmObservabilityTest(unittest.TestCase):
         self.assertEqual(0.006, summary["costUsd"])
         self.assertEqual(1, summary["unpricedCalls"])
         self.assertEqual({"json_parse": 1, "timeout": 1}, summary["errors"])
+        self.assertEqual(0, summary["fallbackCalls"])
         self.assertEqual("account:7", summary["breakdown"]["byUser"][0]["userId"])
         self.assertEqual("s-1", summary["breakdown"]["bySession"][0]["sessionId"])
         self.assertEqual("teaching-plan", summary["breakdown"]["byFeature"][0]["feature"])
@@ -83,7 +84,6 @@ class LlmObservabilityTest(unittest.TestCase):
             llm_model_pricing={"qwen-plus": {"input": 1, "output": 2}},
         )
         app = create_app(settings, self.store)
-        client = TestClient(app)
         call_id = self.store.start_call(
             LlmTraceContext(feature="teaching-plan", user_id="account:9", session_id="private-session"),
             "bailian",
@@ -91,18 +91,47 @@ class LlmObservabilityTest(unittest.TestCase):
         )
         self.store.finish_call(call_id, 42, 10, 5, True)
 
-        self.assertEqual(401, client.get("/admin/observability/summary").status_code)
-        response = client.get(
-            "/admin/observability/summary?userId=account%3A9",
-            headers={"X-Observability-Admin-Token": "observe-secret"},
-        )
-        self.assertEqual(200, response.status_code)
-        self.assertEqual(1, response.json()["calls"])
+        with TestClient(app) as client:
+            self.assertEqual(401, client.get("/admin/observability/summary").status_code)
+            response = client.get(
+                "/admin/observability/summary?userId=account%3A9",
+                headers={"X-Observability-Admin-Token": "observe-secret"},
+            )
+            self.assertEqual(200, response.status_code)
+            self.assertEqual(1, response.json()["calls"])
 
-        metrics = client.get("/metrics").text
-        self.assertIn('llm_calls_total{feature="teaching-plan"', metrics)
-        self.assertNotIn("account:9", metrics)
-        self.assertNotIn("private-session", metrics)
+            metrics = client.get("/metrics").text
+            self.assertIn('llm_calls_total{feature="teaching-plan"', metrics)
+            self.assertNotIn("account:9", metrics)
+            self.assertNotIn("private-session", metrics)
+
+    def test_summary_counts_fallback_levels_and_tool_trace_endpoint_is_protected(self) -> None:
+        context = LlmTraceContext(
+            feature="agent-runtime",
+            metadata={"fallbackLevel": 1},
+        )
+        call_id = self.store.start_call(context, "ollama", "local-model")
+        self.store.finish_call(call_id, 20, 2, 3, True)
+        summary = self.store.summary({"feature": "agent-runtime"})
+        self.assertEqual(1, summary["fallbackCalls"])
+        self.assertEqual(1, summary["fallbackByLevel"]["1"])
+
+        settings = Settings(
+            database_path=self.database_path,
+            observability_admin_token="observe-secret",
+        )
+        app = create_app(settings, self.store)
+        repository = app.state.container.repository
+        thread = repository.create_thread("account:1", "SCHOOL", 1)
+        repository.add_tool_audit(thread.thread_id, "query_graph_relations", {}, "degraded", 12, "degraded")
+        with TestClient(app) as client:
+            self.assertEqual(401, client.get("/admin/observability/tool-traces").status_code)
+            response = client.get(
+                "/admin/observability/tool-traces?toolName=query_graph_relations",
+                headers={"X-Observability-Admin-Token": "observe-secret"},
+            )
+            self.assertEqual(200, response.status_code)
+            self.assertEqual("degraded", response.json()[0]["status"])
 
     def test_agent_tool_call_is_successful_without_json_validation(self) -> None:
         handler = self.store.callback(

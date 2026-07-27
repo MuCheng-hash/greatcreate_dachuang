@@ -151,6 +151,15 @@ def create_app(
             "started_after": started_after, "started_before": started_before,
         })
 
+    @app.get("/admin/observability/tool-traces")
+    async def tool_traces(
+        tool_name: str | None = Query(default=None, alias="toolName"),
+        status: str | None = Query(default=None),
+        limit: int = Query(default=50, ge=1, le=100),
+        _admin: None = Depends(require_observability_admin),
+    ) -> list[dict[str, Any]]:
+        return repository.list_tool_audits(tool_name, status, limit)
+
     @app.post(
         "/agent/threads", response_model=ThreadResponse, status_code=201,
         dependencies=[Depends(require_internal_agent_token)],
@@ -271,7 +280,9 @@ def create_app(
         prompt_key: str, version: str, _admin: None = Depends(require_prompt_admin)
     ) -> dict[str, Any]:
         try:
-            return prompts.activate_version(prompt_key, version)
+            result = prompts.activate_version(prompt_key, version)
+            runtime.invalidate_prompt(prompt_key)
+            return result
         except LookupError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
