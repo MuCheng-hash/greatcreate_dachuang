@@ -1,7 +1,7 @@
 import { flushPromises, mount } from "@vue/test-utils";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const apiMock = vi.hoisted(() => ({ post: vi.fn() }));
+const apiMock = vi.hoisted(() => ({ get: vi.fn(), post: vi.fn() }));
 const authMock = vi.hoisted(() => ({ user: { schoolId: 1 } }));
 const schoolMock = vi.hoisted(() => ({
   school: { schoolId: 1, schoolName: "里庄小学" },
@@ -100,6 +100,55 @@ describe("assistant view", () => {
     expect(wrapper.text()).toContain("逐字回答");
     expect(wrapper.text()).toContain("知识检索：完成");
     expect(wrapper.text()).toContain("检索证据");
+  });
+
+  it("marks an unfinished cached assistant message instead of showing startup forever", async () => {
+    sessionStorage.setItem("school-portal-assistant-session:1", JSON.stringify([
+      { role: "user", text: "上次的问题" },
+      { role: "assistant", answer: "", streamStatus: "正在启动 Agent…" }
+    ]));
+
+    const wrapper = mount(AssistantView, {
+      global: {
+        stubs: {
+          AppShell: { template: "<div><slot /></div>" },
+          InlineNotice: true
+        }
+      }
+    });
+
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("上次回答未完成");
+    expect(wrapper.text()).not.toContain("正在启动 Agent…");
+  });
+
+  it("restores messages from the persisted Agent thread", async () => {
+    sessionStorage.setItem("school-portal-assistant-thread:1", "thread-history");
+    apiMock.get.mockResolvedValueOnce({
+      threadId: "thread-history",
+      messages: [
+        { id: 1, role: "user", content: "历史问题", createdAt: "2026-07-27T03:00:00Z", metadata: {} },
+        { id: 2, role: "assistant", content: "历史回答", createdAt: "2026-07-27T03:00:01Z", metadata: { status: "completed" } }
+      ]
+    });
+
+    const wrapper = mount(AssistantView, {
+      global: {
+        stubs: {
+          AppShell: { template: "<div><slot /></div>" },
+          InlineNotice: true
+        }
+      }
+    });
+
+    await flushPromises();
+
+    expect(apiMock.get).toHaveBeenCalledWith(
+      "/api/ai/qa/thread/thread-history?scopeType=SCHOOL&scopeId=1"
+    );
+    expect(wrapper.text()).toContain("历史问题");
+    expect(wrapper.text()).toContain("历史回答");
   });
 
   it.each([
