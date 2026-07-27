@@ -10,6 +10,7 @@ import com.redculture.platform.vo.AgentGenerationStatus;
 import com.redculture.platform.vo.ai.StatefulAgentRequest;
 import com.redculture.platform.vo.ai.StatefulAgentResponse;
 import com.redculture.platform.vo.request.AgentQaRequest;
+import org.springframework.core.ParameterizedTypeReference;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.http.client.SimpleClientHttpRequestFactory;
@@ -107,6 +108,29 @@ public class AgentRuntimeClient {
             throw new IllegalStateException("stateful agent returned an empty response");
         }
         return response;
+    }
+
+    public Map<String, Object> getThreadHistory(String threadId,
+                                                 AuthCurrentUserVO user,
+                                                 String scopeType,
+                                                 Long scopeId) {
+        return restClient.get()
+                .uri(uriBuilder -> {
+                    var builder = uriBuilder.path("/agent/threads/{threadId}")
+                            .queryParam("ownerId", ownerId(user));
+                    if (StringUtils.hasText(scopeType)) {
+                        builder.queryParam("scopeType", scopeType);
+                    }
+                    if (scopeId != null) {
+                        builder.queryParam("scopeId", scopeId);
+                    }
+                    return builder.build(threadId);
+                })
+                .headers(this::applyInternalServiceToken)
+                .accept(MediaType.APPLICATION_JSON)
+                .retrieve()
+                .body(new ParameterizedTypeReference<Map<String, Object>>() {
+                });
     }
 
     public void stream(StatefulAgentRequest request, Consumer<StreamEvent> consumer) {

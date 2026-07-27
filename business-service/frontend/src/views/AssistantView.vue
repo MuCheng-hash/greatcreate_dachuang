@@ -10,6 +10,8 @@ import type {
   AgentCitation,
   AgentQaRequestPayload,
   AgentQaResponse,
+  AgentThreadHistoryResponse,
+  AgentThreadMessage,
   AgentSseEventData,
   AgentSseEventName,
 } from "@/types/agent";
@@ -50,6 +52,7 @@ const suggestions = computed(() => {
 
 onMounted(async () => {
   await schoolStore.load();
+  await restoreThreadHistory();
   sessionStorage.setItem(conversationStorageKey(), conversationId.value);
   if (threadId.value) sessionStorage.setItem(threadStorageKey(), threadId.value);
   if (!messages.value.length) {
@@ -83,10 +86,76 @@ function loadConversationId() {
 function loadMessages(): AssistantMessage[] {
   try {
     const stored = JSON.parse(sessionStorage.getItem(storageKey()) || "[]") as unknown;
-    return Array.isArray(stored) ? stored as AssistantMessage[] : [];
+    return Array.isArray(stored) ? sanitizeCachedMessages(stored as AssistantMessage[]) : [];
   } catch {
     return [];
   }
+}
+
+function sanitizeCachedMessages(stored: AssistantMessage[]): AssistantMessage[] {
+  return stored.map((message) => {
+    if (
+      message.role === "assistant"
+      && !message.answer?.trim()
+      && message.streamStatus
+    ) {
+      return {
+        ...message,
+        answer: "上次回答未完成，请重新提问。",
+        streamStatus: "上次回答未完成"
+      };
+    }
+    return message;
+  });
+}
+
+async function restoreThreadHistory(): Promise<void> {
+  const scopeId = schoolStore.school?.schoolId || auth.user?.schoolId;
+  if (!threadId.value || !scopeId || typeof api.get !== "function") return;
+  try {
+    const history = await api.get<AgentThreadHistoryResponse>(
+      `/api/ai/qa/thread/${encodeURIComponent(threadId.value)}?scopeType=SCHOOL&scopeId=${scopeId}`
+    );
+    const restored = (history.messages || [])
+      .map((message) => restoreThreadMessage(message, history.threadId))
+      .filter((message): message is AssistantMessage => Boolean(message));
+    if (restored.length) messages.value = restored;
+  } catch {
+    // 历史恢复失败时保留本地缓存，不能阻断当前问答。
+  }
+}
+
+function restoreThreadMessage(
+  message: AgentThreadMessage,
+  persistedThreadId: string
+): AssistantMessage | null {
+  const content = typeof message.content === "string" ? message.content.trim() : "";
+  if (!content) return null;
+  if (message.role === "user") return { role: "user", text: content };
+
+  const metadata = message.metadata || {};
+  const status = typeof metadata.status === "string" ? metadata.status : "completed";
+  const generationStatus = status === "degraded" || status === "skipped" ? status : "completed";
+  const citations = Array.isArray(metadata.citations)
+    ? metadata.citations.filter((item): item is string => typeof item === "string")
+    : [];
+  const toolEvents = Array.isArray(metadata.toolExecutions)
+    ? metadata.toolExecutions
+      .filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object")
+      .map((item) => ({
+        toolName: typeof item.name === "string" ? item.name : undefined,
+        status: typeof item.status === "string" ? item.status : "completed"
+      }))
+    : [];
+  return {
+    role: "assistant",
+    answer: content,
+    citations,
+    toolEvents,
+    generationStatus,
+    streamStatus: "历史回答",
+    threadId: persistedThreadId
+  };
 }
 
 function retrievalStatusLabel(status?: string | null): string {
@@ -217,6 +286,7 @@ async function requestAssistant(userText: string): Promise<void> {
     assistantMessage.citations = ["当前为本地兜底回答，智能问答服务恢复后可获得更完整的引用结果。"];
     assistantMessage.retrievalStatus = "degraded";
     assistantMessage.generationStatus = "degraded";
+    assistantMessage.streamStatus = "已使用本地兜底回答";
     error.value = requestError.message;
     }
   } finally {
