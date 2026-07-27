@@ -25,6 +25,18 @@ def test_versions_are_persistent_and_active_version_is_rendered(tmp_path: Path):
     assert '"theme":"家乡文化"' in selected.content
 
 
+def test_agent_prompt_is_seeded_and_active_content_can_be_switched(tmp_path: Path):
+    manager = PromptManager(tmp_path / "prompts.sqlite3", PROMPT_ROOT)
+
+    assert manager.list_versions("agent")[0]["version"] == "v1"
+    assert "工具" in manager.active_content("agent")
+
+    manager.create_version("agent", "v2", "新版 Agent 工具策略")
+    manager.activate_version("agent", "v2")
+
+    assert manager.active_content("agent") == "新版 Agent 工具策略"
+
+
 def test_experiment_assignment_is_stable_and_metrics_accept_feedback(tmp_path: Path):
     manager = PromptManager(tmp_path / "prompts.sqlite3", PROMPT_ROOT)
     manager.create_version("teaching-plan", "v2", "实验模板\n{{context_json}}")

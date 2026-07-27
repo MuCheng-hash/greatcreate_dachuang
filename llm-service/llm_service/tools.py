@@ -8,6 +8,7 @@ from typing import Any, Callable
 
 from langchain_core.tools import tool
 
+from .business_tool_client import BusinessToolClient, BusinessToolError
 from .repository import ConversationRepository
 from .schemas import ToolExecution, TrustedContext
 
@@ -30,8 +31,12 @@ class ToolRuntimeContext:
     trusted_context: TrustedContext
     repository: ConversationRepository
     output_character_limit: int
+    business_tool_client: BusinessToolClient | None = None
+    grade: str | None = None
+    theme: str | None = None
     executions: list[ToolExecution] = field(default_factory=list)
     event_sink: Callable[[str, dict[str, Any]], None] | None = None
+    degraded_reasons: list[str] = field(default_factory=list)
 
     def _emit(self, event_name: str, data: dict[str, Any]) -> None:
         if self.event_sink is None:
@@ -49,6 +54,11 @@ class ToolRuntimeContext:
         try:
             result = callback()
             output = json.dumps(result, ensure_ascii=False, default=str)
+            if isinstance(result, dict) and str(result.get("retrievalStatus", "")).upper() == "DEGRADED":
+                status = "degraded"
+                reason = str(result.get("degradedReason") or "tool_degraded")
+                if reason not in self.degraded_reasons:
+                    self.degraded_reasons.append(reason)
         except Exception as exc:
             status = "failed"
             output = json.dumps({"error": type(exc).__name__}, ensure_ascii=False)
@@ -63,7 +73,7 @@ class ToolRuntimeContext:
             {
                 "toolName": name,
                 "name": name,
-                "status": "ok" if status == "completed" else "failed",
+                "status": "ok" if status == "completed" else status,
                 "durationMs": duration_ms,
             },
         )
@@ -72,6 +82,38 @@ class ToolRuntimeContext:
 
 def _sanitize(arguments: dict[str, Any]) -> dict[str, Any]:
     return {key: str(value)[:500] for key, value in arguments.items() if "key" not in key.lower() and "token" not in key.lower()}
+
+
+def _merge_evidence(existing: list[Any], incoming: list[Any]) -> list[dict[str, Any]]:
+    merged: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in [*existing, *incoming]:
+        if not isinstance(item, dict):
+            continue
+        citation_id = str(item.get("citationId") or "")
+        identity = f"citation:{citation_id}" if citation_id else json.dumps(item, ensure_ascii=False, sort_keys=True)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        merged.append(dict(item))
+    return merged
+
+
+def _merge_remote_evidence(runtime: ToolRuntimeContext, result: dict[str, Any]) -> None:
+    retrieval = dict(runtime.trusted_context.retrieval or {})
+    graph_facts = _merge_evidence(
+        list(retrieval.get("graphFacts") or []),
+        list(result.get("graphFacts") or []),
+    )
+    citation_candidates = _merge_evidence(
+        list(runtime.trusted_context.citation_candidates or []),
+        list(result.get("citationCandidates") or []),
+    )
+    retrieval["retrievalStatus"] = result.get("retrievalStatus", retrieval.get("retrievalStatus", "empty"))
+    retrieval["graphFacts"] = graph_facts
+    retrieval["citationCandidates"] = citation_candidates
+    runtime.trusted_context.retrieval = retrieval
+    runtime.trusted_context.citation_candidates = citation_candidates
 
 
 _runtime: ContextVar[ToolRuntimeContext | None] = ContextVar("agent_tool_runtime", default=None)
@@ -140,15 +182,52 @@ def retrieve_knowledge(query: str = "", limit: int = 5) -> str:
 
 @tool
 def query_graph_relations(query: str = "", limit: int = 5) -> str:
-    """Read trusted graph facts already retrieved for the authenticated scope."""
+    """Query graph relations through the authenticated Java business tool boundary."""
     runtime = require_runtime()
     safe_limit = max(1, min(limit, 8))
+
+    def local_fallback(reason: str) -> dict[str, Any]:
+        retrieval = runtime.trusted_context.retrieval or {}
+        return {
+            "source": "trusted-context-fallback",
+            "retrievalStatus": "DEGRADED",
+            "degradedReason": reason,
+            "graphFacts": [
+                item for item in retrieval.get("graphFacts", []) if _matches(item, query)
+            ][:safe_limit],
+            "citationCandidates": [
+                item for item in runtime.trusted_context.citation_candidates if _matches(item, query)
+            ][:safe_limit],
+        }
+
+    def retrieve() -> dict[str, Any]:
+        if runtime.business_tool_client is None:
+            return local_fallback("business_tool_client_unavailable")
+        actor = runtime.trusted_context.actor
+        scope = runtime.trusted_context.scope
+        if not actor or not scope:
+            return local_fallback("agent_actor_or_scope_missing")
+        payload = {
+            "actor": actor,
+            "scope": scope,
+            "query": query,
+            "grade": runtime.grade,
+            "theme": runtime.theme,
+            "topK": safe_limit,
+        }
+        try:
+            result = runtime.business_tool_client.query_graph_relations(payload)
+        except BusinessToolError as exc:
+            return local_fallback(exc.reason)
+        result.setdefault("retrievalStatus", "EMPTY")
+        result["graphFacts"] = list(result.get("graphFacts") or [])[:safe_limit]
+        result["citationCandidates"] = list(result.get("citationCandidates") or [])[:safe_limit]
+        _merge_remote_evidence(runtime, result)
+        return result
+
     return runtime.run(
         "query_graph_relations", {"query": query, "limit": safe_limit},
-        lambda: [
-            item for item in (runtime.trusted_context.retrieval or {}).get("graphFacts", [])
-            if _matches(item, query)
-        ][:safe_limit],
+        retrieve,
     )
 
 

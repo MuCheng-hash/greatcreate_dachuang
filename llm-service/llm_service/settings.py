@@ -132,6 +132,9 @@ class Settings(BaseSettings):
     agent_recent_message_count: int = 10
     agent_summary_character_limit: int = 3000
     agent_tool_output_character_limit: int = 5000
+    agent_tool_timeout_seconds: float = Field(
+        5.0, validation_alias=AliasChoices("agent_tool_timeout_seconds", "AGENT_TOOL_TIMEOUT_SECONDS")
+    )
 
     @classmethod
     def settings_customise_sources(

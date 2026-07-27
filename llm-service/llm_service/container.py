@@ -7,6 +7,7 @@ from fastapi import Request
 from agent.config import AgentSettings
 from agent.runtime import AgentRuntime as LegacyAgentRuntime
 
+from .business_tool_client import BusinessToolClient
 from .health import HealthService
 from .model_gateway import ModelGateway
 from .observability import FallbackAlertManager, LlmObservability
@@ -27,6 +28,7 @@ class AppContainer:
     runtime: AgentRuntime
     legacy_agent_runtime: LegacyAgentRuntime
     health: HealthService
+    business_tool_client: BusinessToolClient
 
 
 def build_container(
@@ -40,8 +42,15 @@ def build_container(
     )
     alerts = alerts or FallbackAlertManager(settings.llm_alert_webhook_url)
     model_gateway = ModelGateway(settings, observability, alerts)
-    prompts = PromptManager(settings.database_path, settings.prompt_root)
-    runtime = AgentRuntime(settings, repository, model_gateway, observability, alerts, prompts)
+    prompts = PromptManager(settings.database_path, settings.prompt_root, settings.agent_prompt_version)
+    business_tool_client = BusinessToolClient(
+        settings.internal_business_base_url,
+        settings.internal_service_token,
+        settings.agent_tool_timeout_seconds,
+    )
+    runtime = AgentRuntime(
+        settings, repository, model_gateway, observability, alerts, prompts, business_tool_client
+    )
     legacy_agent_runtime = LegacyAgentRuntime(
         AgentSettings.from_settings(settings), observability, alerts
     )
@@ -56,6 +65,7 @@ def build_container(
         runtime=runtime,
         legacy_agent_runtime=legacy_agent_runtime,
         health=health,
+        business_tool_client=business_tool_client,
     )
 
 

@@ -5,10 +5,15 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.redculture.platform.config.AgentProperties;
 import com.redculture.platform.config.AppMapProperties;
+import com.redculture.platform.vo.AgentCitationVO;
 import com.redculture.platform.vo.AuthCurrentUserVO;
 import com.redculture.platform.vo.AgentGenerationStatus;
 import com.redculture.platform.vo.ai.StatefulAgentRequest;
 import com.redculture.platform.vo.ai.StatefulAgentResponse;
+import com.redculture.platform.vo.ai.AgentActorVO;
+import com.redculture.platform.vo.ai.AgentScopeVO;
+import com.redculture.platform.vo.ai.KnowledgeCitationCandidateVO;
+import com.redculture.platform.vo.ai.KnowledgeRetrieveResult;
 import com.redculture.platform.vo.request.AgentQaRequest;
 import org.springframework.core.ParameterizedTypeReference;
 import org.springframework.http.HttpHeaders;
@@ -65,6 +70,7 @@ public class AgentRuntimeClient {
             if (response == null || !StringUtils.hasText(response.getAnswer())) {
                 return null;
             }
+            mergeRemoteCitations(context, response.getCitations());
             List<String> citationIds = response.getCitations() == null ? new ArrayList<>()
                     : response.getCitations().stream()
                     .map(item -> item.getCitationId())
@@ -80,7 +86,7 @@ public class AgentRuntimeClient {
             AgentGenerationStatus generationStatus = generationStatus(response);
             return new AgentRuntimeResult(
                     new GeneratedAnswer(response.getAnswer(), citationIds, followUps, generationStatus),
-                    response.getThreadId(), response.getStatus(), toolNames
+                    response.getThreadId(), response.getStatus(), toolNames, response.getDegradedReason()
             );
         } catch (RuntimeException ignored) {
             return null;
@@ -92,7 +98,12 @@ public class AgentRuntimeClient {
                                AuthCurrentUserVO user,
                                AgentAnswerContext context,
                                Consumer<StreamEvent> consumer) {
-        stream(chatRequest(request, user, context), consumer);
+        stream(chatRequest(request, user, context), event -> {
+            if ("final".equals(event.event())) {
+                mergeRemoteCitations(context, event.safeData().get("response"));
+            }
+            consumer.accept(event);
+        });
     }
 
     public StatefulAgentResponse send(StatefulAgentRequest request) {
@@ -186,7 +197,7 @@ public class AgentRuntimeClient {
         body.setGrade(context.getGrade());
         body.setTheme(context.getTheme());
         body.setIntent(context.getIntent() == null ? null : context.getIntent().name());
-        body.setContext(trustedContext(context));
+        body.setContext(trustedContext(context, user));
         return body;
     }
 
@@ -228,8 +239,17 @@ public class AgentRuntimeClient {
                 ? AgentGenerationStatus.DEGRADED : AgentGenerationStatus.COMPLETED;
     }
 
-    private Map<String, Object> trustedContext(AgentAnswerContext context) {
+    private Map<String, Object> trustedContext(AgentAnswerContext context, AuthCurrentUserVO user) {
         Map<String, Object> trusted = new LinkedHashMap<>();
+        AgentActorVO actor = new AgentActorVO();
+        actor.setAccountId(user.getAccountId());
+        actor.setRoleCode(user.getRoleCode());
+        actor.setSchoolId(user.getSchoolId());
+        AgentScopeVO scope = new AgentScopeVO();
+        scope.setScopeType(context.getScopeType().name());
+        scope.setScopeId(context.getScopeId());
+        trusted.put("actor", actor);
+        trusted.put("scope", scope);
         if (context.getSchoolDetail() != null) {
             trusted.put("school", context.getSchoolDetail().getSchool());
             trusted.put("resources", context.getSchoolDetail().getResources());
@@ -240,6 +260,66 @@ public class AgentRuntimeClient {
         trusted.put("citationCandidates", context.getRetrieval() == null
                 ? List.of() : context.getRetrieval().getCitationCandidates());
         return trusted;
+    }
+
+    private void mergeRemoteCitations(AgentAnswerContext context, Object response) {
+        if (!(response instanceof Map<?, ?> responseMap)) {
+            return;
+        }
+        Object rawCitations = responseMap.get("citations");
+        if (!(rawCitations instanceof List<?> values)) {
+            return;
+        }
+        List<AgentCitationVO> citations = new ArrayList<>();
+        for (Object value : values) {
+            if (!(value instanceof Map<?, ?> map)) {
+                continue;
+            }
+            AgentCitationVO citation = new AgentCitationVO();
+            citation.setCitationId(textValue(map.get("citationId")));
+            citation.setTitle(textValue(map.get("title")));
+            citation.setExcerpt(textValue(map.get("excerpt")));
+            citation.setSourceType(textValue(map.get("sourceType")));
+            if (map.get("score") instanceof Number score) {
+                citation.setScore(score.doubleValue());
+            }
+            citations.add(citation);
+        }
+        mergeRemoteCitations(context, citations);
+    }
+
+    private void mergeRemoteCitations(AgentAnswerContext context, List<AgentCitationVO> citations) {
+        if (context == null || citations == null || citations.isEmpty()) {
+            return;
+        }
+        KnowledgeRetrieveResult retrieval = context.getRetrieval();
+        if (retrieval == null) {
+            retrieval = KnowledgeRetrieveResult.empty();
+            context.setRetrieval(retrieval);
+        }
+        if (retrieval.getCitationCandidates() == null) {
+            retrieval.setCitationCandidates(new ArrayList<>());
+        }
+        for (AgentCitationVO citation : citations) {
+            if (citation == null || !StringUtils.hasText(citation.getCitationId())) {
+                continue;
+            }
+            boolean exists = retrieval.getCitationCandidates().stream()
+                    .anyMatch(item -> item != null && citation.getCitationId().equals(item.getCitationId()));
+            if (exists) {
+                continue;
+            }
+            KnowledgeCitationCandidateVO candidate = new KnowledgeCitationCandidateVO();
+            candidate.setCitationId(citation.getCitationId());
+            candidate.setTitle(citation.getTitle());
+            candidate.setExcerpt(citation.getExcerpt());
+            candidate.setSourceType(citation.getSourceType());
+            retrieval.getCitationCandidates().add(candidate);
+        }
+    }
+
+    private String textValue(Object value) {
+        return value == null ? null : String.valueOf(value);
     }
 
     private void readEvents(InputStream inputStream, Consumer<StreamEvent> consumer) {

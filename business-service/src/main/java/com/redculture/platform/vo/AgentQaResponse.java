@@ -22,6 +22,8 @@ public class AgentQaResponse {
 
     private String fallbackLevel;
 
+    private String degradedReason;
+
     private AgentIntent intent;
 
     private KnowledgeRetrievalStatus retrievalStatus;

@@ -5,10 +5,11 @@ import json
 import sqlite3
 import threading
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 
 def utc_now() -> str:
@@ -25,21 +26,33 @@ class PromptSelection:
 
 
 class PromptManager:
-    def __init__(self, database_path: Path | str, prompt_root: Path | str):
+    def __init__(
+        self, database_path: Path | str, prompt_root: Path | str, agent_prompt_version: str = "v1"
+    ):
         self.database_path = Path(database_path)
         self.prompt_root = Path(prompt_root)
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
         self._initialize()
+        self._seed_file_prompt(
+            "agent", agent_prompt_version,
+            self.prompt_root / "agent" / agent_prompt_version / "system.md",
+        )
         self._seed_file_prompt("teaching-plan", "v1", self.prompt_root / "teaching-plan" / "v1" / "system.md")
         self._seed_file_prompt(
             "resource-discovery", "v1", self.prompt_root / "resource-discovery" / "v1" / "system.md"
         )
 
-    def _connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
         connection = sqlite3.connect(self.database_path, timeout=10)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA journal_mode = WAL")
+        try:
+            yield connection
+            connection.commit()
+        finally:
+            connection.close()
         return connection
 
     def _initialize(self) -> None:
@@ -102,6 +115,12 @@ class PromptManager:
                    ) VALUES (?, ?, ?, ?, 'system', 'seeded from repository', ?)""",
                 (prompt_key, version, content, 0 if exists else 1, utc_now()),
             )
+            connection.execute(
+                """UPDATE prompt_version SET content = ?
+                   WHERE prompt_key = ? AND version = ?
+                     AND created_by = 'system' AND notes = 'seeded from repository'""",
+                (content, prompt_key, version),
+            )
 
     def create_version(
         self, prompt_key: str, version: str, content: str, created_by: str = "admin", notes: str = ""
@@ -111,7 +130,7 @@ class PromptManager:
         content = content.strip()
         if not prompt_key or not version or not content:
             raise ValueError("promptKey, version and content are required")
-        if "{{context_json}}" not in content:
+        if prompt_key != "agent" and "{{context_json}}" not in content:
             raise ValueError("prompt content must contain {{context_json}}")
         with self._lock, self._connect() as connection:
             connection.execute(
@@ -153,6 +172,18 @@ class PromptManager:
         if row is None:
             raise LookupError("prompt version not found")
         return dict(row)
+
+    def active_content(self, prompt_key: str) -> str:
+        with self._connect() as connection:
+            row = connection.execute(
+                """SELECT content FROM prompt_version
+                   WHERE prompt_key = ? AND active = 1
+                   ORDER BY created_at DESC LIMIT 1""",
+                (prompt_key,),
+            ).fetchone()
+        if row is None:
+            raise LookupError("active prompt version not found")
+        return str(row["content"])
 
     def configure_experiment(
         self, prompt_key: str, experiment_key: str, variants: list[dict[str, Any]], active: bool
