@@ -24,6 +24,7 @@ let AMapRef;
 let overlays = [];
 let discoveryToken = 0;
 let lastDiscoveryAt = 0;
+let hasFittedInitialView = false;
 
 const selectedTitle = computed(() => {
   if (selected.value?.kind === "school") return schoolStore.school?.schoolName;
@@ -123,7 +124,10 @@ function renderOverlays() {
 
   map.add(overlays);
   const markers = overlays.filter((item) => item instanceof AMapRef.Marker);
-  if (markers.length) map.setFitView(markers, false, [70, 70, 70, 70], 15);
+  if (markers.length && !hasFittedInitialView) {
+    map.setFitView(markers, false, [70, 70, 70, 70], 15);
+    hasFittedInitialView = true;
+  }
 }
 
 async function startDiscovery() {
