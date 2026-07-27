@@ -13,6 +13,12 @@ public class AgentProperties {
      */
     private String internalServiceToken = "red-culture-agent-development-token-change-me";
 
+    /** FastAPI Prompt 管理令牌，仅由 Java 服务端代理使用。 */
+    private String promptAdminToken;
+
+    /** FastAPI Observability 管理令牌，仅由 Java 服务端代理使用。 */
+    private String observabilityAdminToken;
+
     private int connectTimeoutMs = 3000;
 
     private int readTimeoutMs = 30000;

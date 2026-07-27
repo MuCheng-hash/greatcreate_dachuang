@@ -5,7 +5,12 @@ const adminState = {
     resources: [],
     discoveryCandidates: [],
     selectedSchoolIdForRelations: null,
-    selectedSchoolIdForPlans: null
+    selectedSchoolIdForPlans: null,
+    agentSummary: null,
+    agentTraces: [],
+    agentToolTraces: [],
+    agentPromptVersions: [],
+    agentPromptMetrics: []
 };
 
 const adminElements = {
@@ -153,7 +158,29 @@ const adminElements = {
     planRefreshButton: document.querySelector("#planRefreshButton"),
     planResetButton: document.querySelector("#planResetButton"),
     planTableBody: document.querySelector("#planTableBody"),
-    planListCount: document.querySelector("#planListCount")
+    planListCount: document.querySelector("#planListCount"),
+
+    agentTraceStatusFilter: document.querySelector("#agentTraceStatusFilter"),
+    agentTraceFeatureFilter: document.querySelector("#agentTraceFeatureFilter"),
+    agentToolNameFilter: document.querySelector("#agentToolNameFilter"),
+    agentOpsRefreshButton: document.querySelector("#agentOpsRefreshButton"),
+    agentCallsMetric: document.querySelector("#agentCallsMetric"),
+    agentSuccessMetric: document.querySelector("#agentSuccessMetric"),
+    agentAverageLatencyMetric: document.querySelector("#agentAverageLatencyMetric"),
+    agentPercentileMetric: document.querySelector("#agentPercentileMetric"),
+    agentTotalTokensMetric: document.querySelector("#agentTotalTokensMetric"),
+    agentTokenBreakdownMetric: document.querySelector("#agentTokenBreakdownMetric"),
+    agentFallbackMetric: document.querySelector("#agentFallbackMetric"),
+    agentFallbackHint: document.querySelector("#agentFallbackHint"),
+    agentFallbackReasons: document.querySelector("#agentFallbackReasons"),
+    agentFallbackReasonCount: document.querySelector("#agentFallbackReasonCount"),
+    agentPromptKeySelect: document.querySelector("#agentPromptKeySelect"),
+    agentPromptListCount: document.querySelector("#agentPromptListCount"),
+    agentPromptTableBody: document.querySelector("#agentPromptTableBody"),
+    agentTraceListCount: document.querySelector("#agentTraceListCount"),
+    agentTraceTableBody: document.querySelector("#agentTraceTableBody"),
+    agentToolTraceListCount: document.querySelector("#agentToolTraceListCount"),
+    agentToolTraceTableBody: document.querySelector("#agentToolTraceTableBody")
 };
 
 document.addEventListener("DOMContentLoaded", () => {
@@ -220,6 +247,12 @@ function bindAdminEvents() {
         adminState.selectedSchoolIdForPlans = parseNullableNumber(adminElements.planFilterSchoolSelect.value);
         void loadPlans();
     });
+
+    adminElements.agentOpsRefreshButton?.addEventListener("click", () => void loadAgentOps());
+    adminElements.agentTraceStatusFilter?.addEventListener("change", () => void loadAgentOps());
+    adminElements.agentTraceFeatureFilter?.addEventListener("change", () => void loadAgentOps());
+    adminElements.agentToolNameFilter?.addEventListener("change", () => void loadAgentOps());
+    adminElements.agentPromptKeySelect?.addEventListener("change", () => void loadAgentPrompts());
 }
 
 async function bootstrapAdmin() {
@@ -246,6 +279,201 @@ async function bootstrapAdmin() {
     } catch (error) {
         setGlobalStatus("异常", error.message || "后台接口请求失败。");
     }
+}
+
+async function loadAgentOps() {
+    if (!adminElements.agentTraceTableBody) return;
+    const traceParams = new URLSearchParams({ limit: "50" });
+    const status = adminElements.agentTraceStatusFilter?.value || "";
+    const feature = adminElements.agentTraceFeatureFilter?.value?.trim() || "";
+    if (status) traceParams.set("status", status);
+    if (feature) traceParams.set("feature", feature);
+
+    const toolParams = new URLSearchParams({ limit: "50" });
+    const toolName = adminElements.agentToolNameFilter?.value?.trim() || "";
+    if (status) toolParams.set("status", status);
+    if (toolName) toolParams.set("toolName", toolName);
+
+    try {
+        const [summary, traces, toolTraces] = await Promise.all([
+            requestJson(`/api/admin/agent/observability/summary?${traceParams.toString()}`),
+            requestJson(`/api/admin/agent/observability/traces?${traceParams.toString()}`),
+            requestJson(`/api/admin/agent/observability/tool-traces?${toolParams.toString()}`)
+        ]);
+        adminState.agentSummary = summary || {};
+        adminState.agentTraces = Array.isArray(traces) ? traces : [];
+        adminState.agentToolTraces = Array.isArray(toolTraces) ? toolTraces : [];
+        renderAgentSummary(adminState.agentSummary);
+        renderAgentTraces(adminState.agentTraces);
+        renderAgentToolTraces(adminState.agentToolTraces);
+        await loadAgentPrompts();
+    } catch (error) {
+        setGlobalStatus("Agent 运维异常", error.message || "Agent 运维接口请求失败。");
+        renderAgentEmptyState(error.message || "Agent 运维数据暂不可用。", "agentTraceTableBody", 8);
+        renderAgentEmptyState(error.message || "Agent 工具轨迹暂不可用。", "agentToolTraceTableBody", 6);
+    }
+}
+
+async function loadAgentPrompts() {
+    if (!adminElements.agentPromptTableBody) return;
+    const promptKey = adminElements.agentPromptKeySelect?.value || "agent";
+    try {
+        const [versions, metrics] = await Promise.all([
+            requestJson(`/api/admin/agent/prompts/${encodeURIComponent(promptKey)}/versions`),
+            requestJson(`/api/admin/agent/prompts/${encodeURIComponent(promptKey)}/metrics`)
+        ]);
+        adminState.agentPromptVersions = Array.isArray(versions) ? versions : [];
+        adminState.agentPromptMetrics = Array.isArray(metrics) ? metrics : [];
+        renderAgentPrompts(promptKey, adminState.agentPromptVersions, adminState.agentPromptMetrics);
+    } catch (error) {
+        renderAgentEmptyState(error.message || "Prompt 数据暂不可用。", "agentPromptTableBody", 5);
+    }
+}
+
+function renderAgentSummary(summary) {
+    const latency = summary.latencyMs || {};
+    const tokens = summary.tokens || {};
+    const fallbackReasons = summary.fallbackReasons || {};
+    const fallbackCount = Number(summary.fallbackCalls || 0);
+    const reasonCount = Object.keys(fallbackReasons).length;
+    adminElements.agentCallsMetric.textContent = formatAgentNumber(summary.calls);
+    const totalCalls = Number(summary.calls || 0);
+    const successfulCalls = Number(summary.successfulCalls || 0);
+    const failureRate = totalCalls > 0 ? (totalCalls - successfulCalls) / totalCalls : null;
+    adminElements.agentSuccessMetric.textContent = `成功率 ${formatAgentPercent(summary.successRate)} / 失败率 ${formatAgentPercent(failureRate)}`;
+    adminElements.agentAverageLatencyMetric.textContent = `${formatAgentNumber(latency.average)} ms`;
+    adminElements.agentPercentileMetric.textContent = `P50 ${formatAgentNumber(latency.p50)} / P95 ${formatAgentNumber(latency.p95)} / P99 ${formatAgentNumber(latency.p99)}`;
+    adminElements.agentTotalTokensMetric.textContent = formatAgentNumber(tokens.total);
+    adminElements.agentTokenBreakdownMetric.textContent = `输入 ${formatAgentNumber(tokens.input)} / 输出 ${formatAgentNumber(tokens.output)}`;
+    adminElements.agentFallbackMetric.textContent = formatAgentNumber(fallbackCount);
+    adminElements.agentFallbackHint.textContent = `原因统计 ${reasonCount} 类`;
+    adminElements.agentFallbackReasonCount.textContent = `${reasonCount} 类`;
+
+    const reasonEntries = Object.entries(fallbackReasons);
+    adminElements.agentFallbackReasons.innerHTML = reasonEntries.length
+        ? reasonEntries.map(([reason, count]) => `
+            <div class="agent-reason-item">
+                <span>${escapeHtml(reason)}</span>
+                <strong>${escapeHtml(String(count))}</strong>
+            </div>
+        `).join("")
+        : `<div class="agent-empty-note">暂无 fallback 原因记录。</div>`;
+}
+
+function renderAgentPrompts(promptKey, versions, metrics) {
+    const metricMap = new Map(metrics.map(item => [String(item.version || ""), item]));
+    adminElements.agentPromptListCount.textContent = `${versions.length} 个版本`;
+    adminElements.agentPromptTableBody.innerHTML = "";
+    if (!versions.length) {
+        renderAgentEmptyState(`暂无 ${promptKey} Prompt 版本。`, "agentPromptTableBody", 5);
+        return;
+    }
+    versions.forEach(version => {
+        const key = String(version.version || "");
+        const metric = metricMap.get(key) || {};
+        const active = Number(version.active) === 1 || version.active === true;
+        const tr = document.createElement("tr");
+        tr.innerHTML = `
+            <td><strong>${escapeHtml(key || "-")}</strong></td>
+            <td>${active ? '<span class="status-pill status-approved">当前激活</span>' : '<span class="status-pill status-draft">未激活</span>'}</td>
+            <td>${escapeHtml(formatAgentDate(version.created_at || version.createdAt))}</td>
+            <td>${escapeHtml(metric.runs == null ? "暂无运行" : `${metric.runs} 次 / 成功率 ${formatAgentPercent(metric.success_rate ?? metric.successRate)}`)}</td>
+            <td><button class="action-button" data-prompt-version="${escapeHtml(key)}" ${active ? "disabled" : ""}>${active ? "已激活" : "激活"}</button></td>
+        `;
+        const button = tr.querySelector("[data-prompt-version]");
+        button?.addEventListener("click", () => void activateAgentPrompt(promptKey, key));
+        adminElements.agentPromptTableBody.appendChild(tr);
+    });
+}
+
+async function activateAgentPrompt(promptKey, version) {
+    if (!window.confirm(`确认激活 ${promptKey} / ${version}？`)) return;
+    try {
+        await requestJson(`/api/admin/agent/prompts/${encodeURIComponent(promptKey)}/versions/${encodeURIComponent(version)}/activate`, {
+            method: "POST",
+            body: {}
+        });
+        setGlobalStatus("Prompt 已激活", `${promptKey} 当前使用版本 ${version}。`);
+        await loadAgentPrompts();
+    } catch (error) {
+        setGlobalStatus("Prompt 激活失败", error.message || "Prompt 激活失败。");
+    }
+}
+
+function renderAgentTraces(records) {
+    adminElements.agentTraceListCount.textContent = `${records.length} 条`;
+    adminElements.agentTraceTableBody.innerHTML = "";
+    if (!records.length) {
+        renderAgentEmptyState("暂无模型 Trace。", "agentTraceTableBody", 8);
+        return;
+    }
+    records.forEach(record => {
+        const metadata = record.metadata || {};
+        const tr = document.createElement("tr");
+        tr.innerHTML = `
+            <td>${escapeHtml(formatAgentDate(record.startedAt))}</td>
+            <td>${escapeHtml(record.feature || "-")}</td>
+            <td>${escapeHtml([record.provider, record.model].filter(Boolean).join(" / ") || "-")}</td>
+            <td>${renderStatus(record.status)}</td>
+            <td>${escapeHtml(record.latencyMs == null ? "-" : `${record.latencyMs} ms`)}</td>
+            <td>${escapeHtml(record.totalTokens == null ? "-" : String(record.totalTokens))}</td>
+            <td>${escapeHtml(metadata.fallbackLevel == null ? "-" : String(metadata.fallbackLevel))}</td>
+            <td title="${escapeHtml(record.errorMessage || "")}">${escapeHtml(record.errorType || "-")}</td>
+        `;
+        adminElements.agentTraceTableBody.appendChild(tr);
+    });
+}
+
+function renderAgentToolTraces(records) {
+    adminElements.agentToolTraceListCount.textContent = `${records.length} 条`;
+    adminElements.agentToolTraceTableBody.innerHTML = "";
+    if (!records.length) {
+        renderAgentEmptyState("暂无 Agent 工具 Trace。", "agentToolTraceTableBody", 6);
+        return;
+    }
+    records.forEach(record => {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `
+            <td>${escapeHtml(formatAgentDate(record.createdAt))}</td>
+            <td><strong>${escapeHtml(record.toolName || "-")}</strong></td>
+            <td>${renderStatus(record.status)}</td>
+            <td>${escapeHtml(record.durationMs == null ? "-" : `${record.durationMs} ms`)}</td>
+            <td title="${escapeHtml(record.threadId || "")}">${escapeHtml(shortAgentId(record.threadId))}</td>
+            <td title="${escapeHtml(record.resultPreview || "")}">${escapeHtml(truncateAgentText(record.resultPreview, 180))}</td>
+        `;
+        adminElements.agentToolTraceTableBody.appendChild(tr);
+    });
+}
+
+function renderAgentEmptyState(message, elementId, colspan) {
+    const element = document.querySelector(`#${elementId}`);
+    if (element) element.innerHTML = `<tr><td colspan="${colspan}">${escapeHtml(message)}</td></tr>`;
+}
+
+function formatAgentNumber(value) {
+    if (value === null || value === undefined || value === "" || Number.isNaN(Number(value))) return "-";
+    return Number(value).toLocaleString("zh-CN", { maximumFractionDigits: 1 });
+}
+
+function formatAgentPercent(value) {
+    if (value === null || value === undefined || value === "" || Number.isNaN(Number(value))) return "-";
+    return `${(Number(value) * 100).toFixed(1)}%`;
+}
+
+function formatAgentDate(value) {
+    if (!value) return "-";
+    const date = new Date(value);
+    return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString("zh-CN", { hour12: false });
+}
+
+function shortAgentId(value) {
+    const text = String(value || "-");
+    return text.length > 14 ? `${text.slice(0, 8)}…${text.slice(-4)}` : text;
+}
+
+function truncateAgentText(value, maxLength) {
+    const text = String(value || "-");
+    return text.length > maxLength ? `${text.slice(0, maxLength)}…` : text;
 }
 
 async function logoutAdmin() {
@@ -347,6 +575,9 @@ function setActiveTab(tabName) {
     adminElements.panels.forEach(panel => {
         panel.classList.toggle("is-active", panel.dataset.panel === tabName);
     });
+    if (tabName === "agent-ops") {
+        void loadAgentOps();
+    }
 }
 
 function setGlobalStatus(title, hint) {
