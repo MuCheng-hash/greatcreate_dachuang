@@ -58,6 +58,7 @@ onMounted(async () => {
   if (!messages.value.length) {
     messages.value.push({ role: "assistant", answer: `你好，我可以结合${schoolStore.school?.schoolName || "本校"}的周边资源，协助你进行教学讲解和活动设计。`, citations: [] });
   }
+  await scrollToBottom();
 });
 
 watch(messages, (value) => sessionStorage.setItem(storageKey(), JSON.stringify(value)), { deep: true });
