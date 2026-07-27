@@ -610,3 +610,31 @@ def test_model_output_filters_invented_citations(tmp_path: Path):
     response = asyncio.run(runtime.handle(AgentMessageRequest.model_validate(message_payload())))
     assert response.status == "completed"
     assert [item.citation_id for item in response.citations] == ["chunk:1"]
+
+
+@pytest.mark.parametrize(
+    ("content", "expected"),
+    [
+        (
+            "说明如下：\n```json\n"
+            '{"answer":"带包装的回答","citationIds":[],"relatedResources":[],"followUpQuestions":[]}'
+            "\n```",
+            "带包装的回答",
+        ),
+        ("这是一段没有 JSON 包装的有效回答。", "这是一段没有 JSON 包装的有效回答。"),
+    ],
+)
+def test_model_output_accepts_wrapped_json_and_plain_text(
+    tmp_path: Path, content: str, expected: str
+):
+    runtime = create_app(settings_for(tmp_path)).state.runtime
+
+    class FakeAgent:
+        async def ainvoke(self, _input, config=None):
+            return {"messages": [AIMessage(content=content)]}
+
+    runtime._agent = FakeAgent()
+    response = asyncio.run(runtime.handle(AgentMessageRequest.model_validate(message_payload())))
+
+    assert response.status == "completed"
+    assert response.answer == expected

@@ -46,6 +46,36 @@ def router_settings() -> Settings:
 
 
 class ModelGatewayFallbackTest(unittest.IsolatedAsyncioTestCase):
+    def test_parse_json_accepts_markdown_and_surrounding_text(self) -> None:
+        content = (
+            "结果如下：\n"
+            "```json\n"
+            '{"answer":"可用资源包括卫生院和生态公园"}\n'
+            "```\n"
+            "以上内容来自本校资源库。"
+        )
+
+        parsed = ModelGateway.parse_json(content)
+
+        self.assertEqual(
+            {"answer": "可用资源包括卫生院和生态公园"},
+            parsed,
+        )
+
+    def test_parse_json_accepts_object_embedded_in_plain_text(self) -> None:
+        parsed = ModelGateway.parse_json(
+            'Here is the result: {"answer":"适合四年级"} Thanks.'
+        )
+
+        self.assertEqual({"answer": "适合四年级"}, parsed)
+
+    def test_parse_json_handles_braces_inside_json_strings(self) -> None:
+        parsed = ModelGateway.parse_json(
+            '模型说明： {"answer":"活动要求使用 {安全} 规则"}'
+        )
+
+        self.assertEqual({"answer": "活动要求使用 {安全} 规则"}, parsed)
+
     async def test_uses_primary_then_fallback_then_lightweight(self) -> None:
         models = [
             FakeModel(error=TimeoutError("primary timed out")),

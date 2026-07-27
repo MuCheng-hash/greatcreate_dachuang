@@ -791,18 +791,32 @@ class AgentRuntime:
                 final_content = message_text(message.content).strip()
                 if final_content:
                     break
-        try:
-            parsed = AgentModelOutput.model_validate(json.loads(self._strip_json_fence(final_content)))
-        except (ValueError, TypeError, json.JSONDecodeError) as exc:
-            raise ValueError("invalid_model_output") from exc
-        if not parsed.answer.strip():
+        if not final_content:
             raise ValueError("invalid_model_output")
-        return parsed
+
+        payload = ModelGateway.parse_json(final_content)
+        if payload is not None:
+            try:
+                parsed = AgentModelOutput.model_validate(payload)
+            except (ValueError, TypeError) as exc:
+                raise ValueError("invalid_model_output") from exc
+            if not parsed.answer.strip():
+                raise ValueError("invalid_model_output")
+            return parsed
+
+        # 普通 CHAT 允许兼容返回纯文本；结构化任务仍由各自 validator 严格校验。
+        plain_answer = self._plain_text_answer(final_content)
+        if not plain_answer:
+            raise ValueError("invalid_model_output")
+        return AgentModelOutput(answer=plain_answer)
 
     def _partial_answer(self, content: str) -> str:
         normalized = content.strip()
         if not normalized:
             return ""
+        parsed_payload = ModelGateway.parse_json(normalized)
+        if parsed_payload is not None and isinstance(parsed_payload.get("answer"), str):
+            return parsed_payload["answer"]
         candidate = self._strip_json_fence(normalized)
         try:
             parsed = json.loads(candidate)
@@ -816,7 +830,28 @@ class AgentRuntime:
                 return json.loads('"' + match.group(1) + '"')
             except (ValueError, json.JSONDecodeError):
                 return match.group(1)
-        return normalized if not normalized.startswith("{") else ""
+        if "{" in normalized or normalized.startswith("```"):
+            return ""
+        return self._plain_text_answer(normalized)
+
+    @staticmethod
+    def _plain_text_answer(content: str) -> str:
+        normalized = content.strip()
+        if not normalized:
+            return ""
+        lowered = normalized.lower()
+        error_markers = (
+            "无效响应",
+            "模型不可用",
+            "服务不可用",
+            "invalid response",
+            "invalid_model_output",
+            "model_unavailable",
+            "service unavailable",
+        )
+        if len(normalized) <= 160 and any(marker in lowered for marker in error_markers):
+            return ""
+        return normalized
 
     def _strip_json_fence(self, value: str) -> str:
         normalized = value.strip()
