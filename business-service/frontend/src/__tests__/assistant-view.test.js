@@ -151,6 +151,28 @@ describe("assistant view", () => {
     expect(wrapper.text()).toContain("历史回答");
   });
 
+  it("opens at the latest cached message", async () => {
+    sessionStorage.setItem("school-portal-assistant-session:1", JSON.stringify([
+      { role: "user", text: "第一条问题" },
+      { role: "assistant", answer: "最新回答", citations: [] }
+    ]));
+
+    const wrapper = mount(AssistantView, {
+      global: {
+        stubs: {
+          AppShell: { template: "<div><slot /></div>" },
+          InlineNotice: true
+        }
+      }
+    });
+    const scrollContainer = wrapper.get(".chat-scroll").element;
+    Object.defineProperty(scrollContainer, "scrollHeight", { configurable: true, value: 480 });
+
+    await flushPromises();
+
+    expect(scrollContainer.scrollTop).toBe(480);
+  });
+
   it.each([
     ["empty", "未检索到直接匹配的知识证据"],
     ["degraded", "知识检索部分不可用，当前回答基于可用业务数据"]
