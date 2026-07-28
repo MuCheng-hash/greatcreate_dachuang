@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref, watch } from "vue";
-import { Bot, MessageCircleQuestion, Send, Sparkles, Trash2, UserRound } from "@lucide/vue";
+import { Archive, Bot, History, MessageCircleQuestion, Plus, Send, Sparkles, Trash2, UserRound } from "@lucide/vue";
 import AppShell from "@/components/AppShell.vue";
 import InlineNotice from "@/components/InlineNotice.vue";
 import { api } from "@/services/api";
@@ -12,6 +12,9 @@ import type {
   AgentQaResponse,
   AgentSseEventData,
   AgentSseEventName,
+  LlmModelOption,
+  AssistantConversationDetail,
+  AssistantConversationSummary,
 } from "@/types/agent";
 
 interface AssistantToolEvent {
@@ -26,6 +29,7 @@ interface AssistantMessage extends AgentQaResponse {
   citations?: Array<AgentCitation | string>;
   toolEvents?: AssistantToolEvent[];
   streamStatus?: string;
+  effectiveModel?: string;
 }
 
 const auth = useAuthStore();
@@ -38,6 +42,12 @@ const messages = ref<AssistantMessage[]>(loadMessages());
 const conversationId = ref<string>(loadConversationId());
 const activeAbortController = ref<AbortController | null>(null);
 const threadId = ref<string>(loadThreadId());
+const models = ref<LlmModelOption[]>([]);
+const selectedModelId = ref<string>("");
+const history = ref<AssistantConversationSummary[]>([]);
+const historyLoading = ref<boolean>(false);
+const historyError = ref<string>("");
+const historyBusyId = ref<string>("");
 
 const suggestions = computed(() => {
   const resourceName = schoolStore.resources[0]?.resource?.resourceName;
@@ -49,13 +59,85 @@ const suggestions = computed(() => {
 });
 
 onMounted(async () => {
-  await schoolStore.load();
+  await Promise.all([schoolStore.load(), loadModels()]);
+  await loadHistory();
+  if (threadId.value) await openConversation(threadId.value, false);
   sessionStorage.setItem(conversationStorageKey(), conversationId.value);
   if (threadId.value) sessionStorage.setItem(threadStorageKey(), threadId.value);
   if (!messages.value.length) {
     messages.value.push({ role: "assistant", answer: `你好，我可以结合${schoolStore.school?.schoolName || "本校"}的周边资源，协助你进行教学讲解和活动设计。`, citations: [] });
   }
 });
+
+async function loadHistory(): Promise<void> {
+  historyLoading.value = true;
+  historyError.value = "";
+  try {
+    history.value = await api.get<AssistantConversationSummary[]>("/api/ai/qa/history");
+  } catch {
+    history.value = [];
+    historyError.value = "历史记录暂时无法加载";
+  } finally {
+    historyLoading.value = false;
+  }
+}
+
+async function openConversation(selectedThreadId: string, showError = true): Promise<void> {
+  if (!selectedThreadId || historyBusyId.value) return;
+  historyBusyId.value = selectedThreadId;
+  try {
+    const detail = await api.get<AssistantConversationDetail>(`/api/ai/qa/history/${selectedThreadId}`);
+    messages.value = detail.messages
+      .filter((item) => item.role === "user" || item.role === "assistant")
+      .map((item) => item.role === "user"
+        ? { role: "user", text: item.content }
+        : { role: "assistant", answer: item.content, citations: [] });
+    threadId.value = detail.threadId;
+    conversationId.value = makeConversationId();
+    await scrollToBottom();
+  } catch {
+    if (showError) historyError.value = "无法打开这条历史对话";
+  } finally {
+    historyBusyId.value = "";
+  }
+}
+
+function startNewConversation(): void {
+  activeAbortController.value?.abort();
+  threadId.value = "";
+  conversationId.value = makeConversationId();
+  messages.value = [];
+  question.value = "";
+  error.value = "";
+}
+
+async function archiveConversation(selectedThreadId: string): Promise<void> {
+  if (!selectedThreadId || historyBusyId.value) return;
+  historyBusyId.value = selectedThreadId;
+  try {
+    await api.delete(`/api/ai/qa/history/${selectedThreadId}`);
+    history.value = history.value.filter((item) => item.threadId !== selectedThreadId);
+    if (threadId.value === selectedThreadId) startNewConversation();
+  } catch {
+    historyError.value = "归档对话失败";
+  } finally {
+    historyBusyId.value = "";
+  }
+}
+
+function historyDate(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  return new Intl.DateTimeFormat("zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" }).format(date);
+}
+
+async function loadModels(): Promise<void> {
+  try {
+    models.value = await api.get<LlmModelOption[]>("/api/ai/models");
+  } catch {
+    models.value = [];
+  }
+}
 
 watch(messages, (value) => sessionStorage.setItem(storageKey(), JSON.stringify(value)), { deep: true });
 watch(conversationId, (value) => sessionStorage.setItem(conversationStorageKey(), value));
@@ -151,6 +233,7 @@ async function requestAssistant(userText: string): Promise<void> {
       scopeType: "SCHOOL",
       scopeId: schoolStore.school?.schoolId || auth.user?.schoolId || null
     };
+    if (selectedModelId.value) requestBody.modelId = selectedModelId.value;
     if (!threadId.value) requestBody.conversationId = conversationId.value;
     let finalReceived = false;
     let streamError: Error | null = null;
@@ -166,6 +249,9 @@ async function requestAssistant(userText: string): Promise<void> {
           if (eventName === "run.started") {
             assistantMessage.runId = data.runId;
             assistantMessage.streamStatus = "Agent 已启动";
+          } else if (eventName === "model.completed") {
+            assistantMessage.effectiveModel = data.model
+              ? `${data.provider || "LLM"} / ${data.model}` : "";
           } else if (eventName === "tool.started") {
             assistantMessage.toolEvents.push({ toolName: data.toolName, status: "started" });
             assistantMessage.streamStatus = `正在调用：${toolLabel(data.toolName)}`;
@@ -186,6 +272,7 @@ async function requestAssistant(userText: string): Promise<void> {
             if (data.response?.conversationId) conversationId.value = data.response.conversationId;
             if (data.response?.threadId) threadId.value = data.response.threadId;
             assistantMessage.streamStatus = "回答完成";
+            void loadHistory();
           } else if (eventName === "error") {
             streamError = new Error(data.message || "Agent 流式服务异常");
           }
@@ -206,7 +293,8 @@ async function requestAssistant(userText: string): Promise<void> {
         conversationId: conversationId.value,
         threadId: threadId.value || null,
         scopeType: "SCHOOL",
-        scopeId: schoolStore.school?.schoolId || auth.user?.schoolId || null
+        scopeId: schoolStore.school?.schoolId || auth.user?.schoolId || null,
+        ...(selectedModelId.value ? { modelId: selectedModelId.value } : {})
       });
       applyAssistantResult(assistantMessage, result);
       error.value = `${requestError.message}，已切换到兼容问答接口`;
@@ -241,6 +329,7 @@ function applyAssistantResult(message: AssistantMessage, result: Partial<AgentQa
     threadId: result?.threadId || message.threadId,
     runId: result?.runId || message.runId,
     fallbackLevel: result?.fallbackLevel || null,
+    effectiveModel: result?.model ? `${result.provider || "LLM"} / ${result.model}` : message.effectiveModel,
     streamStatus: result?.generationStatus === "degraded" ? "已使用降级回答" : "回答完成"
   });
   if (result?.conversationId) conversationId.value = result.conversationId;
@@ -280,6 +369,25 @@ function clearChat(): void {
     <section class="assistant-layout page-panel">
       <aside class="assistant-side">
         <div><span class="assistant-mark"><Bot :size="22" /></span><h2>学校资源助手</h2><p>回答会结合本校周边资源与已有教学方案。</p></div>
+        <div class="history-heading"><h3><History :size="16" />历史对话</h3><button class="icon-action" type="button" title="新对话" aria-label="新对话" @click="startNewConversation"><Plus :size="17" /></button></div>
+        <div class="history-list" aria-label="历史对话列表">
+          <span v-if="historyLoading" class="history-state">正在加载...</span>
+          <span v-else-if="historyError" class="history-state">{{ historyError }}</span>
+          <span v-else-if="!history.length" class="history-state">暂无历史对话</span>
+          <div v-for="item in history" v-else :key="item.threadId" class="history-row" :class="{ active: item.threadId === threadId }">
+            <button class="history-open" type="button" :disabled="Boolean(historyBusyId)" @click="openConversation(item.threadId)">
+              <span><strong>{{ item.title }}</strong><time>{{ historyDate(item.updatedAt) }}</time></span>
+              <small>{{ item.preview }}</small>
+            </button>
+            <button class="history-archive" type="button" title="归档对话" :aria-label="`归档对话：${item.title}`" :disabled="Boolean(historyBusyId)" @click="archiveConversation(item.threadId)"><Archive :size="14" /></button>
+          </div>
+        </div>
+        <label class="model-field">回答模型
+          <select v-model="selectedModelId" :disabled="loading">
+            <option value="">系统默认</option>
+            <option v-for="item in models" :key="item.id" :value="item.id">{{ item.displayName }} · {{ item.provider }}</option>
+          </select>
+        </label>
         <button class="primary-button full-button" type="button" :disabled="loading" @click="explain"><Sparkles :size="17" />生成学校讲解</button>
         <div class="suggestion-list"><h3>建议提问</h3><button v-for="item in suggestions" :key="item" type="button" @click="ask(item)">{{ item }}</button></div>
         <button class="text-button clear-button" type="button" @click="clearChat"><Trash2 :size="16" />清空会话</button>
@@ -293,6 +401,7 @@ function clearChat(): void {
             <div>
               <p>{{ message.text || message.answer }}</p>
               <div v-if="message.streamStatus" class="agent-stream-status">{{ message.streamStatus }}</div>
+              <div v-if="message.effectiveModel" class="agent-stream-status">实际模型：{{ message.effectiveModel }}</div>
               <div v-if="message.toolEvents?.length" class="agent-tool-events"><span v-for="(toolEvent,toolIndex) in message.toolEvents" :key="toolIndex">{{ toolLabel(toolEvent.toolName) }}：{{ toolEvent.status === "started" ? "进行中" : toolEvent.status === "ok" ? "完成" : "降级" }}</span></div>
               <p v-if="message.retrievalStatus" class="retrieval-status" :class="retrievalStatusClass(message.retrievalStatus)">{{ retrievalStatusLabel(message.retrievalStatus) }}</p>
               <p v-if="message.generationStatus" class="generation-status" :class="generationStatusClass(message.generationStatus)">{{ generationStatusLabel(message.generationStatus) }}</p>
@@ -321,6 +430,23 @@ function clearChat(): void {
 .assistant-mark { display: grid; place-items: center; width: 42px; height: 42px; border-radius: 8px; background: var(--green); color: #fff; }
 .assistant-side h2 { margin: 15px 0 6px; font-size: 18px; }
 .assistant-side p { color: var(--muted); font-size: 13px; line-height: 1.65; }
+.model-field { display: grid; gap: 7px; color: var(--muted); font-size: 13px; }
+.history-heading { display: flex; align-items: center; justify-content: space-between; }
+.history-heading h3 { display: flex; align-items: center; gap: 7px; margin: 0; font-size: 13px; }
+.icon-action, .history-archive { display: grid; place-items: center; border: 0; background: transparent; color: var(--muted); cursor: pointer; }
+.icon-action { width: 30px; height: 30px; border: 1px solid var(--line); border-radius: 6px; background: #fff; }
+.history-list { display: grid; align-content: start; gap: 3px; min-height: 70px; max-height: 250px; overflow-y: auto; }
+.history-state { padding: 12px 4px; color: var(--muted); font-size: 12px; }
+.history-row { display: grid; grid-template-columns: minmax(0,1fr) 28px; align-items: center; border-left: 3px solid transparent; }
+.history-row.active { border-left-color: var(--red); background: #fff; }
+.history-open { min-width: 0; padding: 9px 7px; border: 0; background: transparent; text-align: left; cursor: pointer; }
+.history-open > span { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.history-open strong, .history-open small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.history-open strong { color: var(--text); font-size: 12px; }
+.history-open time { flex: none; color: var(--muted); font-size: 10px; }
+.history-open small { margin-top: 4px; color: var(--muted); font-size: 11px; }
+.history-archive { width: 28px; height: 28px; border-radius: 5px; }
+.history-archive:hover, .icon-action:hover { color: var(--red); background: #f4efed; }
 .suggestion-list { display: grid; gap: 7px; }
 .suggestion-list h3 { margin-bottom: 3px; color: var(--muted); font-size: 12px; }
 .suggestion-list button { padding: 10px; border: 1px solid var(--line); border-radius: 6px; background: #fff; color: #445047; font-size: 13px; line-height: 1.5; text-align: left; }
@@ -363,7 +489,9 @@ function clearChat(): void {
 @keyframes pulse { to { opacity: .3; transform: translateY(-3px); } }
 @media (max-width: 900px) {
   .assistant-layout { height: calc(100svh - 154px); min-height: 520px; grid-template-columns: 1fr; }
-  .assistant-side { display: none; }
+  .assistant-side { max-height: 260px; overflow-y: auto; border-right: 0; border-bottom: 1px solid var(--line); padding: 14px; }
+  .assistant-side > div:first-child, .assistant-side > .primary-button, .assistant-side > .suggestion-list, .assistant-side > .clear-button { display: none; }
+  .history-list { max-height: 150px; }
   .chat-scroll { padding: 16px 12px; }
   .chat-message { max-width: 92%; }
 }

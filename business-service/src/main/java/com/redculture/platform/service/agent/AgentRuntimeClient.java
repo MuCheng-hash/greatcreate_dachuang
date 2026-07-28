@@ -9,10 +9,14 @@ import com.redculture.platform.vo.AuthCurrentUserVO;
 import com.redculture.platform.vo.AgentGenerationStatus;
 import com.redculture.platform.vo.ai.StatefulAgentRequest;
 import com.redculture.platform.vo.ai.StatefulAgentResponse;
+import com.redculture.platform.vo.ai.LlmModelOption;
+import com.redculture.platform.vo.ai.AssistantConversationDetail;
+import com.redculture.platform.vo.ai.AssistantConversationSummary;
 import com.redculture.platform.vo.request.AgentQaRequest;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.http.client.SimpleClientHttpRequestFactory;
+import org.springframework.core.ParameterizedTypeReference;
 import org.springframework.stereotype.Component;
 import org.springframework.util.StringUtils;
 import org.springframework.web.client.RestClient;
@@ -109,6 +113,62 @@ public class AgentRuntimeClient {
         return response;
     }
 
+    public List<LlmModelOption> listModels() {
+        Map<String, List<LlmModelOption>> response = restClient.get()
+                .uri("/models")
+                .headers(this::applyInternalServiceToken)
+                .accept(MediaType.APPLICATION_JSON)
+                .retrieve()
+                .body(new ParameterizedTypeReference<>() {});
+        return response == null || response.get("models") == null
+                ? List.of() : response.get("models");
+    }
+
+    public List<AssistantConversationSummary> listConversations(
+            String ownerId, String scopeType, Long scopeId) {
+        List<AssistantConversationSummary> response = restClient.get()
+                .uri(uriBuilder -> uriBuilder.path("/agent/threads")
+                        .queryParam("ownerId", ownerId)
+                        .queryParam("taskType", "CHAT")
+                        .queryParam("scopeType", scopeType)
+                        .queryParam("scopeId", scopeId)
+                        .queryParam("limit", 50)
+                        .build())
+                .headers(this::applyInternalServiceToken)
+                .retrieve()
+                .body(new ParameterizedTypeReference<>() {});
+        return response == null ? List.of() : response;
+    }
+
+    public AssistantConversationDetail getConversation(
+            String threadId, String ownerId, String scopeType, Long scopeId) {
+        AssistantConversationDetail response = restClient.get()
+                .uri(uriBuilder -> uriBuilder.path("/agent/threads/{threadId}")
+                        .queryParam("ownerId", ownerId)
+                        .queryParam("scopeType", scopeType)
+                        .queryParam("scopeId", scopeId)
+                        .build(threadId))
+                .headers(this::applyInternalServiceToken)
+                .retrieve()
+                .body(AssistantConversationDetail.class);
+        if (response == null) {
+            throw new IllegalStateException("agent conversation response is empty");
+        }
+        return response;
+    }
+
+    public void archiveConversation(String threadId, String ownerId, String scopeType, Long scopeId) {
+        restClient.post()
+                .uri(uriBuilder -> uriBuilder.path("/agent/threads/{threadId}/archive")
+                        .queryParam("ownerId", ownerId)
+                        .queryParam("scopeType", scopeType)
+                        .queryParam("scopeId", scopeId)
+                        .build(threadId))
+                .headers(this::applyInternalServiceToken)
+                .retrieve()
+                .toBodilessEntity();
+    }
+
     public void stream(StatefulAgentRequest request, Consumer<StreamEvent> consumer) {
         restClient.post()
                 .uri("/agent/messages/stream")
@@ -142,7 +202,7 @@ public class AgentRuntimeClient {
         }
     }
 
-    private String ownerId(AuthCurrentUserVO user) {
+    public String ownerIdFor(AuthCurrentUserVO user) {
         if (user.getAccountId() != null) {
             return "account:" + user.getAccountId();
         }
@@ -153,10 +213,11 @@ public class AgentRuntimeClient {
                                             AuthCurrentUserVO user,
                                             AgentAnswerContext context) {
         StatefulAgentRequest body = new StatefulAgentRequest();
-        body.setOwnerId(ownerId(user));
+        body.setOwnerId(ownerIdFor(user));
         body.setScopeType(context.getScopeType().name());
         body.setScopeId(context.getScopeId());
         body.setThreadId(request.getThreadId());
+        body.setModelId(request.getModelId());
         body.setTaskType("CHAT");
         body.setMessage(context.getQuestion());
         body.setGrade(context.getGrade());

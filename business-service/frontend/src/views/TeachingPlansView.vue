@@ -21,6 +21,9 @@ const notice = reactive({ tone: "", text: "" });
 const streamStage = ref("");
 const activeAbortController = ref(null);
 const threadId = ref("");
+const models = ref([]);
+const selectedModelId = ref("");
+const effectiveModel = ref("");
 
 const visiblePlan = computed(() => loading.value ? draftPlan.value : generated.value);
 const sections = computed(() => visiblePlan.value ? [
@@ -31,11 +34,19 @@ const sections = computed(() => visiblePlan.value ? [
 
 onMounted(async () => {
   threadId.value = sessionStorage.getItem(threadStorageKey()) || "";
-  await schoolStore.load();
+  await Promise.all([schoolStore.load(), loadModels()]);
   await loadPlans();
   const theme = schoolStore.resources.find((item) => item.educationThemeSummary)?.educationThemeSummary;
   if (theme) form.theme = theme.slice(0, 40);
 });
+
+async function loadModels() {
+  try {
+    models.value = await api.get("/api/ai/models");
+  } catch {
+    models.value = [];
+  }
+}
 
 function threadStorageKey() {
   return `school-portal-teaching-plan-thread:${auth.user?.schoolId || "unknown"}`;
@@ -66,6 +77,7 @@ async function generate() {
   loading.value = true;
   generated.value = null;
   draftPlan.value = null;
+  effectiveModel.value = "";
   streamStage.value = "正在准备教学依据";
   const abortController = new AbortController();
   activeAbortController.value = abortController;
@@ -75,6 +87,7 @@ async function generate() {
       durationMinutes: Number(form.durationMinutes), practiceRequired: form.practiceRequired,
       ...(threadId.value ? { threadId: threadId.value } : {})
     };
+    if (selectedModelId.value) request.modelId = selectedModelId.value;
     let finalReceived = false;
     await api.stream("/api/ai/teaching-plans/generate/stream", request, {
       signal: abortController.signal,
@@ -88,6 +101,8 @@ async function generate() {
           streamStage.value = "正在生成教学方案";
         } else if (eventName === "fallback" || eventName === "model.failed") {
           streamStage.value = "正在切换备用生成方式";
+        } else if (eventName === "model.completed") {
+          effectiveModel.value = data.model ? `${data.provider || "LLM"} / ${data.model}` : "";
         } else if (eventName === "run.started" || eventName === "model.started") {
           streamStage.value = "正在生成教学方案";
         } else if (eventName === "final") {
@@ -160,6 +175,7 @@ function statusLabel(status) {
           <label>教学主题<input v-model="form.theme" placeholder="例如：敬老志愿服务" /></label>
           <label>活动类型<select v-model="form.activityType"><option value="VOLUNTEER_SERVICE">志愿服务</option><option value="FIELD_TRIP">实地研学</option><option value="CLASSROOM">课堂教学</option><option value="LABOR_PRACTICE">劳动实践</option><option value="SCHOOL_BASED_COURSE">校本课程</option></select></label>
           <label>活动时长（分钟）<input v-model.number="form.durationMinutes" type="number" min="20" step="10" /></label>
+          <label>生成模型<select v-model="selectedModelId" :disabled="loading"><option value="">系统默认</option><option v-for="item in models" :key="item.id" :value="item.id">{{ item.displayName }} · {{ item.provider }}</option></select></label>
           <label class="check-field"><input v-model="form.practiceRequired" type="checkbox" /><span>包含线下实践活动</span></label>
           <button v-if="!loading" class="primary-button full-button" type="submit"><Sparkles :size="18" />生成教学方案</button>
           <button v-else class="secondary-button full-button" type="button" @click="stopGeneration"><Square :size="16" />停止生成</button>
@@ -172,6 +188,7 @@ function statusLabel(status) {
           <InlineNotice v-if="notice.text" :tone="notice.tone">{{ notice.text }}</InlineNotice>
           <div v-if="loading || generated" :class="{ 'streaming-plan': loading }" aria-live="polite">
             <div v-if="loading" class="streaming-status"><span class="streaming-dot"></span>{{ streamStage }}</div>
+            <div v-if="effectiveModel" class="streaming-status">实际模型：{{ effectiveModel }}</div>
             <div v-if="visiblePlan" class="generated-plan">
               <header><div><span class="badge badge-red">{{ visiblePlan.grade }}</span><span class="badge">{{ visiblePlan.durationMinutes }} 分钟</span></div><h2>{{ visiblePlan.theme }}</h2></header>
               <section v-for="([title, items]) in sections" :key="title"><h3>{{ title }}</h3><ul><li v-for="item in items" :key="item">{{ item }}</li></ul></section>

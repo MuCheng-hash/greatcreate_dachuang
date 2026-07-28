@@ -2,6 +2,44 @@ export type AgentGenerationStatus = "completed" | "degraded" | "skipped" | "inco
 export type AgentRetrievalStatus = "ok" | "empty" | "degraded" | string;
 export type AgentTaskType = "CHAT" | "TEACHING_PLAN" | "RESOURCE_DISCOVERY";
 
+export interface LlmModelOption {
+  id: string;
+  displayName: string;
+  provider: string;
+  model: string;
+  isDefault: boolean;
+}
+
+export interface AssistantConversationSummary {
+  threadId: string;
+  scopeType: string;
+  scopeId: string;
+  title: string;
+  preview: string;
+  messageCount: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AssistantConversationStoredMessage {
+  id: number;
+  role: "user" | "assistant" | string;
+  content: string;
+  createdAt: string;
+  metadata?: Record<string, unknown>;
+}
+
+export interface AssistantConversationDetail {
+  threadId: string;
+  scopeType: string;
+  scopeId: string;
+  status: string;
+  summary?: string;
+  createdAt: string;
+  updatedAt: string;
+  messages: AssistantConversationStoredMessage[];
+}
+
 export interface AgentCitation {
   citationId?: string;
   title?: string | null;
@@ -81,6 +119,8 @@ export interface AgentQaResponse {
   status?: string | null;
   toolExecutions?: AgentToolExecution[];
   fallbackLevel?: number | string | null;
+  provider?: string | null;
+  model?: string | null;
   teachingPlan?: TeachingPlanResponse | null;
   resourceDiscovery?: ResourceDiscoveryResponse | null;
 }
@@ -105,6 +145,7 @@ export interface AgentQaRequestPayload {
   grade?: string | null;
   theme?: string | null;
   topK?: number;
+  modelId?: string | null;
 }
 
 export type AgentSseEventName =
@@ -132,6 +173,8 @@ export interface AgentSseEventData {
   status?: string;
   errorType?: string;
   message?: string;
+  provider?: string;
+  model?: string;
   response?: AgentQaResponse;
   [key: string]: unknown;
 }

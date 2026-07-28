@@ -28,6 +28,7 @@ class AgentMessageRequest(ApiModel):
     scope_id: str | int = Field(alias="scopeId")
     message: str = Field(min_length=1, max_length=12000)
     thread_id: str | None = Field(default=None, alias="threadId", max_length=64)
+    model_id: str | None = Field(default=None, alias="modelId", min_length=1, max_length=300)
     task_type: TaskType = Field(default="CHAT", alias="taskType")
     task_payload: dict[str, Any] = Field(default_factory=dict, alias="taskPayload")
     intent: str | None = Field(default=None, max_length=64)
@@ -119,6 +120,17 @@ class ThreadResponse(ApiModel):
     created_at: datetime = Field(alias="createdAt")
     updated_at: datetime = Field(alias="updatedAt")
     messages: list[StoredMessage] = Field(default_factory=list)
+
+
+class ThreadSummaryResponse(ApiModel):
+    thread_id: str = Field(alias="threadId")
+    scope_type: str = Field(alias="scopeType")
+    scope_id: str = Field(alias="scopeId")
+    title: str
+    preview: str
+    message_count: int = Field(alias="messageCount")
+    created_at: datetime = Field(alias="createdAt")
+    updated_at: datetime = Field(alias="updatedAt")
 
 
 class AgentModelOutput(ApiModel):

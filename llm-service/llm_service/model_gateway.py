@@ -77,6 +77,40 @@ class ModelGateway:
             for target, _model in self.chat_models
         )
 
+    @staticmethod
+    def model_id(target: LlmModelTarget) -> str:
+        return f"{target.role}:{target.provider}:{target.model}"
+
+    def model_catalog(self) -> list[dict[str, Any]]:
+        return [
+            {
+                "id": self.model_id(target),
+                "displayName": target.model,
+                "provider": target.provider,
+                "model": target.model,
+                "isDefault": index == 0,
+            }
+            for index, (target, _model) in enumerate(self.chat_models)
+        ]
+
+    def model_configs_for(self, model_id: str | None = None) -> tuple[ModelConfig, ...]:
+        configs = self.model_configs()
+        if not model_id:
+            return configs
+        selected_index = next(
+            (
+                index
+                for index, (target, _model) in enumerate(self.chat_models)
+                if self.model_id(target) == model_id
+            ),
+            None,
+        )
+        if selected_index is None:
+            raise ValueError("unknown modelId")
+        return (configs[selected_index],) + tuple(
+            config for index, config in enumerate(configs) if index != selected_index
+        )
+
     def build_model(self, config: ModelConfig) -> ChatOpenAI:
         for target, model in self.chat_models:
             if target.model == config.model and target.fallback_level == config.fallback_level:
@@ -100,9 +134,10 @@ class ModelGateway:
         prompt: str,
         trace_context: LlmTraceContext | None = None,
         validator: Callable[[dict[str, Any]], bool] | None = None,
+        model_id: str | None = None,
     ) -> dict[str, Any] | None:
         result, _metadata = await self.generate_json_with_metadata(
-            prompt, trace_context, validator
+            prompt, trace_context, validator, model_id
         )
         return result
 
@@ -111,10 +146,12 @@ class ModelGateway:
         prompt: str,
         trace_context: LlmTraceContext | None = None,
         validator: Callable[[dict[str, Any]], bool] | None = None,
+        model_id: str | None = None,
     ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
         context = trace_context or LlmTraceContext(feature="unclassified")
         attempts: list[dict[str, Any]] = []
-        for index, (target, model) in enumerate(self.chat_models):
+        attempts_chain = self._chat_models_for(model_id)
+        for index, (target, model) in enumerate(attempts_chain):
             attempt_context = self._attempt_context(context, target)
             config = self._trace_config(attempt_context, target, validator)
             error_type = "invalid_response"
@@ -127,12 +164,12 @@ class ModelGateway:
             except Exception as exc:
                 error_type = classify_llm_error(exc)
             attempts.append(self._attempt(target, error_type))
-            self._fallback(context, target, index, error_type)
+            self._fallback(context, target, index, error_type, attempts_chain)
         self.alerts.exhausted(context, attempts or [{"status": "not_configured"}])
         return None, {}
 
-    async def stream_text(self, prompt: str, trace_context: LlmTraceContext | None = None):
-        async for event_name, data in self.stream_json_events(prompt, trace_context):
+    async def stream_text(self, prompt: str, trace_context: LlmTraceContext | None = None, model_id: str | None = None):
+        async for event_name, data in self.stream_json_events(prompt, trace_context, model_id=model_id):
             if event_name == "token":
                 yield str(data.get("delta") or "")
 
@@ -141,10 +178,12 @@ class ModelGateway:
         prompt: str,
         trace_context: LlmTraceContext | None = None,
         validator: Callable[[dict[str, Any]], bool] | None = None,
+        model_id: str | None = None,
     ):
         context = trace_context or LlmTraceContext(feature="unclassified-stream")
         attempts: list[dict[str, Any]] = []
-        for index, (target, model) in enumerate(self.chat_models):
+        attempts_chain = self._chat_models_for(model_id)
+        for index, (target, model) in enumerate(attempts_chain):
             attempt_context = self._attempt_context(context, target)
             yield "attempt", self._target_data(target)
             parts: list[str] = []
@@ -166,7 +205,7 @@ class ModelGateway:
             except Exception as exc:
                 error_type = classify_llm_error(exc)
             attempts.append(self._attempt(target, error_type))
-            next_target = self._next_target(index)
+            next_target = self._next_target(index, attempts_chain)
             if next_target is not None:
                 self.alerts.fallback(
                     context, target.model, next_target.model, error_type,
@@ -204,18 +243,32 @@ class ModelGateway:
         })
 
     def _fallback(
-        self, context: LlmTraceContext, target: LlmModelTarget, index: int, error_type: str
+        self, context: LlmTraceContext, target: LlmModelTarget, index: int, error_type: str,
+        chain: list[tuple[LlmModelTarget, ChatOpenAI]],
     ) -> None:
-        next_target = self._next_target(index)
+        next_target = self._next_target(index, chain)
         if next_target is not None:
             self.alerts.fallback(
                 context, target.model, next_target.model, error_type,
                 next_target.fallback_level,
             )
 
-    def _next_target(self, index: int) -> LlmModelTarget | None:
+    @staticmethod
+    def _next_target(index: int, chain: list[tuple[LlmModelTarget, ChatOpenAI]]) -> LlmModelTarget | None:
         next_index = index + 1
-        return self.chat_models[next_index][0] if next_index < len(self.chat_models) else None
+        return chain[next_index][0] if next_index < len(chain) else None
+
+    def _chat_models_for(self, model_id: str | None) -> list[tuple[LlmModelTarget, ChatOpenAI]]:
+        if not model_id:
+            return list(self.chat_models)
+        selected_index = next(
+            (index for index, (target, _model) in enumerate(self.chat_models) if self.model_id(target) == model_id),
+            None,
+        )
+        if selected_index is None:
+            raise ValueError("unknown modelId")
+        selected = self.chat_models[selected_index]
+        return [selected, *(item for index, item in enumerate(self.chat_models) if index != selected_index)]
 
     @staticmethod
     def _messages(prompt: str) -> list[tuple[str, str]]:

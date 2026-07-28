@@ -16,6 +16,8 @@ public class StatefulAgentRequest {
 
     private String threadId;
 
+    private String modelId;
+
     private String taskType = "CHAT";
 
     private Map<String, Object> taskPayload = new LinkedHashMap<>();

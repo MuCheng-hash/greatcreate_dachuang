@@ -50,6 +50,29 @@ def build_client(settings: Settings) -> TestClient:
     )
 
 
+def test_model_catalog_and_unknown_selection(tmp_path) -> None:
+    settings = settings_for(
+        tmp_path,
+        llm_models=[{
+            "id": "catalog", "provider": "test", "model": "catalog-model",
+            "apiUrl": "https://models.example/v1", "apiKey": "secret",
+        }],
+    )
+    with build_client(settings) as client:
+        catalog_response = client.get("/models")
+        invalid_response = client.post(
+            "/agent/messages",
+            json=message_payload(modelId="missing-model"),
+        )
+
+    assert catalog_response.status_code == 200
+    catalog = catalog_response.json()["models"]
+    assert catalog
+    assert "apiKey" not in catalog[0]
+    assert "baseUrl" not in catalog[0]
+    assert invalid_response.status_code == 422
+
+
 def message_payload(**overrides):
     payload = {
         "ownerId": "school-user:1",
@@ -171,6 +194,61 @@ def test_validation_rejects_missing_owner_and_unknown_scope(tmp_path: Path):
         assert missing.status_code == 422
         invalid = client.post("/agent/messages", json=message_payload(scopeType="OTHER"))
         assert invalid.status_code == 422
+
+
+def test_conversation_history_is_filtered_restored_isolated_and_archived(tmp_path: Path):
+    settings = settings_for(tmp_path)
+    repository = ConversationRepository(settings.database_path)
+    older = repository.create_thread("school-user:1", "SCHOOL", 1)
+    repository.append_message(
+        older.thread_id, "user", "  第一段   历史问题  ", {"taskType": "CHAT"}
+    )
+    repository.append_message(older.thread_id, "assistant", "第一段历史回答")
+    newer = repository.create_thread("school-user:1", "SCHOOL", 1)
+    repository.append_message(
+        newer.thread_id, "user", "第二段历史问题", {"taskType": "CHAT"}
+    )
+    repository.append_message(newer.thread_id, "assistant", "第二段历史回答")
+    teaching = repository.create_thread("school-user:1", "SCHOOL", 1)
+    repository.append_message(
+        teaching.thread_id, "user", "教学方案", {"taskType": "TEACHING_PLAN"}
+    )
+    foreign = repository.create_thread("school-user:2", "SCHOOL", 1)
+    repository.append_message(
+        foreign.thread_id, "user", "其他用户问题", {"taskType": "CHAT"}
+    )
+
+    with build_client(settings) as client:
+        history = client.get(
+            "/agent/threads",
+            params={"ownerId": "school-user:1", "taskType": "CHAT", "scopeType": "SCHOOL", "scopeId": 1},
+        )
+        detail = client.get(
+            f"/agent/threads/{newer.thread_id}",
+            params={"ownerId": "school-user:1", "scopeType": "SCHOOL", "scopeId": 1},
+        )
+        forbidden = client.get(
+            f"/agent/threads/{foreign.thread_id}",
+            params={"ownerId": "school-user:1", "scopeType": "SCHOOL", "scopeId": 1},
+        )
+        archived = client.post(
+            f"/agent/threads/{newer.thread_id}/archive",
+            params={"ownerId": "school-user:1", "scopeType": "SCHOOL", "scopeId": 1},
+        )
+        after_archive = client.get(
+            "/agent/threads",
+            params={"ownerId": "school-user:1", "taskType": "CHAT", "scopeType": "SCHOOL", "scopeId": 1},
+        )
+
+    assert history.status_code == 200
+    assert [item["threadId"] for item in history.json()] == [newer.thread_id, older.thread_id]
+    assert history.json()[1]["title"] == "第一段 历史问题"
+    assert history.json()[0]["preview"] == "第二段历史回答"
+    assert history.json()[0]["messageCount"] == 2
+    assert [message["role"] for message in detail.json()["messages"]] == ["user", "assistant"]
+    assert forbidden.status_code == 404
+    assert archived.status_code == 200
+    assert [item["threadId"] for item in after_archive.json()] == [older.thread_id]
 
 
 def test_new_thread_and_multiturn_persistence(tmp_path: Path):

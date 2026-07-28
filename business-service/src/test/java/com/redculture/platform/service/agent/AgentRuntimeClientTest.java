@@ -100,6 +100,15 @@ class AgentRuntimeClientTest {
                         + "data: {\"runId\":\"run-stateful\"}\n\n").getBytes(StandardCharsets.UTF_8));
             }
         });
+        server.createContext("/models", exchange -> {
+            receivedTokens.add(exchange.getRequestHeaders().getFirst("X-Agent-Service-Token"));
+            byte[] body = "{\"models\":[{\"id\":\"deepseek\",\"displayName\":\"DeepSeek\",\"provider\":\"deepseek\",\"model\":\"deepseek-chat\",\"isDefault\":true}]}".getBytes(StandardCharsets.UTF_8);
+            exchange.getResponseHeaders().set("Content-Type", "application/json");
+            exchange.sendResponseHeaders(200, body.length);
+            try (OutputStream output = exchange.getResponseBody()) {
+                output.write(body);
+            }
+        });
         server.start();
         try {
             AppMapProperties mapProperties = new AppMapProperties();
@@ -115,6 +124,7 @@ class AgentRuntimeClientTest {
             AgentQaRequest request = new AgentQaRequest();
             request.setThreadId("thread-1");
             request.setQuestion("附近有哪些资源？");
+            request.setModelId("deepseek");
             AuthCurrentUserVO user = new AuthCurrentUserVO();
             user.setAccountId(1L);
             AgentAnswerContext context = new AgentAnswerContext();
@@ -126,13 +136,16 @@ class AgentRuntimeClientTest {
             AgentRuntimeResult result = client.generate(request, user, context);
             List<AgentRuntimeClient.StreamEvent> events = new ArrayList<>();
             client.streamStateful(request, user, context, events::add);
+            var models = client.listModels();
 
             assertEquals("状态回答", result.getAnswer().getAnswer());
             assertEquals(List.of("run.started", "token", "final", "done"),
                     events.stream().map(AgentRuntimeClient.StreamEvent::event).toList());
-            assertEquals(List.of("internal-secret", "internal-secret"), receivedTokens);
+            assertEquals("deepseek-chat", models.get(0).getModel());
+            assertEquals(List.of("internal-secret", "internal-secret", "internal-secret"), receivedTokens);
             assertTrue(requestBodies.stream().allMatch(body -> body.contains("\"ownerId\":\"account:1\"")));
             assertTrue(requestBodies.stream().allMatch(body -> body.contains("\"threadId\":\"thread-1\"")));
+            assertTrue(requestBodies.stream().allMatch(body -> body.contains("\"modelId\":\"deepseek\"")));
         } finally {
             server.stop(0);
         }

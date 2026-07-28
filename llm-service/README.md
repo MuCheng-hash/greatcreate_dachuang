@@ -31,6 +31,7 @@ business service, set the same environment variable before starting this service
 | `LLM_API_URL` | empty | OpenAI-compatible Chat Completions URL; `/chat/completions` may be included |
 | `LLM_API_KEY` | empty | Provider credential |
 | `LLM_MODEL` | `qwen-plus` | Provider model name |
+| `LLM_MODELS` | empty | JSON array of selectable models; when set, replaces the legacy primary/fallback/lightweight chain |
 | `LLM_TIMEOUT_SECONDS` | `20` | Model request timeout |
 | `LLM_MAX_OUTPUT_TOKENS` | `512` | Ollama fallback maximum output tokens |
 | `DATABASE_PATH` | `data/agent-state.sqlite3` | Durable local conversation store |
@@ -47,6 +48,17 @@ business service, set the same environment variable before starting this service
 | `REQUIRE_LLM_MODEL` | profile value | Whether a configured model chain is required for readiness |
 
 Without `LLM_API_URL` and `LLM_API_KEY`, the service still stores conversations and returns a clearly marked `degraded` answer based only on trusted business context.
+
+DeepSeek and Baidu ERNIE (Qianfan) can be configured together when their
+OpenAI-compatible endpoint addresses are supplied. Keep endpoints and keys in environment variables or a private
+`APP_CONFIG_FILE`, never in the repository:
+
+```powershell
+$env:LLM_MODELS = '[{"id":"deepseek","provider":"deepseek","model":"deepseek-chat","apiUrl":"YOUR_DEEPSEEK_ENDPOINT","apiKey":"YOUR_DEEPSEEK_KEY"},{"id":"ernie","provider":"qianfan","model":"YOUR_ERNIE_MODEL","apiUrl":"YOUR_QIANFAN_ENDPOINT","apiKey":"YOUR_QIANFAN_KEY"}]'
+```
+
+The first item is the default. Both models appear in the teaching-plan and
+assistant selectors; failed calls continue through the remaining items once.
 
 Configuration is loaded in this order, with later sources taking precedence:
 
@@ -91,6 +103,16 @@ Content-Type: application/json
 ```
 
 The response contains `threadId`, `status`, `citations`, `toolExecutions`, related resources, and follow-up questions. Reuse the returned `threadId` for subsequent turns. The public Spring endpoint remains `/api/ai/qa/ask`; Spring supplies the authenticated owner and trusted context before calling this service.
+
+### Conversation history
+
+Assistant conversations are stored in the SQLite file configured by
+`DATABASE_PATH`. The Spring endpoints under `/api/ai/qa/history` derive the
+owner and school scope from the authenticated account; browser requests cannot
+select another owner. Active CHAT threads can be listed, restored, continued,
+and archived. Archiving retains messages in SQLite and removes the thread from
+the active history list. Existing clients that only send `threadId` continue to
+work unchanged.
 
 流式问答使用 `POST /agent/messages/stream`，事件统一为
 `run.started`、`model.started`、`tool.started`、`tool.completed`、`token`、`final`、`error`、`done`。

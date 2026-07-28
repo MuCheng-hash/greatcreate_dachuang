@@ -67,6 +67,7 @@ class Settings(BaseSettings):
     prompt_admin_token: str = ""
     observability_admin_token: str = ""
     llm_model_pricing: dict[str, dict[str, float]] = Field(default_factory=dict)
+    llm_models: list[dict[str, object]] = Field(default_factory=list)
     llm_alert_webhook_url: str = ""
     allowed_origins: list[str] = Field(
         default_factory=list,
@@ -170,6 +171,13 @@ class Settings(BaseSettings):
     def parse_model_pricing(cls, value: object) -> object:
         if isinstance(value, str):
             return json.loads(value) if value.strip() else {}
+        return value
+
+    @field_validator("llm_models", mode="before")
+    @classmethod
+    def parse_llm_models(cls, value: object) -> object:
+        if isinstance(value, str):
+            return json.loads(value) if value.strip() else []
         return value
 
     @field_validator("app_env")
@@ -291,7 +299,7 @@ class Settings(BaseSettings):
             lightweight_api_url = lightweight_api_url or "http://127.0.0.1:11434/v1"
             lightweight_api_key = lightweight_api_key or "ollama"
 
-        targets = (
+        targets: tuple[LlmModelTarget, ...] = (
             LlmModelTarget(
                 "primary", primary_provider, primary_model,
                 primary_api_url, primary_api_key, 0,
@@ -308,7 +316,18 @@ class Settings(BaseSettings):
         )
         result: list[LlmModelTarget] = []
         seen: set[tuple[str, str]] = set()
-        for target in targets:
+        configured_targets: list[LlmModelTarget] = []
+        for index, item in enumerate(self.llm_models):
+            provider = str(item.get("provider") or "openai-compatible").strip()
+            model = str(item.get("model") or "").strip()
+            api_url = str(item.get("apiUrl") or item.get("baseUrl") or "").strip()
+            api_key = str(item.get("apiKey") or "").strip()
+            role = str(item.get("id") or item.get("role") or f"model-{index + 1}").strip()
+            configured_targets.append(LlmModelTarget(
+                role, provider, model, api_url, api_key, index,
+            ))
+        source_targets = tuple(configured_targets) if configured_targets else targets
+        for target in source_targets:
             identity = (target.base_url, target.model)
             if target.configured and identity not in seen:
                 result.append(target)

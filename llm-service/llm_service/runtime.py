@@ -135,7 +135,7 @@ class AgentRuntime:
             )
         return self.create_thread(request.owner_id, request.scope_type, request.scope_id)
 
-    def _model_attempts(self) -> list[tuple[ModelConfig, Any | None]]:
+    def _model_attempts(self, model_id: str | None = None) -> list[tuple[ModelConfig, Any | None]]:
         if self._agent is not None:
             config = ModelConfig(
                 provider="injected",
@@ -145,7 +145,7 @@ class AgentRuntime:
                 fallback_level=0,
             )
             return [(config, self._agent)]
-        return [(config, None) for config in self.model.model_configs()]
+        return [(config, None) for config in self.model.model_configs_for(model_id)]
 
     def _create_agent_for(self, config: ModelConfig) -> Any:
         if not config.configured():
@@ -159,8 +159,8 @@ class AgentRuntime:
             )
         return self._agents[key]
 
-    def _primary_model_config(self) -> ModelConfig:
-        attempts = self._model_attempts()
+    def _primary_model_config(self, model_id: str | None = None) -> ModelConfig:
+        attempts = self._model_attempts(model_id)
         if attempts:
             return attempts[0][0]
         return ModelConfig(
@@ -240,8 +240,8 @@ class AgentRuntime:
         if request.task_type != "CHAT":
             return await self._run_structured_task(request, thread, compacted)
         executions: list[ToolExecution] = []
-        model_attempts = self._model_attempts()
-        for config, injected_agent in model_attempts:
+        model_attempts = self._model_attempts(request.model_id)
+        for attempt_index, (config, injected_agent) in enumerate(model_attempts):
             runtime = ToolRuntimeContext(
                 thread_id=thread.thread_id,
                 trusted_context=request.context,
@@ -277,14 +277,7 @@ class AgentRuntime:
                         "errorType": error_type,
                     },
                 )
-                next_config = next(
-                    (
-                        next_item
-                        for next_item, _ in self._model_attempts()
-                        if next_item.fallback_level > config.fallback_level
-                    ),
-                    None,
-                )
+                next_config = model_attempts[attempt_index + 1][0] if attempt_index + 1 < len(model_attempts) else None
                 if next_config is not None:
                     self.alerts.fallback(
                         LlmTraceContext(
@@ -333,7 +326,7 @@ class AgentRuntime:
     ) -> AgentMessageResponse:
         if request.task_type != "CHAT":
             return await self._stream_structured_task(request, thread, compacted, emit)
-        primary = self._primary_model_config()
+        primary = self._primary_model_config(request.model_id)
         emit(
             "run.started",
             {
@@ -343,7 +336,7 @@ class AgentRuntime:
             },
         )
         executions: list[ToolExecution] = []
-        model_attempts = self._model_attempts()
+        model_attempts = self._model_attempts(request.model_id)
         if not model_attempts:
             emit(
                 "model.started",
@@ -460,8 +453,9 @@ class AgentRuntime:
             expected_json=True,
             metadata={"taskType": request.task_type, "promptVersion": selection.version},
         )
+        model_kwargs = {"model_id": request.model_id} if request.model_id else {}
         generated, metadata = await self.model.generate_json_with_metadata(
-            selection.content, trace_context, validator
+            selection.content, trace_context, validator, **model_kwargs
         )
         if generated is None:
             result = self._structured_fallback(request)
@@ -489,7 +483,7 @@ class AgentRuntime:
     ) -> AgentMessageResponse:
         prompt_key, validator = self._structured_task_config(request)
         selection, prompt_run_id = self._start_structured_prompt(prompt_key, request, thread)
-        primary = self._primary_model_config()
+        primary = self._primary_model_config(request.model_id)
         emit(
             "run.started",
             {"threadId": thread.thread_id, "taskType": request.task_type, "provider": primary.provider, "model": primary.model},
@@ -511,8 +505,9 @@ class AgentRuntime:
             if request.task_type == "TEACHING_PLAN"
             else None
         )
+        model_kwargs = {"model_id": request.model_id} if request.model_id else {}
         async for event_name, data in self.model.stream_json_events(
-            selection.content, trace_context, validator
+            selection.content, trace_context, validator, **model_kwargs
         ):
             if event_name == "attempt":
                 metadata = dict(data)
@@ -567,7 +562,7 @@ class AgentRuntime:
         subject_key = f"{request.scope_type}:{request.scope_id}"
         selection = self.prompts.resolve(prompt_key, subject_key, task_context(request))
         run_id = self.prompts.start_run(
-            selection, subject_key, self._primary_model_config().model, len(selection.content)
+            selection, subject_key, self._primary_model_config(request.model_id).model, len(selection.content)
         )
         return selection, run_id
 

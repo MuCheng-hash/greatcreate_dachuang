@@ -34,6 +34,18 @@ class ThreadRecord:
     updated_at: str
 
 
+@dataclass(slots=True)
+class ThreadSummaryRecord:
+    thread_id: str
+    scope_type: str
+    scope_id: str
+    title: str
+    preview: str
+    message_count: int
+    created_at: str
+    updated_at: str
+
+
 class ConversationRepository:
     def __init__(self, database_path: Path | str):
         self.database_path = Path(database_path)
@@ -128,6 +140,64 @@ class ConversationRepository:
             raise ThreadNotFoundError(thread_id)
         return ThreadRecord(**dict(row))
 
+    def list_threads(
+        self,
+        owner_id: str,
+        task_type: str = "CHAT",
+        scope_type: str | None = None,
+        scope_id: str | int | None = None,
+        limit: int = 50,
+    ) -> list[ThreadSummaryRecord]:
+        clauses = ["t.owner_id = ?", "t.status = 'active'"]
+        parameters: list[Any] = [owner_id]
+        if scope_type is not None:
+            clauses.append("t.scope_type = ?")
+            parameters.append(scope_type)
+        if scope_id is not None:
+            clauses.append("t.scope_id = ?")
+            parameters.append(str(scope_id))
+        clauses.append(
+            "EXISTS (SELECT 1 FROM agent_message tm WHERE tm.thread_id = t.thread_id "
+            "AND tm.role = 'user' AND json_extract(tm.metadata_json, '$.taskType') = ?)"
+        )
+        parameters.extend((task_type, max(1, min(limit, 100))))
+        sql = f"""
+            SELECT t.thread_id, t.scope_type, t.scope_id, t.created_at, t.updated_at,
+                   (SELECT content FROM agent_message first_message
+                    WHERE first_message.thread_id = t.thread_id AND first_message.role = 'user'
+                    ORDER BY first_message.id ASC LIMIT 1) AS title_source,
+                   (SELECT content FROM agent_message last_message
+                    WHERE last_message.thread_id = t.thread_id
+                    ORDER BY last_message.id DESC LIMIT 1) AS preview_source,
+                   (SELECT COUNT(*) FROM agent_message counted
+                    WHERE counted.thread_id = t.thread_id
+                      AND counted.role IN ('user', 'assistant')) AS message_count
+            FROM agent_thread t
+            WHERE {' AND '.join(clauses)}
+            ORDER BY t.updated_at DESC
+            LIMIT ?
+        """
+        with self._connect() as connection:
+            rows = connection.execute(sql, parameters).fetchall()
+        return [
+            ThreadSummaryRecord(
+                thread_id=row["thread_id"],
+                scope_type=row["scope_type"],
+                scope_id=row["scope_id"],
+                title=self._preview(row["title_source"], 40) or "新对话",
+                preview=self._preview(row["preview_source"], 80),
+                message_count=int(row["message_count"] or 0),
+                created_at=row["created_at"],
+                updated_at=row["updated_at"],
+            )
+            for row in rows
+        ]
+
+    @staticmethod
+    def _preview(value: str | None, limit: int) -> str:
+        normalized = " ".join((value or "").split())
+        return normalized if len(normalized) <= limit else f"{normalized[:limit]}..."
+
     def append_message(self, thread_id: str, role: str, content: str, metadata: dict[str, Any] | None = None) -> int:
         now = utc_now()
         metadata_json = json.dumps(metadata or {}, ensure_ascii=False)
@@ -173,8 +243,11 @@ class ConversationRepository:
                  duration_ms, result_preview[:1000], utc_now()),
             )
 
-    def archive_thread(self, thread_id: str, owner_id: str) -> None:
-        self.require_thread(thread_id, owner_id)
+    def archive_thread(
+        self, thread_id: str, owner_id: str,
+        scope_type: str | None = None, scope_id: str | int | None = None,
+    ) -> None:
+        self.require_thread(thread_id, owner_id, scope_type, scope_id)
         with self._lock, self._connect() as connection:
             connection.execute(
                 "UPDATE agent_thread SET status = 'archived', updated_at = ? WHERE thread_id = ?",

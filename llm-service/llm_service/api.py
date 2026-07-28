@@ -22,7 +22,7 @@ from .observability import FallbackAlertManager, LlmObservability
 from .repository import ThreadNotFoundError, ThreadScopeError
 from .routes import health_router
 from .runtime import AgentRuntime
-from .schemas import AgentMessageRequest, AgentMessageResponse, StoredMessage, ThreadCreateRequest, ThreadResponse
+from .schemas import AgentMessageRequest, AgentMessageResponse, StoredMessage, ThreadCreateRequest, ThreadResponse, ThreadSummaryResponse
 from .settings import Settings, get_settings
 
 
@@ -93,6 +93,12 @@ def create_app(
         if not hmac.compare_digest(x_observability_admin_token, settings.observability_token):
             raise HTTPException(status_code=401, detail="invalid observability admin token")
 
+    def validate_model_selection(request: AgentMessageRequest) -> None:
+        try:
+            model.model_configs_for(request.model_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail="unknown modelId") from exc
+
     if settings.allowed_origins:
         app.add_middleware(
             CORSMiddleware,
@@ -104,6 +110,13 @@ def create_app(
                 "X-Prompt-Admin-Token", "X-Observability-Admin-Token",
             ],
         )
+
+    @app.get(
+        "/models",
+        dependencies=[Depends(require_internal_agent_token)],
+    )
+    async def list_models() -> dict[str, list[dict[str, Any]]]:
+        return {"models": model.model_catalog()}
 
     @app.get("/metrics", response_class=PlainTextResponse)
     async def metrics() -> str:
@@ -160,6 +173,28 @@ def create_app(
         return _thread_response(runtime, record, include_messages=False)
 
     @app.get(
+        "/agent/threads", response_model=list[ThreadSummaryResponse],
+        dependencies=[Depends(require_internal_agent_token)],
+    )
+    async def list_threads(
+        owner_id: str = Query(alias="ownerId"),
+        task_type: str = Query(default="CHAT", alias="taskType"),
+        scope_type: str | None = Query(default=None, alias="scopeType"),
+        scope_id: str | int | None = Query(default=None, alias="scopeId"),
+        limit: int = Query(default=50, ge=1, le=100),
+    ) -> list[ThreadSummaryResponse]:
+        return [
+            ThreadSummaryResponse(
+                threadId=item.thread_id, scopeType=item.scope_type, scopeId=item.scope_id,
+                title=item.title, preview=item.preview, messageCount=item.message_count,
+                createdAt=item.created_at, updatedAt=item.updated_at,
+            )
+            for item in repository.list_threads(
+                owner_id, task_type, scope_type, scope_id, limit
+            )
+        ]
+
+    @app.get(
         "/agent/threads/{thread_id}", response_model=ThreadResponse,
         dependencies=[Depends(require_internal_agent_token)],
     )
@@ -180,6 +215,7 @@ def create_app(
         dependencies=[Depends(require_internal_agent_token)],
     )
     async def send_thread_message(thread_id: str, request: AgentMessageRequest) -> AgentMessageResponse:
+        validate_model_selection(request)
         if request.thread_id and request.thread_id != thread_id:
             raise HTTPException(status_code=400, detail="threadId does not match URL")
         request.thread_id = thread_id
@@ -193,6 +229,7 @@ def create_app(
         dependencies=[Depends(require_internal_agent_token)],
     )
     async def send_message(request: AgentMessageRequest) -> AgentMessageResponse:
+        validate_model_selection(request)
         try:
             return await runtime.handle(request)
         except (ThreadNotFoundError, ThreadScopeError) as exc:
@@ -203,6 +240,7 @@ def create_app(
         dependencies=[Depends(require_internal_agent_token)],
     )
     async def stream_message(request: AgentMessageRequest) -> StreamingResponse:
+        validate_model_selection(request)
         if request.thread_id:
             try:
                 repository.require_thread(
@@ -224,9 +262,14 @@ def create_app(
         "/agent/threads/{thread_id}/archive", response_model=ThreadResponse,
         dependencies=[Depends(require_internal_agent_token)],
     )
-    async def archive_thread(thread_id: str, owner_id: str = Query(alias="ownerId")) -> ThreadResponse:
+    async def archive_thread(
+        thread_id: str,
+        owner_id: str = Query(alias="ownerId"),
+        scope_type: str | None = Query(default=None, alias="scopeType"),
+        scope_id: str | int | None = Query(default=None, alias="scopeId"),
+    ) -> ThreadResponse:
         try:
-            repository.archive_thread(thread_id, owner_id)
+            repository.archive_thread(thread_id, owner_id, scope_type, scope_id)
             record = repository.get_thread(thread_id, owner_id)
         except ThreadScopeError:
             raise HTTPException(status_code=404, detail="thread not found")

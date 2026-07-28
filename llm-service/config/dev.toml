@@ -3,3 +3,10 @@ business_health_required = false
 require_llm_model = false
 # Matches the business-service local-development default. Environment variables override it.
 internal_service_token = "red-culture-agent-development-token-change-me"
+
+# Configure any number of selectable models in a private override file or with
+# LLM_MODELS as JSON. Never commit real API keys.
+# llm_models = [
+#   { id = "deepseek", provider = "deepseek", model = "deepseek-chat", apiKey = "replace-me" },
+#   { id = "ernie", provider = "qianfan", model = "ernie-4.5-turbo-128k", apiKey = "replace-me" }
+# ]

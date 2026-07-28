@@ -1,7 +1,7 @@
 import { flushPromises, mount } from "@vue/test-utils";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const apiMock = vi.hoisted(() => ({ post: vi.fn() }));
+const apiMock = vi.hoisted(() => ({ get: vi.fn(), post: vi.fn(), delete: vi.fn() }));
 const authMock = vi.hoisted(() => ({ user: { schoolId: 1 } }));
 const schoolMock = vi.hoisted(() => ({
   school: { schoolId: 1, schoolName: "里庄小学" },
@@ -22,6 +22,10 @@ describe("assistant view", () => {
     vi.clearAllMocks();
     delete apiMock.stream;
     schoolMock.load.mockResolvedValue(schoolMock);
+    apiMock.get.mockImplementation(async (path) => path === "/api/ai/models" ? [
+      { id: "deepseek", displayName: "DeepSeek", provider: "deepseek", model: "deepseek-chat", isDefault: true }
+    ] : []);
+    apiMock.delete.mockResolvedValue(undefined);
     apiMock.post.mockResolvedValue({
       threadId: "thread-1",
       answer: "已找到相关资源。",
@@ -31,6 +35,80 @@ describe("assistant view", () => {
       retrievalStatus: "ok",
       generationStatus: "completed"
     });
+  });
+
+  it("restores, continues, starts new, and archives historical conversations", async () => {
+    apiMock.get.mockImplementation(async (path) => {
+      if (path === "/api/ai/models") return [];
+      if (path === "/api/ai/qa/history") return [{
+        threadId: "history-1", title: "历史问题", preview: "历史回答", messageCount: 2,
+        scopeType: "SCHOOL", scopeId: "1", createdAt: "2026-07-28T00:00:00Z", updatedAt: "2026-07-28T01:00:00Z"
+      }];
+      if (path === "/api/ai/qa/history/history-1") return {
+        threadId: "history-1", scopeType: "SCHOOL", scopeId: "1", status: "active",
+        createdAt: "2026-07-28T00:00:00Z", updatedAt: "2026-07-28T01:00:00Z",
+        messages: [
+          { id: 1, role: "user", content: "历史问题", createdAt: "2026-07-28T00:00:00Z" },
+          { id: 2, role: "assistant", content: "历史回答", createdAt: "2026-07-28T00:01:00Z" }
+        ]
+      };
+      return [];
+    });
+    const wrapper = mount(AssistantView, {
+      global: { stubs: { AppShell: { template: "<div><slot /></div>" }, InlineNotice: true } }
+    });
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("历史问题");
+    await wrapper.get(".history-open").trigger("click");
+    await flushPromises();
+    expect(wrapper.text()).toContain("历史回答");
+
+    await wrapper.get("textarea").setValue("继续追问");
+    await wrapper.get("form").trigger("submit.prevent");
+    await flushPromises();
+    expect(apiMock.post).toHaveBeenCalledWith("/api/ai/qa/ask", expect.objectContaining({ threadId: "history-1" }));
+
+    await wrapper.get(".icon-action").trigger("click");
+    expect(wrapper.find(".chat-message").exists()).toBe(false);
+    await wrapper.get(".history-archive").trigger("click");
+    await flushPromises();
+    expect(apiMock.delete).toHaveBeenCalledWith("/api/ai/qa/history/history-1");
+    expect(wrapper.find(".history-row").exists()).toBe(false);
+  });
+
+  it("keeps question answering usable when history loading fails", async () => {
+    apiMock.get.mockImplementation(async (path) => {
+      if (path === "/api/ai/models") return [];
+      throw new Error("history unavailable");
+    });
+    const wrapper = mount(AssistantView, {
+      global: { stubs: { AppShell: { template: "<div><slot /></div>" }, InlineNotice: true } }
+    });
+    await flushPromises();
+    expect(wrapper.text()).toContain("历史记录暂时无法加载");
+    await wrapper.get("textarea").setValue("仍然可以提问");
+    await wrapper.get("form").trigger("submit.prevent");
+    await flushPromises();
+    expect(apiMock.post).toHaveBeenCalled();
+  });
+
+  it("loads and forwards the selected model", async () => {
+    apiMock.stream = vi.fn(async (_path, body, options) => {
+      expect(body.modelId).toBe("deepseek");
+      options.onEvent("model.completed", { provider: "deepseek", model: "deepseek-chat" });
+      options.onEvent("final", { response: { answer: "模型回答", generationStatus: "completed" } });
+    });
+    const wrapper = mount(AssistantView, {
+      global: { stubs: { AppShell: { template: "<div><slot /></div>" }, InlineNotice: true } }
+    });
+    await flushPromises();
+    await wrapper.get("select").setValue("deepseek");
+    await wrapper.get("textarea").setValue("测试模型切换");
+    await wrapper.get("form").trigger("submit.prevent");
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("deepseek / deepseek-chat");
   });
 
   it("sends questions to the business Agent endpoint and renders citations", async () => {

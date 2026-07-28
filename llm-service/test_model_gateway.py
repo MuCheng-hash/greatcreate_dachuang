@@ -46,6 +46,61 @@ def router_settings() -> Settings:
 
 
 class ModelGatewayFallbackTest(unittest.IsolatedAsyncioTestCase):
+    async def test_arbitrary_deepseek_and_ernie_models_form_selectable_chain(self) -> None:
+        settings = Settings(
+            _env_file=None,
+            llm_models=[
+                {"id": "deepseek", "provider": "deepseek", "model": "deepseek-chat", "apiUrl": "https://deepseek.test/v1", "apiKey": "key-a"},
+                {"id": "ernie", "provider": "qianfan", "model": "ernie-test", "apiUrl": "https://qianfan.test/v2", "apiKey": "key-b"},
+            ],
+        )
+        with patch.object(ModelGateway, "_build_model", side_effect=[FakeModel(), FakeModel()]):
+            gateway = ModelGateway(settings)
+
+        catalog = gateway.model_catalog()
+
+        self.assertEqual(["deepseek-chat", "ernie-test"], [item["model"] for item in catalog])
+        self.assertEqual(["deepseek", "qianfan"], [item["provider"] for item in catalog])
+        self.assertEqual(2, len(gateway.model_configs_for(catalog[1]["id"])))
+    async def test_catalog_is_sanitized_and_marks_default(self) -> None:
+        with patch.object(ModelGateway, "_build_model", side_effect=[FakeModel(), FakeModel(), FakeModel()]):
+            gateway = ModelGateway(router_settings())
+
+        catalog = gateway.model_catalog()
+
+        self.assertEqual(3, len(catalog))
+        self.assertTrue(catalog[0]["isDefault"])
+        self.assertFalse(catalog[1]["isDefault"])
+        self.assertEqual("gpt-3.5", catalog[1]["model"])
+        self.assertNotIn("apiKey", catalog[0])
+        self.assertNotIn("baseUrl", catalog[0])
+
+    async def test_selected_model_is_first_and_remaining_models_are_fallbacks(self) -> None:
+        models = [
+            FakeModel('{"answer":"primary"}'),
+            FakeModel(error=TimeoutError("selected failed")),
+            FakeModel('{"answer":"lightweight"}'),
+        ]
+        alerts = Mock(spec=FallbackAlertManager)
+        with patch.object(ModelGateway, "_build_model", side_effect=models):
+            gateway = ModelGateway(router_settings(), alerts=alerts)
+        selected_id = gateway.model_catalog()[1]["id"]
+
+        result, metadata = await gateway.generate_json_with_metadata(
+            "prompt", model_id=selected_id
+        )
+
+        self.assertEqual("primary", result["answer"])
+        self.assertEqual("gpt-4", metadata["model"])
+        alerts.fallback.assert_called_once()
+
+    async def test_unknown_selected_model_is_rejected(self) -> None:
+        with patch.object(ModelGateway, "_build_model", side_effect=[FakeModel(), FakeModel(), FakeModel()]):
+            gateway = ModelGateway(router_settings())
+
+        with self.assertRaisesRegex(ValueError, "unknown modelId"):
+            gateway.model_configs_for("missing")
+
     async def test_uses_primary_then_fallback_then_lightweight(self) -> None:
         models = [
             FakeModel(error=TimeoutError("primary timed out")),

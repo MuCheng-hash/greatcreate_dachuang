@@ -23,7 +23,7 @@ MYSQL_CONFIG = {
     "host": "127.0.0.1",
     "port": 3306,
     "user": "root",
-    "password": "123456",
+    "password": "root",
     "database": "red_culture_platform",
     "charset": "utf8mb4",
     "cursorclass": pymysql.cursors.DictCursor,

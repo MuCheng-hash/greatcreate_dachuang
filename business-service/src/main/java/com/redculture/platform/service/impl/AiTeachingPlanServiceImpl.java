@@ -468,7 +468,7 @@ public class AiTeachingPlanServiceImpl implements AiTeachingPlanService {
         String ownerId = accountId == null
                 ? "school:" + context.getRequest().getSchoolId()
                 : "account:" + accountId;
-        return agentRuntimeClient.taskRequest(
+        StatefulAgentRequest request = agentRuntimeClient.taskRequest(
                 ownerId,
                 KnowledgeScopeType.SCHOOL.name(),
                 context.getRequest().getSchoolId(),
@@ -478,6 +478,8 @@ public class AiTeachingPlanServiceImpl implements AiTeachingPlanService {
                 taskPayload,
                 trustedContext
         );
+        request.setModelId(context.getRequest().getModelId());
+        return request;
     }
 
     private String textValue(Object value, String fallback) {

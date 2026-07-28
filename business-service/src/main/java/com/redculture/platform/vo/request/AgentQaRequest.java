@@ -7,6 +7,8 @@ public class AgentQaRequest {
 
     private String threadId;
 
+    private String modelId;
+
     private String question;
 
     private String conversationId;

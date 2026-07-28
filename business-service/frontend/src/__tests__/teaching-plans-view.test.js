@@ -19,7 +19,28 @@ describe("teaching plans view", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     schoolMock.load.mockResolvedValue(schoolMock);
-    apiMock.get.mockResolvedValue({ records: [] });
+    apiMock.get.mockImplementation(async (path) => path === "/api/ai/models"
+      ? [{ id: "ernie", displayName: "文心一言", provider: "qianfan", model: "ernie-test", isDefault: true }]
+      : { records: [] });
+  });
+
+  it("forwards the selected model for teaching plan generation", async () => {
+    apiMock.stream.mockImplementation(async (_path, body, options) => {
+      expect(body.modelId).toBe("ernie");
+      options.onEvent("model.completed", { provider: "qianfan", model: "ernie-test" });
+      options.onEvent("final", {
+        response: { teachingPlan: { generationStatus: "completed", theme: "测试", grade: "四年级", durationMinutes: 40 } }
+      });
+    });
+    const wrapper = mount(TeachingPlansView, {
+      global: { stubs: { AppShell: { template: "<div><slot /></div>" }, InlineNotice: true, LoadingBlock: true } }
+    });
+    await flushPromises();
+    await wrapper.findAll("select")[1].setValue("ernie");
+    await wrapper.get("form").trigger("submit.prevent");
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("qianfan / ernie-test");
   });
 
   it("renders structured plan patches before the stream finishes", async () => {

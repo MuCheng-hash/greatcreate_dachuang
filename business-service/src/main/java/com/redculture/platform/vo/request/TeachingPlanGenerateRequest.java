@@ -8,6 +8,8 @@ public class TeachingPlanGenerateRequest {
 
     private String threadId;
 
+    private String modelId;
+
     private Long schoolId;
 
     private String grade;
