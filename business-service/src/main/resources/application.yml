@@ -38,6 +38,10 @@ app:
     refresh-cookie-name: ${APP_AUTH_REFRESH_COOKIE_NAME:RC_REFRESH_TOKEN}
     csrf-cookie-name: ${APP_AUTH_CSRF_COOKIE_NAME:XSRF-TOKEN}
     csrf-header-name: ${APP_AUTH_CSRF_HEADER_NAME:X-CSRF-TOKEN}
+  rate-limit:
+    enabled: ${APP_RATE_LIMIT_ENABLED:true}
+    login-requests-per-minute: ${APP_LOGIN_RATE_LIMIT_PER_MINUTE:10}
+    ai-requests-per-minute: ${APP_AI_RATE_LIMIT_PER_MINUTE:30}
   admin:
     username: ${APP_ADMIN_USERNAME:admin}
     password: ${APP_ADMIN_PASSWORD:admin123456}

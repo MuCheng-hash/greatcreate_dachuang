@@ -1,4 +1,4 @@
-import { createRouter, createWebHistory } from "vue-router";
+import { createRouter, createWebHistory, type RouteLocationNormalized } from "vue-router";
 import { useAuthStore } from "@/stores/auth";
 
 const routes = [
@@ -8,6 +8,7 @@ const routes = [
   { path: "/map", name: "map", component: () => import("@/views/MapView.vue"), meta: { title: "地图资源" } },
   { path: "/teaching-plans", name: "teaching-plans", component: () => import("@/views/TeachingPlansView.vue"), meta: { title: "教学方案" } },
   { path: "/assistant", name: "assistant", component: () => import("@/views/AssistantView.vue"), meta: { title: "智能问答" } },
+  { path: "/agent-debug", name: "agent-debug", component: () => import("@/views/AgentDebugView.vue"), meta: { title: "Agent 调试" } },
   { path: "/profile", name: "profile", component: () => import("@/views/ProfileView.vue"), meta: { title: "个人中心" } },
   { path: "/:pathMatch(.*)*", redirect: "/login" }
 ];
@@ -18,7 +19,14 @@ const router = createRouter({
   scrollBehavior: () => ({ top: 0 })
 });
 
-export function resolveRouteAccess(to, auth) {
+interface RouteAuthState {
+  isAdmin: boolean;
+  isAuthenticated: boolean;
+}
+
+type AccessResult = true | string | { external: string } | { path: string; query: { redirect: string } };
+
+export function resolveRouteAccess(to: Pick<RouteLocationNormalized, "meta" | "fullPath">, auth: RouteAuthState): AccessResult {
   if (auth.isAdmin) return { external: "/admin.html" };
   if (to.meta.public && auth.isAuthenticated) return "/map";
   if (!to.meta.public && !auth.isAuthenticated) {
@@ -30,21 +38,20 @@ export function resolveRouteAccess(to, auth) {
 router.beforeEach(async (to) => {
   const auth = useAuthStore();
   await auth.ensureLoaded();
-
   const access = resolveRouteAccess(to, auth);
-  if (access?.external) {
+  if (typeof access === "object" && "external" in access) {
     window.location.assign(access.external);
     return false;
   }
   if (access !== true) return access;
-  document.title = to.meta.title ? `${to.meta.title} | 乡村学校思政资源工作台` : "乡村学校思政资源工作台";
+  document.title = to.meta.title ? `${String(to.meta.title)} | 乡村学校思政资源工作台` : "乡村学校思政资源工作台";
   return true;
 });
 
 window.addEventListener("portal:unauthorized", () => {
   const auth = useAuthStore();
   auth.clear();
-  if (router.currentRoute.value.name !== "login") router.replace("/login");
+  if (router.currentRoute.value.name !== "login") void router.replace("/login");
 });
 
 export default router;

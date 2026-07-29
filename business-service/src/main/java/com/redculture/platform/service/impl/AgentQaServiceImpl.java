@@ -30,6 +30,7 @@ import com.redculture.platform.vo.ai.KnowledgeRetrieveResult;
 import com.redculture.platform.vo.ai.KnowledgeRetrievalStatus;
 import com.redculture.platform.vo.ai.KnowledgeScopeType;
 import com.redculture.platform.vo.request.AgentQaRequest;
+import com.redculture.platform.vo.request.AgentAttachmentRequest;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
@@ -165,13 +166,13 @@ public class AgentQaServiceImpl implements AgentQaService {
         }
 
         String question = request.getQuestion().trim();
-        AgentIntent intent = intentRecognizer.recognize(question);
+        AgentIntent intent = hasImageAttachments(request)
+                ? AgentIntent.RESOURCE_EXPLANATION : intentRecognizer.recognize(question);
         if (intent == AgentIntent.UNKNOWN) {
             startLocalFallbackStream(emitter, request, currentUser);
             return emitter;
         }
         Scope scope = new Scope(scopeResolution.type(), scopeResolution.id());
-        AgentAnswerContext context = buildAgentContext(request, currentUser, question, intent, scope);
         AtomicBoolean finished = new AtomicBoolean(false);
         AtomicReference<Thread> workerRef = new AtomicReference<>();
         Runnable cancelWorker = () -> {
@@ -190,6 +191,15 @@ public class AgentQaServiceImpl implements AgentQaService {
         Thread thread = new Thread(() -> {
             boolean[] upstreamDone = {false};
             try {
+                sendEvent(emitter, "phase.started", Map.of(
+                        "phase", "retrieval",
+                        "label", "正在检索可信知识与业务数据"
+                ));
+                AgentAnswerContext context = buildAgentContext(request, currentUser, question, intent, scope);
+                sendEvent(emitter, "phase.completed", Map.of(
+                        "phase", "retrieval",
+                        "label", "知识与业务上下文已准备"
+                ));
                 agentRuntimeClient.streamStateful(request, currentUser, context, event -> {
                     if ("done".equals(event.event())) {
                         upstreamDone[0] = true;
@@ -229,7 +239,22 @@ public class AgentQaServiceImpl implements AgentQaService {
             String runId = java.util.UUID.randomUUID().toString();
             try {
                 sendEvent(emitter, "run.started", Map.of("runId", runId));
+                sendEvent(emitter, "phase.started", Map.of(
+                        "runId", runId,
+                        "phase", "retrieval",
+                        "label", "正在检索可信知识与业务数据"
+                ));
                 AgentQaResponse response = askWithLocalFallbackPipeline(request, currentUser);
+                sendEvent(emitter, "phase.completed", Map.of(
+                        "runId", runId,
+                        "phase", "retrieval",
+                        "label", "知识与业务上下文已准备"
+                ));
+                sendEvent(emitter, "phase.started", Map.of(
+                        "runId", runId,
+                        "phase", "response",
+                        "label", "正在生成回答"
+                ));
                 response.setRunId(runId);
                 if (!StringUtils.hasText(response.getConversationId())) {
                     response.setConversationId(StringUtils.hasText(request.getConversationId())
@@ -242,6 +267,11 @@ public class AgentQaServiceImpl implements AgentQaService {
                             "delta", answer.substring(index, Math.min(answer.length(), index + 8))
                     ));
                 }
+                sendEvent(emitter, "phase.completed", Map.of(
+                        "runId", runId,
+                        "phase", "response",
+                        "label", "回答生成完成"
+                ));
                 sendEvent(emitter, "final", Map.of("runId", runId, "response", response));
                 sendEvent(emitter, "done", Map.of("runId", runId));
                 emitter.complete();
@@ -398,7 +428,8 @@ public class AgentQaServiceImpl implements AgentQaService {
                                              boolean allowRemoteAgent) {
 
         String question = request.getQuestion().trim();
-        AgentIntent intent = intentRecognizer.recognize(question);
+        AgentIntent intent = hasImageAttachments(request)
+                ? AgentIntent.RESOURCE_EXPLANATION : intentRecognizer.recognize(question);
 
         if (intent == AgentIntent.UNKNOWN) {
             return skippedResponse(intent,
@@ -464,6 +495,30 @@ public class AgentQaServiceImpl implements AgentQaService {
         if (request.getScopeId() != null && request.getScopeId() <= 0) {
             throw new IllegalArgumentException("scopeId must be positive");
         }
+        List<AgentAttachmentRequest> attachments = request.getAttachments() == null
+                ? Collections.emptyList() : request.getAttachments();
+        if (attachments.size() > 3) {
+            throw new IllegalArgumentException("at most 3 image attachments are allowed");
+        }
+        for (AgentAttachmentRequest attachment : attachments) {
+            if (attachment == null || !"image".equals(attachment.getType())
+                    || !StringUtils.hasText(attachment.getName())
+                    || !StringUtils.hasText(attachment.getMediaType())
+                    || !StringUtils.hasText(attachment.getDataUrl())) {
+                throw new IllegalArgumentException("image attachment is invalid");
+            }
+            String prefix = "data:" + attachment.getMediaType() + ";base64,";
+            if (!(List.of("image/jpeg", "image/png", "image/webp", "image/gif")
+                    .contains(attachment.getMediaType()))
+                    || !attachment.getDataUrl().startsWith(prefix)
+                    || attachment.getDataUrl().length() > 7_100_000) {
+                throw new IllegalArgumentException("image attachment format or size is invalid");
+            }
+        }
+    }
+
+    private boolean hasImageAttachments(AgentQaRequest request) {
+        return request != null && request.getAttachments() != null && !request.getAttachments().isEmpty();
     }
 
     private ScopeResolution resolveScope(AgentQaRequest request,

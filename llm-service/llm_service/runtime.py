@@ -83,7 +83,13 @@ class AgentRuntime:
 
         async def worker() -> None:
             try:
+                publish("phase.started", {"phase": "context", "label": "正在准备会话上下文"})
                 thread, window, plan = self._prepare_turn(request)
+                publish("phase.completed", {
+                    "phase": "context",
+                    "label": "会话上下文已准备",
+                    "compacted": window.compacted,
+                })
                 result = await self._stream_agent_turn(
                     request, run_id, thread, window.messages, window.summary, window.compacted, plan, publish
                 )
@@ -335,6 +341,11 @@ class AgentRuntime:
                 "model": primary.model,
             },
         )
+        emit("phase.started", {
+            "phase": "reasoning",
+            "label": "正在分析问题并规划处理步骤",
+            "recommendedTools": plan.recommended_tools,
+        })
         executions: list[ToolExecution] = []
         model_attempts = self._model_attempts(request.model_id)
         if not model_attempts:
@@ -374,6 +385,12 @@ class AgentRuntime:
             )
             try:
                 agent = injected_agent or self._create_agent_for(config)
+                emit("phase.completed", {
+                    "phase": "reasoning",
+                    "label": "分析完成，开始执行",
+                    "recommendedTools": plan.recommended_tools,
+                })
+                emit("phase.started", {"phase": "response", "label": "正在生成回答"})
                 result = await self._invoke_agent_stream(
                     request,
                     request.context,
@@ -396,6 +413,7 @@ class AgentRuntime:
                         "fallbackLevel": config.fallback_level,
                     },
                 )
+                emit("phase.completed", {"phase": "response", "label": "回答生成完成"})
                 return result
             except Exception as exc:
                 executions.extend(runtime.executions)
@@ -656,7 +674,7 @@ class AgentRuntime:
         agent: Any | None = None,
         model_config: ModelConfig | None = None,
     ) -> AgentMessageResponse:
-        lc_messages = self._build_messages(messages, summary, plan)
+        lc_messages = self._build_messages(messages, summary, plan, request)
         runtime = tool_runtime or ToolRuntimeContext(
             thread_id=thread.thread_id,
             trusted_context=trusted,
@@ -688,7 +706,7 @@ class AgentRuntime:
         agent: Any | None = None,
         model_config: ModelConfig | None = None,
     ) -> AgentMessageResponse:
-        lc_messages = self._build_messages(messages, summary, plan)
+        lc_messages = self._build_messages(messages, summary, plan, request)
         model_messages: list[Any] = []
         model_buffer = ""
         emitted_answer_length = 0
@@ -735,7 +753,8 @@ class AgentRuntime:
         return response
 
     def _build_messages(
-        self, messages: list[dict[str, str]], summary: str, plan: AgentPlan
+        self, messages: list[dict[str, str]], summary: str, plan: AgentPlan,
+        request: AgentMessageRequest | None = None,
     ) -> list[Any]:
         lc_messages: list[Any] = []
         if summary:
@@ -744,7 +763,19 @@ class AgentRuntime:
             "本轮策略计划：先完成目标，再按需调用推荐工具 "
             f"{', '.join(plan.recommended_tools)}；最多执行 {plan.max_tool_rounds} 轮工具调用。"
         )))
-        for item in messages:
+        last_user_index = max(
+            (index for index, item in enumerate(messages) if item["role"] == "user"),
+            default=-1,
+        )
+        for index, item in enumerate(messages):
+            if request and request.attachments and index == last_user_index:
+                content: list[dict[str, Any]] = [{"type": "text", "text": item["content"]}]
+                content.extend({
+                    "type": "image_url",
+                    "image_url": {"url": attachment.data_url, "detail": "auto"},
+                } for attachment in request.attachments)
+                lc_messages.append(HumanMessage(content=content))
+                continue
             lc_messages.append(
                 HumanMessage(content=item["content"])
                 if item["role"] == "user"

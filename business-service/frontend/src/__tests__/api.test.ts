@@ -50,6 +50,27 @@ describe("typed api client", () => {
     ]);
   });
 
+  it("shares one refresh request across concurrent 401 responses", async () => {
+    const fetchMock = vi.mocked(fetch);
+    let protectedCalls = 0;
+    let refreshCalls = 0;
+    fetchMock.mockImplementation(async (path) => {
+      if (path === "/api/auth/refresh") {
+        refreshCalls += 1;
+        await Promise.resolve();
+        return jsonResponse({ code: 200, data: { refreshed: true } });
+      }
+      protectedCalls += 1;
+      return protectedCalls <= 2
+        ? jsonResponse({ code: 401, message: "expired" }, 401)
+        : jsonResponse({ code: 200, data: { ok: true } });
+    });
+
+    await expect(Promise.all([api.get("/api/one"), api.get("/api/two")]))
+      .resolves.toEqual([{ ok: true }, { ok: true }]);
+    expect(refreshCalls).toBe(1);
+  });
+
   it("retries transient GET failures with a bounded retry count", async () => {
     const fetchMock = vi.mocked(fetch);
     fetchMock

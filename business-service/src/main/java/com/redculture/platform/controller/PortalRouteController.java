@@ -11,7 +11,7 @@ public class PortalRouteController {
         return "redirect:/login";
     }
 
-    @GetMapping({"/login", "/register", "/map", "/teaching-plans", "/assistant", "/profile"})
+    @GetMapping({"/login", "/register", "/map", "/teaching-plans", "/assistant", "/agent-debug", "/profile"})
     public String portal() {
         return "forward:/portal/index.html";
     }

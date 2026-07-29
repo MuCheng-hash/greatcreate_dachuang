@@ -137,7 +137,7 @@ button:disabled { cursor: not-allowed; opacity: .55; }
   .app-topbar h1 { font-size: 18px; }
   .app-topbar p { display: none; }
   .page-content { padding: 14px 14px 20px; }
-  .mobile-nav { position: fixed; z-index: 30; inset: auto 0 0; height: 64px; display: grid; grid-template-columns: repeat(4,1fr); border-top: 1px solid var(--line); background: rgba(255,255,255,.98); }
+  .mobile-nav { position: fixed; z-index: 30; inset: auto 0 0; height: 64px; display: grid; grid-template-columns: repeat(5,1fr); border-top: 1px solid var(--line); background: rgba(255,255,255,.98); }
   .mobile-nav a { display: grid; place-items: center; align-content: center; gap: 3px; color: #748078; font-size: 11px; }
   .mobile-nav a.active { color: var(--red); }
   .auth-page { grid-template-columns: 1fr; background: #f8faf7; }

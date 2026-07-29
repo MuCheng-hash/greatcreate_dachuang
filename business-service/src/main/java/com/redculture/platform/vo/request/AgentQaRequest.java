@@ -2,6 +2,9 @@ package com.redculture.platform.vo.request;
 
 import lombok.Data;
 
+import java.util.ArrayList;
+import java.util.List;
+
 @Data
 public class AgentQaRequest {
 
@@ -22,4 +25,6 @@ public class AgentQaRequest {
     private String theme;
 
     private Integer topK;
+
+    private List<AgentAttachmentRequest> attachments = new ArrayList<>();
 }

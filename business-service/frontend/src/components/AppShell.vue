@@ -1,7 +1,7 @@
 <script setup>
 import { computed } from "vue";
 import { useRoute, useRouter } from "vue-router";
-import { Bot, LogOut, Map, NotebookPen, UserRound } from "@lucide/vue";
+import { Bot, Bug, LogOut, Map, NotebookPen, UserRound } from "@lucide/vue";
 import { useAuthStore } from "@/stores/auth";
 
 defineProps({ title: { type: String, required: true }, subtitle: { type: String, default: "" } });
@@ -13,6 +13,7 @@ const navItems = [
   { to: "/map", label: "地图资源", icon: Map },
   { to: "/teaching-plans", label: "教学方案", icon: NotebookPen },
   { to: "/assistant", label: "智能问答", icon: Bot },
+  { to: "/agent-debug", label: "Agent 调试", icon: Bug },
   { to: "/profile", label: "个人中心", icon: UserRound }
 ];
 const initials = computed(() => auth.schoolLabel.slice(0, 1));

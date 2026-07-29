@@ -111,6 +111,37 @@ describe("assistant view", () => {
     expect(wrapper.text()).toContain("deepseek / deepseek-chat");
   });
 
+  it("previews and forwards an image attachment", async () => {
+    const wrapper = mount(AssistantView, {
+      global: { stubs: { AppShell: { template: "<div><slot /></div>" }, InlineNotice: true } }
+    });
+    await flushPromises();
+    const file = new File(["image"], "school.png", { type: "image/png" });
+    const input = wrapper.get('input[type="file"]');
+    Object.defineProperty(input.element, "files", { configurable: true, value: [file] });
+    await input.trigger("change");
+    await vi.waitFor(() => expect(wrapper.find(".pending-images img").exists()).toBe(true));
+    await wrapper.get("textarea").setValue("分析图片中的教育资源");
+    await wrapper.get("form").trigger("submit.prevent");
+    await flushPromises();
+
+    expect(apiMock.post).toHaveBeenCalledWith("/api/ai/qa/ask", expect.objectContaining({
+      attachments: [expect.objectContaining({
+        type: "image", name: "school.png", mediaType: "image/png"
+      })]
+    }));
+  });
+
+  it("reports unsupported speech recognition without breaking text input", async () => {
+    const wrapper = mount(AssistantView, {
+      global: { stubs: { AppShell: { template: "<div><slot /></div>" }, InlineNotice: { template: "<div><slot /></div>" } } }
+    });
+    await flushPromises();
+    await wrapper.get('button[aria-label="语音输入"]').trigger("click");
+    expect(wrapper.text()).toContain("当前浏览器不支持语音输入");
+    expect(wrapper.get("textarea").exists()).toBe(true);
+  });
+
   it("sends questions to the business Agent endpoint and renders citations", async () => {
     const wrapper = mount(AssistantView, {
       global: {
@@ -143,8 +174,10 @@ describe("assistant view", () => {
       expect(path).toBe("/api/ai/qa/stream");
       expect(body.conversationId).toBeTruthy();
       options.onEvent("run.started", { runId: "run-1", conversationId: body.conversationId });
-      options.onEvent("tool.started", { toolName: "/internal/agent/tools/knowledge-retrieve" });
-      options.onEvent("tool.completed", { toolName: "/internal/agent/tools/knowledge-retrieve", status: "ok" });
+      options.onEvent("phase.started", { phase: "reasoning", label: "正在分析问题并规划处理步骤" });
+      options.onEvent("phase.completed", { phase: "reasoning", label: "分析完成，开始执行" });
+      options.onEvent("tool.started", { toolName: "/internal/agent/tools/knowledge-retrieve", arguments: { query: "附近资源" } });
+      options.onEvent("tool.completed", { toolName: "/internal/agent/tools/knowledge-retrieve", status: "ok", durationMs: 18, outputSummary: "返回 2 条结果" });
       options.onEvent("token", { delta: "逐字" });
       options.onEvent("token", { delta: "回答" });
       options.onEvent("final", {
@@ -176,7 +209,10 @@ describe("assistant view", () => {
     expect(apiMock.stream).toHaveBeenCalledTimes(1);
     expect(apiMock.post).not.toHaveBeenCalled();
     expect(wrapper.text()).toContain("逐字回答");
-    expect(wrapper.text()).toContain("知识检索：完成");
+    expect(wrapper.text()).toContain("分析完成，开始执行");
+    expect(wrapper.text()).toContain("知识检索");
+    expect(wrapper.text()).toContain("返回 2 条结果");
+    expect(wrapper.text()).toContain("18 ms");
     expect(wrapper.text()).toContain("检索证据");
   });
 

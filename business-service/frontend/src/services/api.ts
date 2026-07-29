@@ -7,6 +7,7 @@ import type {
 const DEFAULT_TIMEOUT_MS = 15_000;
 const DEFAULT_STREAM_TIMEOUT_MS = 90_000;
 const GET_RETRY_LIMIT = 2;
+let refreshPromise: Promise<boolean> | null = null;
 
 export class ApiError extends Error {
   readonly status: number;
@@ -116,6 +117,16 @@ async function readJson(response: Response): Promise<unknown> {
 }
 
 async function refreshAccessToken(): Promise<boolean> {
+  if (refreshPromise) return refreshPromise;
+  refreshPromise = performAccessTokenRefresh();
+  try {
+    return await refreshPromise;
+  } finally {
+    refreshPromise = null;
+  }
+}
+
+async function performAccessTokenRefresh(): Promise<boolean> {
   try {
     const timeout = withTimeout(null, DEFAULT_TIMEOUT_MS);
     try {

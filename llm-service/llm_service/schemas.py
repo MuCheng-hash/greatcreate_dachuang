@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import base64
+import binascii
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 TaskType = Literal["CHAT", "TEACHING_PLAN", "RESOURCE_DISCOVERY"]
@@ -22,6 +24,26 @@ class TrustedContext(ApiModel):
     citation_candidates: list[dict[str, Any]] = Field(default_factory=list, alias="citationCandidates")
 
 
+class AgentAttachment(ApiModel):
+    type: Literal["image"] = "image"
+    name: str = Field(min_length=1, max_length=180)
+    media_type: Literal["image/jpeg", "image/png", "image/webp", "image/gif"] = Field(alias="mediaType")
+    data_url: str = Field(alias="dataUrl", min_length=32, max_length=7_100_000)
+
+    @model_validator(mode="after")
+    def validate_data_url(self) -> "AgentAttachment":
+        prefix = f"data:{self.media_type};base64,"
+        if not self.data_url.startswith(prefix):
+            raise ValueError("attachment dataUrl does not match mediaType")
+        try:
+            decoded = base64.b64decode(self.data_url[len(prefix):], validate=True)
+        except (ValueError, binascii.Error) as exc:
+            raise ValueError("attachment dataUrl is not valid base64") from exc
+        if len(decoded) > 5 * 1024 * 1024:
+            raise ValueError("attachment exceeds 5MB")
+        return self
+
+
 class AgentMessageRequest(ApiModel):
     owner_id: str = Field(alias="ownerId", min_length=1, max_length=160)
     scope_type: str = Field(alias="scopeType", min_length=1, max_length=32)
@@ -35,6 +57,7 @@ class AgentMessageRequest(ApiModel):
     grade: str | None = Field(default=None, max_length=100)
     theme: str | None = Field(default=None, max_length=200)
     context: TrustedContext = Field(default_factory=TrustedContext)
+    attachments: list[AgentAttachment] = Field(default_factory=list, max_length=3)
 
     @field_validator("message")
     @classmethod

@@ -16,10 +16,10 @@ import java.util.ArrayList;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
@@ -67,6 +67,7 @@ class AuthTokenServiceTest {
                 inserted.isEmpty() ? null : inserted.get(inserted.size() - 1)
         );
         when(refreshTokenMapper.selectList(any())).thenReturn(List.of());
+        when(refreshTokenMapper.update(isNull(), any())).thenReturn(1);
     }
 
     @Test
@@ -79,9 +80,7 @@ class AuthTokenServiceTest {
         assertEquals("refresh-1", first.refreshToken());
         assertEquals("refresh-2", second.refreshToken());
         assertEquals(oldRecord.getTokenFamilyId(), inserted.get(1).getTokenFamilyId());
-        assertNotNull(oldRecord.getRevokedAt());
-        assertEquals("rotated", oldRecord.getRevokeReason());
-        verify(refreshTokenMapper).updateById(oldRecord);
+        verify(refreshTokenMapper).update(isNull(), any());
     }
 
     @Test
@@ -90,7 +89,7 @@ class AuthTokenServiceTest {
         AuthRefreshToken oldRecord = inserted.get(0);
         service.rotate(first.refreshToken(), request);
         AuthRefreshToken rotatedRecord = inserted.get(1);
-        rotatedRecord.setRevokedAt(java.time.LocalDateTime.now());
+        oldRecord.setRevokedAt(java.time.LocalDateTime.now());
         when(refreshTokenMapper.selectOne(any())).thenReturn(oldRecord);
         when(refreshTokenMapper.selectList(any())).thenReturn(List.of(rotatedRecord));
 
@@ -106,5 +105,14 @@ class AuthTokenServiceTest {
         account.setStatus(AccountStatus.DISABLED);
 
         assertThrows(AuthTokenException.class, () -> service.rotate(first.refreshToken(), request));
+    }
+
+    @Test
+    void rejectsRefreshWhenAnotherRequestAlreadyClaimedTheToken() {
+        IssuedTokens first = service.issue(user, request);
+        when(refreshTokenMapper.update(isNull(), any())).thenReturn(0);
+
+        assertThrows(AuthTokenException.class, () -> service.rotate(first.refreshToken(), request));
+        assertEquals(1, inserted.size());
     }
 }

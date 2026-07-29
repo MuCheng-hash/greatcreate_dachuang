@@ -15,6 +15,7 @@ from llm_service.container import build_container
 from llm_service import legacy_api
 from llm_service.repository import ConversationRepository
 from llm_service.prompt_manager import PromptManager
+from llm_service.planner import AgentPlan
 from llm_service.runtime import AgentRuntime
 from llm_service.schemas import AgentMessageRequest, TrustedContext
 from llm_service.settings import Settings
@@ -24,6 +25,28 @@ from llm_service.structured_tasks import (
     teaching_plan_stream_text,
 )
 from llm_service.tools import ToolRuntimeContext, bind_tool_runtime, reset_tool_runtime, search_approved_resources
+
+
+def test_multimodal_request_builds_image_message(tmp_path: Path):
+    request = AgentMessageRequest.model_validate(message_payload(
+        message="请分析这张图片",
+        attachments=[{
+            "type": "image",
+            "name": "resource.png",
+            "mediaType": "image/png",
+            "dataUrl": "data:image/png;base64,aGVsbG8taGVsbG8taGVsbG8=",
+        }],
+    ))
+    settings = settings_for(tmp_path)
+    runtime = AgentRuntime(settings, ConversationRepository(settings.database_path))
+    messages = runtime._build_messages(
+        [{"role": "user", "content": request.message}], "",
+        AgentPlan(request.message, tuple(), 1), request,
+    )
+
+    assert messages[-1].content[0] == {"type": "text", "text": "请分析这张图片"}
+    assert messages[-1].content[1]["type"] == "image_url"
+    assert messages[-1].content[1]["image_url"]["url"].startswith("data:image/png;base64,")
 
 
 def settings_for(tmp_path: Path, **overrides) -> Settings:

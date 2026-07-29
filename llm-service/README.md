@@ -57,6 +57,16 @@ OpenAI-compatible endpoint addresses are supplied. Keep endpoints and keys in en
 $env:LLM_MODELS = '[{"id":"deepseek","provider":"deepseek","model":"deepseek-chat","apiUrl":"YOUR_DEEPSEEK_ENDPOINT","apiKey":"YOUR_DEEPSEEK_KEY"},{"id":"ernie","provider":"qianfan","model":"YOUR_ERNIE_MODEL","apiUrl":"YOUR_QIANFAN_ENDPOINT","apiKey":"YOUR_QIANFAN_KEY"}]'
 ```
 
+### 多模态问答
+
+图片问答遵循 OpenAI-compatible `image_url` 消息格式。请在 `LLM_MODELS` 中至少配置一个支持视觉输入的模型，例如阿里云百炼的 `qwen-vl-plus`，并在页面模型选择器中选中它：
+
+```powershell
+$env:LLM_MODELS = '[{"id":"qwen-vl","provider":"bailian","model":"qwen-vl-plus","apiUrl":"https://dashscope.aliyuncs.com/compatible-mode/v1","apiKey":"YOUR_DASHSCOPE_API_KEY"}]'
+```
+
+前端允许每次附加最多 3 张 JPEG、PNG、WebP 或 GIF 图片，单张不超过 5MB。语音输入和回答朗读使用浏览器原生 Web Speech API，不需要额外服务密钥；推荐使用最新版 Chrome 或 Edge，并允许站点访问麦克风。
+
 The first item is the default. Both models appear in the teaching-plan and
 assistant selectors; failed calls continue through the remaining items once.
 

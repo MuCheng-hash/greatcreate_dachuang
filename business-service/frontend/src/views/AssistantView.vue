@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref, watch } from "vue";
-import { Archive, Bot, History, MessageCircleQuestion, Plus, Send, Sparkles, Trash2, UserRound } from "@lucide/vue";
+import { Archive, Bot, BrainCircuit, Check, ChevronDown, Clock3, History, ImagePlus, LoaderCircle, MessageCircleQuestion, Mic, Plus, Send, Sparkles, Trash2, UserRound, Volume2, VolumeX, Wrench, X } from "@lucide/vue";
 import AppShell from "@/components/AppShell.vue";
 import InlineNotice from "@/components/InlineNotice.vue";
 import { api } from "@/services/api";
@@ -8,6 +8,7 @@ import { useSchoolStore } from "@/stores/school";
 import { useAuthStore, type AuthCurrentUser } from "@/stores/auth";
 import type {
   AgentCitation,
+  AgentAttachment,
   AgentQaRequestPayload,
   AgentQaResponse,
   AgentSseEventData,
@@ -22,6 +23,16 @@ interface AssistantToolEvent {
   status?: string;
 }
 
+interface AssistantTraceEvent {
+  id: string;
+  kind: "phase" | "model" | "tool" | "response" | "error";
+  title: string;
+  detail?: string;
+  status: "running" | "completed" | "failed";
+  durationMs?: number;
+  startedAt: number;
+}
+
 interface AssistantMessage extends AgentQaResponse {
   role: "user" | "assistant";
   text?: string;
@@ -30,6 +41,20 @@ interface AssistantMessage extends AgentQaResponse {
   toolEvents?: AssistantToolEvent[];
   streamStatus?: string;
   effectiveModel?: string;
+  traceEvents?: AssistantTraceEvent[];
+  traceExpanded?: boolean;
+  attachments?: AgentAttachment[];
+}
+
+interface SpeechRecognitionLike {
+  lang: string;
+  interimResults: boolean;
+  continuous: boolean;
+  start(): void;
+  stop(): void;
+  onresult: ((event: { results: ArrayLike<{ 0: { transcript: string }; isFinal: boolean }> }) => void) | null;
+  onerror: (() => void) | null;
+  onend: (() => void) | null;
 }
 
 const auth = useAuthStore();
@@ -48,6 +73,11 @@ const history = ref<AssistantConversationSummary[]>([]);
 const historyLoading = ref<boolean>(false);
 const historyError = ref<string>("");
 const historyBusyId = ref<string>("");
+const imageInput = ref<HTMLInputElement | null>(null);
+const pendingImages = ref<AgentAttachment[]>([]);
+const listening = ref(false);
+const speakingIndex = ref<number | null>(null);
+const recognition = ref<SpeechRecognitionLike | null>(null);
 
 const suggestions = computed(() => {
   const resourceName = schoolStore.resources[0]?.resource?.resourceName;
@@ -104,6 +134,10 @@ async function openConversation(selectedThreadId: string, showError = true): Pro
 
 function startNewConversation(): void {
   activeAbortController.value?.abort();
+  recognition.value?.stop();
+  window.speechSynthesis?.cancel();
+  pendingImages.value = [];
+  speakingIndex.value = null;
   threadId.value = "";
   conversationId.value = makeConversationId();
   messages.value = [];
@@ -139,7 +173,9 @@ async function loadModels(): Promise<void> {
   }
 }
 
-watch(messages, (value) => sessionStorage.setItem(storageKey(), JSON.stringify(value)), { deep: true });
+watch(messages, (value) => sessionStorage.setItem(storageKey(), JSON.stringify(
+  value.map(({ attachments: _attachments, ...message }) => message)
+)), { deep: true });
 watch(conversationId, (value) => sessionStorage.setItem(conversationStorageKey(), value));
 watch(threadId, (value) => {
   if (value) sessionStorage.setItem(threadStorageKey(), value);
@@ -172,11 +208,12 @@ function loadMessages(): AssistantMessage[] {
 }
 
 function retrievalStatusLabel(status?: string | null): string {
-  return {
+  const labels: Record<string, string> = {
     ok: "已结合知识检索证据",
     empty: "未检索到直接匹配的知识证据",
     degraded: "知识检索部分不可用，当前回答基于可用业务数据"
-  }[status] || "知识检索状态未知";
+  };
+  return status ? labels[status] || "知识检索状态未知" : "知识检索状态未知";
 }
 
 function retrievalStatusClass(status?: string | null): string {
@@ -184,11 +221,12 @@ function retrievalStatusClass(status?: string | null): string {
 }
 
 function generationStatusLabel(status?: string | null): string {
-  return {
+  const labels: Record<string, string> = {
     completed: "已由答案生成服务整理",
     degraded: "答案生成服务不可用，当前为本地降级回答",
     skipped: "未调用答案生成服务"
-  }[status] || "答案生成状态未知";
+  };
+  return status ? labels[status] || "答案生成状态未知" : "答案生成状态未知";
 }
 
 function generationStatusClass(status?: string | null): string {
@@ -209,17 +247,20 @@ async function explain() {
 
 async function ask(text: string = question.value): Promise<void> {
   const clean = text.trim();
-  if (!clean || loading.value) return;
+  if ((!clean && !pendingImages.value.length) || loading.value) return;
+  const attachments = [...pendingImages.value];
+  const prompt = clean || "请分析图片内容，并结合当前学校的教学场景给出说明。";
   question.value = "";
-  await requestAssistant(clean);
+  pendingImages.value = [];
+  await requestAssistant(prompt, attachments);
 }
 
-async function requestAssistant(userText: string): Promise<void> {
+async function requestAssistant(userText: string, attachments: AgentAttachment[] = []): Promise<void> {
   error.value = "";
-  messages.value.push({ role: "user", text: userText });
+  messages.value.push({ role: "user", text: userText, attachments });
   const assistantMessage: AssistantMessage = {
     role: "assistant", answer: "", relatedResources: [], citations: [], followUpQuestions: [],
-    toolEvents: [], streamStatus: "正在启动 Agent…"
+    toolEvents: [], traceEvents: [], traceExpanded: true, streamStatus: "正在启动 Agent…"
   };
   messages.value.push(assistantMessage);
   loading.value = true;
@@ -233,6 +274,7 @@ async function requestAssistant(userText: string): Promise<void> {
       scopeType: "SCHOOL",
       scopeId: schoolStore.school?.schoolId || auth.user?.schoolId || null
     };
+    if (attachments.length) requestBody.attachments = attachments;
     if (selectedModelId.value) requestBody.modelId = selectedModelId.value;
     if (!threadId.value) requestBody.conversationId = conversationId.value;
     let finalReceived = false;
@@ -249,22 +291,48 @@ async function requestAssistant(userText: string): Promise<void> {
           if (eventName === "run.started") {
             assistantMessage.runId = data.runId;
             assistantMessage.streamStatus = "Agent 已启动";
+          } else if (eventName === "phase.started" || eventName === "phase.completed") {
+            updateTrace(assistantMessage, `phase:${data.phase || "work"}`, {
+              kind: "phase", title: data.label || phaseLabel(data.phase), detail: traceDetail(data),
+              status: eventName === "phase.completed" ? "completed" : "running"
+            });
+            assistantMessage.streamStatus = data.label || phaseLabel(data.phase);
+          } else if (eventName === "model.started") {
+            updateTrace(assistantMessage, "model", {
+              kind: "model", title: "连接生成模型",
+              detail: [data.provider, data.model].filter(Boolean).join(" / "), status: "running"
+            });
           } else if (eventName === "model.completed") {
             assistantMessage.effectiveModel = data.model
               ? `${data.provider || "LLM"} / ${data.model}` : "";
+            updateTrace(assistantMessage, "model", { kind: "model", title: "生成模型已响应", status: "completed" });
+          } else if (eventName === "model.failed") {
+            updateTrace(assistantMessage, "model", {
+              kind: "model", title: "当前模型不可用，准备降级", detail: data.errorType, status: "failed"
+            });
           } else if (eventName === "tool.started") {
-            assistantMessage.toolEvents.push({ toolName: data.toolName, status: "started" });
+            const toolEvents = assistantMessage.toolEvents ||= [];
+            toolEvents.push({ toolName: data.toolName, status: "started" });
+            updateTrace(assistantMessage, `tool:${data.toolName}`, {
+              kind: "tool", title: toolLabel(data.toolName), detail: traceDetail(data), status: "running"
+            });
             assistantMessage.streamStatus = `正在调用：${toolLabel(data.toolName)}`;
           } else if (eventName === "tool.completed") {
-            const previous = [...assistantMessage.toolEvents].reverse().find(item => item.toolName === data.toolName && item.status === "started");
+            const toolEvents = assistantMessage.toolEvents ||= [];
+            const previous = [...toolEvents].reverse().find(item => item.toolName === data.toolName && item.status === "started");
             if (previous) previous.status = data.status || "completed";
-            else assistantMessage.toolEvents.push({ toolName: data.toolName, status: data.status || "completed" });
+            else toolEvents.push({ toolName: data.toolName, status: data.status || "completed" });
+            updateTrace(assistantMessage, `tool:${data.toolName}`, {
+              kind: "tool", title: toolLabel(data.toolName), detail: data.outputSummary || traceDetail(data),
+              durationMs: data.durationMs, status: data.status === "ok" ? "completed" : "failed"
+            });
             assistantMessage.streamStatus = data.status === "ok" ? "工具结果已返回，正在整理回答" : "部分工具不可用，正在降级处理";
           } else if (eventName === "model.fallback") {
             if (data.reset) assistantMessage.answer = "";
             assistantMessage.streamStatus = `正在切换备用模型：${data.nextModel || "轻量模型"}`;
           } else if (eventName === "token") {
             assistantMessage.answer += data.delta || "";
+            updateTrace(assistantMessage, "response", { kind: "response", title: "生成回答", status: "running" });
             assistantMessage.streamStatus = "正在生成回答";
           } else if (eventName === "final") {
             finalReceived = true;
@@ -272,8 +340,10 @@ async function requestAssistant(userText: string): Promise<void> {
             if (data.response?.conversationId) conversationId.value = data.response.conversationId;
             if (data.response?.threadId) threadId.value = data.response.threadId;
             assistantMessage.streamStatus = "回答完成";
+            updateTrace(assistantMessage, "response", { kind: "response", title: "回答生成完成", status: "completed" });
             void loadHistory();
           } else if (eventName === "error") {
+            updateTrace(assistantMessage, "error", { kind: "error", title: "处理失败", detail: data.message, status: "failed" });
             streamError = new Error(data.message || "Agent 流式服务异常");
           }
         }
@@ -282,7 +352,8 @@ async function requestAssistant(userText: string): Promise<void> {
       if (!finalReceived) throw new Error("流式服务未返回最终结果");
     }
   } catch (requestError) {
-    if (requestError?.name === "AbortError") {
+    const requestFailure = requestError instanceof Error ? requestError : new Error("请求失败");
+    if (requestFailure.name === "AbortError") {
       assistantMessage.streamStatus = "已停止生成";
       if (!assistantMessage.answer) messages.value.pop();
       return;
@@ -294,10 +365,11 @@ async function requestAssistant(userText: string): Promise<void> {
         threadId: threadId.value || null,
         scopeType: "SCHOOL",
         scopeId: schoolStore.school?.schoolId || auth.user?.schoolId || null,
+        ...(attachments.length ? { attachments } : {}),
         ...(selectedModelId.value ? { modelId: selectedModelId.value } : {})
       });
       applyAssistantResult(assistantMessage, result);
-      error.value = `${requestError.message}，已切换到兼容问答接口`;
+      error.value = `${requestFailure.message}，已切换到兼容问答接口`;
       return;
     } catch {
     const resourceCount = schoolStore.resources.length;
@@ -305,7 +377,7 @@ async function requestAssistant(userText: string): Promise<void> {
     assistantMessage.citations = ["当前为本地兜底回答，智能问答服务恢复后可获得更完整的引用结果。"];
     assistantMessage.retrievalStatus = "degraded";
     assistantMessage.generationStatus = "degraded";
-    error.value = requestError.message;
+    error.value = requestFailure.message;
     }
   } finally {
     loading.value = false;
@@ -336,13 +408,156 @@ function applyAssistantResult(message: AssistantMessage, result: Partial<AgentQa
   if (result?.threadId) threadId.value = result.threadId;
 }
 
-function toolLabel(toolName?: string): string {
+function phaseLabel(phase?: string): string {
   return {
+    retrieval: "检索可信知识与业务数据",
+    context: "准备会话上下文",
+    reasoning: "分析问题并规划步骤",
+    response: "生成回答"
+  }[phase || ""] || "处理中";
+}
+
+function traceDetail(data: AgentSseEventData): string {
+  if (data.arguments && Object.keys(data.arguments).length) {
+    return Object.entries(data.arguments).map(([key, value]) => `${key}: ${String(value)}`).join(" · ");
+  }
+  if (Array.isArray(data.recommendedTools) && data.recommendedTools.length) {
+    return `计划调用 ${data.recommendedTools.map(item => toolLabel(String(item))).join("、")}`;
+  }
+  return "";
+}
+
+function updateTrace(
+  message: AssistantMessage,
+  id: string,
+  update: Omit<AssistantTraceEvent, "id" | "startedAt"> & { startedAt?: number }
+): void {
+  message.traceEvents ||= [];
+  const existing = message.traceEvents.find(item => item.id === id);
+  if (existing) {
+    Object.assign(existing, update);
+    return;
+  }
+  message.traceEvents.push({ id, startedAt: Date.now(), ...update });
+}
+
+function traceIcon(kind: AssistantTraceEvent["kind"]) {
+  if (kind === "tool") return Wrench;
+  if (kind === "response") return Sparkles;
+  return BrainCircuit;
+}
+
+function toolLabel(toolName?: string): string {
+  const labels: Record<string, string> = {
+    "get_scope_context": "查看学校上下文",
+    "search_approved_resources": "检索已审核资源",
+    "retrieve_knowledge": "检索知识库",
+    "query_graph_relations": "查询知识关系",
     "/internal/agent/tools/school-context": "学校资源",
     "/internal/agent/tools/resource-detail": "资源详情",
     "/internal/agent/tools/knowledge-retrieve": "知识检索",
     "/internal/agent/tools/relation-query": "图谱关系"
-  }[toolName] || toolName || "受控工具";
+  };
+  return toolName ? labels[toolName] || toolName : "受控工具";
+}
+
+function chooseImages(): void {
+  imageInput.value?.click();
+}
+
+async function addImages(event: Event): Promise<void> {
+  const input = event.target as HTMLInputElement;
+  const files = Array.from(input.files || []);
+  input.value = "";
+  for (const file of files) {
+    if (pendingImages.value.length >= 3) {
+      error.value = "每次最多上传 3 张图片";
+      break;
+    }
+    if (!(["image/jpeg", "image/png", "image/webp", "image/gif"] as string[]).includes(file.type)) {
+      error.value = `不支持 ${file.name} 的图片格式`;
+      continue;
+    }
+    if (file.size > 5 * 1024 * 1024) {
+      error.value = `${file.name} 超过 5MB`;
+      continue;
+    }
+    pendingImages.value.push({
+      type: "image",
+      name: file.name.slice(0, 180),
+      mediaType: file.type as AgentAttachment["mediaType"],
+      dataUrl: await readAsDataUrl(file)
+    });
+  }
+}
+
+function readAsDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ""));
+    reader.onerror = () => reject(reader.error || new Error("图片读取失败"));
+    reader.readAsDataURL(file);
+  });
+}
+
+function removeImage(index: number): void {
+  pendingImages.value.splice(index, 1);
+}
+
+function toggleListening(): void {
+  if (listening.value) {
+    recognition.value?.stop();
+    return;
+  }
+  const speechWindow = window as unknown as {
+    SpeechRecognition?: new () => SpeechRecognitionLike;
+    webkitSpeechRecognition?: new () => SpeechRecognitionLike;
+  };
+  const Recognition = speechWindow.SpeechRecognition || speechWindow.webkitSpeechRecognition;
+  if (!Recognition) {
+    error.value = "当前浏览器不支持语音输入，请使用最新版 Chrome 或 Edge";
+    return;
+  }
+  const instance = new Recognition();
+  const original = question.value.trim();
+  instance.lang = "zh-CN";
+  instance.interimResults = true;
+  instance.continuous = false;
+  instance.onresult = (event) => {
+    let transcript = "";
+    for (let index = 0; index < event.results.length; index += 1) {
+      transcript += event.results[index][0]?.transcript || "";
+    }
+    question.value = [original, transcript.trim()].filter(Boolean).join(" ");
+  };
+  instance.onerror = () => {
+    error.value = "语音识别未成功，请检查麦克风权限后重试";
+    listening.value = false;
+  };
+  instance.onend = () => {
+    listening.value = false;
+    recognition.value = null;
+  };
+  recognition.value = instance;
+  listening.value = true;
+  instance.start();
+}
+
+function toggleSpeech(message: AssistantMessage, index: number): void {
+  if (!("speechSynthesis" in window) || !message.answer) return;
+  if (speakingIndex.value === index) {
+    window.speechSynthesis.cancel();
+    speakingIndex.value = null;
+    return;
+  }
+  window.speechSynthesis.cancel();
+  const utterance = new SpeechSynthesisUtterance(message.answer);
+  utterance.lang = "zh-CN";
+  utterance.rate = 1;
+  utterance.onend = () => { speakingIndex.value = null; };
+  utterance.onerror = () => { speakingIndex.value = null; };
+  speakingIndex.value = index;
+  window.speechSynthesis.speak(utterance);
 }
 
 function stopGeneration(): void {
@@ -355,6 +570,10 @@ async function scrollToBottom(): Promise<void> {
 }
 
 function clearChat(): void {
+  recognition.value?.stop();
+  window.speechSynthesis?.cancel();
+  pendingImages.value = [];
+  speakingIndex.value = null;
   messages.value = [];
   threadId.value = "";
   sessionStorage.removeItem(storageKey());
@@ -400,24 +619,57 @@ function clearChat(): void {
             <span class="chat-avatar"><UserRound v-if="message.role === 'user'" :size="17" /><Bot v-else :size="17" /></span>
             <div>
               <p>{{ message.text || message.answer }}</p>
-              <div v-if="message.streamStatus" class="agent-stream-status">{{ message.streamStatus }}</div>
+              <div v-if="message.attachments?.length" class="message-images">
+                <img v-for="attachment in message.attachments" :key="attachment.name" :src="attachment.dataUrl" :alt="attachment.name" />
+              </div>
+              <section v-if="message.role === 'assistant' && message.traceEvents?.length" class="agent-trace" aria-label="Agent 执行过程">
+                <button class="agent-trace-toggle" type="button" :aria-expanded="message.traceExpanded !== false" @click="message.traceExpanded = message.traceExpanded === false">
+                  <span>
+                    <LoaderCircle v-if="message.traceEvents.some(item => item.status === 'running')" class="trace-spinner" :size="15" />
+                    <Check v-else :size="15" />
+                    {{ message.streamStatus || "执行过程" }}
+                  </span>
+                  <ChevronDown :size="15" :class="{ rotated: message.traceExpanded !== false }" />
+                </button>
+                <div v-if="message.traceExpanded !== false" class="agent-trace-list">
+                  <div v-for="trace in message.traceEvents" :key="trace.id" class="agent-trace-row" :class="`trace-${trace.status}`">
+                    <span class="trace-icon"><LoaderCircle v-if="trace.status === 'running'" class="trace-spinner" :size="14" /><Check v-else-if="trace.status === 'completed'" :size="14" /><component :is="traceIcon(trace.kind)" v-else :size="14" /></span>
+                    <div><strong>{{ trace.title }}</strong><small v-if="trace.detail">{{ trace.detail }}</small></div>
+                    <span v-if="trace.durationMs !== undefined" class="trace-duration"><Clock3 :size="12" />{{ trace.durationMs }} ms</span>
+                  </div>
+                </div>
+              </section>
+              <div v-else-if="message.streamStatus" class="agent-stream-status">{{ message.streamStatus }}</div>
               <div v-if="message.effectiveModel" class="agent-stream-status">实际模型：{{ message.effectiveModel }}</div>
-              <div v-if="message.toolEvents?.length" class="agent-tool-events"><span v-for="(toolEvent,toolIndex) in message.toolEvents" :key="toolIndex">{{ toolLabel(toolEvent.toolName) }}：{{ toolEvent.status === "started" ? "进行中" : toolEvent.status === "ok" ? "完成" : "降级" }}</span></div>
               <p v-if="message.retrievalStatus" class="retrieval-status" :class="retrievalStatusClass(message.retrievalStatus)">{{ retrievalStatusLabel(message.retrievalStatus) }}</p>
               <p v-if="message.generationStatus" class="generation-status" :class="generationStatusClass(message.generationStatus)">{{ generationStatusLabel(message.generationStatus) }}</p>
               <div v-if="message.clarificationRequired" class="clarification"><strong>需要补充：</strong>{{ message.clarificationMessage || "请补充具体学校名称。" }}<span v-if="message.clarificationOptions?.length">可选：{{ message.clarificationOptions.join("、") }}</span></div>
               <p v-if="message.relatedResources?.length" class="related"><strong>关联资源：</strong>{{ message.relatedResources.join("、") }}</p>
               <div v-if="message.citations?.length" class="chat-citations"><span v-for="(citation,citationIndex) in message.citations" :key="citationIndex">{{ typeof citation === "string" ? citation : citation.title || citation.excerpt }}</span></div>
               <div v-if="message.followUpQuestions?.length" class="follow-ups"><button v-for="item in message.followUpQuestions" :key="item" type="button" @click="ask(item)">{{ item }}</button></div>
+              <button v-if="message.role === 'assistant' && message.answer" class="message-audio" type="button" :title="speakingIndex === index ? '停止朗读' : '朗读回答'" :aria-label="speakingIndex === index ? '停止朗读' : '朗读回答'" @click="toggleSpeech(message, index)">
+                <VolumeX v-if="speakingIndex === index" :size="15" /><Volume2 v-else :size="15" />
+              </button>
             </div>
           </article>
           <div v-if="loading" class="typing"><span></span><span></span><span></span></div>
           <div v-if="!messages.length && !loading" class="empty-state"><MessageCircleQuestion :size="42" /><span>选择建议问题或输入你想了解的内容</span></div>
         </div>
         <form class="chat-composer" @submit.prevent="ask()">
+          <div v-if="pendingImages.length" class="pending-images">
+            <div v-for="(attachment,index) in pendingImages" :key="attachment.name + index">
+              <img :src="attachment.dataUrl" :alt="attachment.name" />
+              <button type="button" title="移除图片" aria-label="移除图片" @click="removeImage(index)"><X :size="14" /></button>
+            </div>
+          </div>
           <textarea v-model="question" rows="2" placeholder="输入关于学校资源或教学活动的问题" @keydown.ctrl.enter.prevent="ask()"></textarea>
-          <button v-if="loading" class="text-button stop-button" type="button" @click="stopGeneration">停止</button>
-          <button v-else class="primary-button send-button" type="submit" :disabled="!question.trim()" aria-label="发送问题"><Send :size="19" /></button>
+          <div class="composer-actions">
+            <input ref="imageInput" class="visually-hidden" type="file" accept="image/jpeg,image/png,image/webp,image/gif" multiple @change="addImages" />
+            <button class="composer-icon" type="button" title="添加图片" aria-label="添加图片" :disabled="loading || pendingImages.length >= 3" @click="chooseImages"><ImagePlus :size="19" /></button>
+            <button class="composer-icon" :class="{ active: listening }" type="button" :title="listening ? '停止语音输入' : '语音输入'" :aria-label="listening ? '停止语音输入' : '语音输入'" :disabled="loading" @click="toggleListening"><Mic :size="19" /></button>
+            <button v-if="loading" class="text-button stop-button" type="button" @click="stopGeneration">停止</button>
+            <button v-else class="primary-button send-button" type="submit" :disabled="!question.trim() && !pendingImages.length" aria-label="发送问题"><Send :size="19" /></button>
+          </div>
         </form>
       </div>
     </section>
@@ -461,9 +713,28 @@ function clearChat(): void {
 .chat-avatar { display: grid; place-items: center; width: 34px; height: 34px; border-radius: 50%; background: var(--green); color: #fff; }
 .chat-message > div { padding: 13px 15px; border-radius: 8px; background: var(--surface-muted); }
 .chat-message p { margin: 0; line-height: 1.8; white-space: pre-wrap; }
+.message-images { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.message-images img { width: 132px; height: 96px; object-fit: cover; border: 1px solid var(--line); border-radius: 6px; }
+.message-audio { display: grid; width: 28px; height: 28px; place-items: center; margin-top: 8px; border: 0; border-radius: 50%; background: transparent; color: var(--muted); cursor: pointer; }
+.message-audio:hover { color: var(--green); background: #fff; }
 .agent-stream-status { margin-top: 8px; color: var(--muted); font-size: 12px; }
-.agent-tool-events { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 7px; color: var(--muted); font-size: 11px; }
-.agent-tool-events span { padding: 2px 6px; border: 1px solid var(--line); border-radius: 4px; background: #fff; }
+.agent-trace { margin-top: 10px; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+.agent-trace-toggle { display: flex; width: 100%; min-height: 38px; align-items: center; justify-content: space-between; gap: 10px; padding: 0; border: 0; background: transparent; color: #526158; font-size: 12px; cursor: pointer; }
+.agent-trace-toggle > span { display: flex; min-width: 0; align-items: center; gap: 7px; overflow-wrap: anywhere; }
+.agent-trace-toggle svg { flex: none; transition: transform 160ms ease; }
+.agent-trace-toggle svg.rotated { transform: rotate(180deg); }
+.agent-trace-list { display: grid; padding: 2px 0 10px 6px; }
+.agent-trace-row { position: relative; display: grid; grid-template-columns: 24px minmax(0,1fr) auto; gap: 7px; min-height: 38px; align-items: start; color: var(--muted); font-size: 12px; }
+.agent-trace-row:not(:last-child)::after { content: ""; position: absolute; left: 7px; top: 21px; bottom: -4px; width: 1px; background: var(--line); }
+.trace-icon { z-index: 1; display: grid; width: 16px; height: 16px; place-items: center; margin-top: 1px; border-radius: 50%; background: var(--surface-muted); color: var(--green); }
+.trace-running .trace-icon { color: #9b711b; }
+.trace-failed .trace-icon { color: var(--red); }
+.agent-trace-row strong, .agent-trace-row small { display: block; letter-spacing: 0; }
+.agent-trace-row strong { color: #435047; font-size: 12px; font-weight: 650; line-height: 1.45; }
+.agent-trace-row small { margin-top: 2px; color: var(--muted); line-height: 1.45; overflow-wrap: anywhere; }
+.trace-duration { display: flex; align-items: center; gap: 3px; color: var(--muted); font-size: 10px; white-space: nowrap; }
+.trace-spinner { animation: trace-spin 900ms linear infinite; }
+@keyframes trace-spin { to { transform: rotate(360deg); } }
 .retrieval-status { margin-top: 8px !important; font-size: 12px; }
 .retrieval-ok { color: var(--green); }
 .retrieval-empty { color: var(--muted); }
@@ -479,14 +750,25 @@ function clearChat(): void {
 .chat-citations { display: grid; gap: 5px; margin-top: 12px; padding-top: 10px; border-top: 1px solid #d3dbd5; color: var(--muted); font-size: 12px; }
 .follow-ups { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 11px; }
 .follow-ups button { min-height: 30px; padding: 0 9px; border: 1px solid #bdd1c3; border-radius: 4px; background: #fff; color: var(--green); font-size: 12px; }
-.chat-composer { display: grid; grid-template-columns: minmax(0,1fr) 44px; gap: 9px; padding: 14px; border-top: 1px solid var(--line); background: #fff; }
+.chat-composer { display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 9px; padding: 14px; border-top: 1px solid var(--line); background: #fff; }
+.pending-images { grid-column: 1 / -1; display: flex; gap: 8px; overflow-x: auto; }
+.pending-images > div { position: relative; flex: none; width: 72px; height: 58px; }
+.pending-images img { width: 100%; height: 100%; object-fit: cover; border: 1px solid var(--line); border-radius: 6px; }
+.pending-images button { position: absolute; top: -5px; right: -5px; display: grid; width: 20px; height: 20px; place-items: center; padding: 0; border: 1px solid var(--line); border-radius: 50%; background: #fff; color: var(--red); cursor: pointer; }
 .chat-composer textarea { min-height: 48px; max-height: 120px; resize: none; }
+.composer-actions { display: flex; align-items: flex-end; gap: 5px; }
+.composer-icon { display: grid; width: 36px; height: 44px; place-items: center; padding: 0; border: 0; border-radius: 6px; background: transparent; color: var(--muted); cursor: pointer; }
+.composer-icon:hover:not(:disabled), .composer-icon.active { color: var(--green); background: var(--green-soft); }
+.composer-icon.active { animation: mic-pulse 1s ease-in-out infinite alternate; }
+.composer-icon:disabled { opacity: .4; cursor: not-allowed; }
+.visually-hidden { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
 .send-button { width: 44px; min-height: 44px; padding: 0; align-self: end; }
 .stop-button { min-height: 44px; padding: 0 10px; align-self: end; color: var(--red); }
 .typing { display: flex; gap: 5px; padding-left: 44px; }
 .typing span { width: 7px; height: 7px; border-radius: 50%; background: #8ca094; animation: pulse 900ms infinite alternate; }
 .typing span:nth-child(2) { animation-delay: 150ms; }.typing span:nth-child(3) { animation-delay: 300ms; }
 @keyframes pulse { to { opacity: .3; transform: translateY(-3px); } }
+@keyframes mic-pulse { to { background: #dcebe0; } }
 @media (max-width: 900px) {
   .assistant-layout { height: calc(100svh - 154px); min-height: 520px; grid-template-columns: 1fr; }
   .assistant-side { max-height: 260px; overflow-y: auto; border-right: 0; border-bottom: 1px solid var(--line); padding: 14px; }
@@ -494,5 +776,9 @@ function clearChat(): void {
   .history-list { max-height: 150px; }
   .chat-scroll { padding: 16px 12px; }
   .chat-message { max-width: 92%; }
+  .chat-composer { padding: 10px; }
+  .composer-actions { gap: 2px; }
+  .composer-icon { width: 32px; }
+  .message-images img { width: 108px; height: 80px; }
 }
 </style>

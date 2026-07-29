@@ -7,7 +7,7 @@ import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 import org.springframework.security.crypto.password.PasswordEncoder;
 
 @Configuration
-@EnableConfigurationProperties({AdminAccountProperties.class, AuthProperties.class})
+@EnableConfigurationProperties({AdminAccountProperties.class, AuthProperties.class, RateLimitProperties.class})
 public class AuthSupportConfig {
 
     @Bean

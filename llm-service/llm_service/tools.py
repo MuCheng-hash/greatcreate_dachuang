@@ -44,7 +44,11 @@ class ToolRuntimeContext:
 
     def run(self, name: str, arguments: dict[str, Any], callback: Callable[[], Any]) -> str:
         started = time.perf_counter()
-        self._emit("tool.started", {"toolName": name, "name": name})
+        safe_arguments = _sanitize(arguments)
+        self._emit(
+            "tool.started",
+            {"toolName": name, "name": name, "arguments": safe_arguments},
+        )
         status = "completed"
         try:
             result = callback()
@@ -55,7 +59,7 @@ class ToolRuntimeContext:
         duration_ms = int((time.perf_counter() - started) * 1000)
         bounded = output[: self.output_character_limit]
         self.repository.add_tool_audit(
-            self.thread_id, name, _sanitize(arguments), status, duration_ms, bounded
+            self.thread_id, name, safe_arguments, status, duration_ms, bounded
         )
         self.executions.append(ToolExecution(name=name, status=status, durationMs=duration_ms))
         self._emit(
@@ -65,6 +69,7 @@ class ToolRuntimeContext:
                 "name": name,
                 "status": "ok" if status == "completed" else "failed",
                 "durationMs": duration_ms,
+                "outputSummary": _output_summary(result if status == "completed" else None, bounded),
             },
         )
         return bounded
@@ -72,6 +77,18 @@ class ToolRuntimeContext:
 
 def _sanitize(arguments: dict[str, Any]) -> dict[str, Any]:
     return {key: str(value)[:500] for key, value in arguments.items() if "key" not in key.lower() and "token" not in key.lower()}
+
+
+def _output_summary(result: Any, bounded: str) -> str:
+    if isinstance(result, list):
+        return f"返回 {len(result)} 条结果"
+    if isinstance(result, dict):
+        counts = [f"{key}: {len(value)}" for key, value in result.items() if isinstance(value, list)]
+        if counts:
+            return "，".join(counts)
+    if not bounded:
+        return "未返回结果"
+    return bounded[:160]
 
 
 _runtime: ContextVar[ToolRuntimeContext | None] = ContextVar("agent_tool_runtime", default=None)

@@ -1,6 +1,7 @@
 package com.redculture.platform.service.auth;
 
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
+import com.baomidou.mybatisplus.core.conditions.update.UpdateWrapper;
 import com.redculture.platform.config.AuthProperties;
 import com.redculture.platform.entity.AuthRefreshToken;
 import com.redculture.platform.entity.SchoolUserAccount;
@@ -10,6 +11,7 @@ import com.redculture.platform.mapper.SchoolUserAccountMapper;
 import com.redculture.platform.vo.AuthCurrentUserVO;
 import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
 
 import java.time.LocalDateTime;
@@ -41,6 +43,7 @@ public class AuthTokenService {
         return issue(user, request, UUID.randomUUID().toString());
     }
 
+    @Transactional
     public IssuedTokens rotate(String rawRefreshToken, HttpServletRequest request) {
         if (!StringUtils.hasText(rawRefreshToken)) {
             throw new AuthTokenException("refresh token is missing");
@@ -65,7 +68,17 @@ public class AuthTokenService {
             throw new AuthTokenException("account is not active");
         }
 
-        revoke(current, "rotated");
+        LocalDateTime rotatedAt = LocalDateTime.now();
+        int claimed = refreshTokenMapper.update(null, new UpdateWrapper<AuthRefreshToken>()
+                .eq("token_id", current.getTokenId())
+                .isNull("revoked_at")
+                .set("revoked_at", rotatedAt)
+                .set("rotated_at", rotatedAt)
+                .set("revoke_reason", "rotated"));
+        if (claimed != 1) {
+            revokeFamily(current.getTokenFamilyId(), "refresh_token_reuse");
+            throw new AuthTokenException("refresh token has already been used");
+        }
         return issue(userFactory.build(account), request, current.getTokenFamilyId());
     }
 

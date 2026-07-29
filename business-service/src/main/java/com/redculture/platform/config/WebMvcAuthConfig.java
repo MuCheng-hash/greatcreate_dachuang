@@ -10,13 +10,19 @@ public class WebMvcAuthConfig implements WebMvcConfigurer {
     private final AdminAccessInterceptor adminAccessInterceptor;
     private final AuthenticatedUserInterceptor authenticatedUserInterceptor;
     private final CsrfInterceptor csrfInterceptor;
+    private final RequestRateLimitInterceptor rateLimitInterceptor;
+    private final RoleAuthorizationInterceptor roleAuthorizationInterceptor;
 
     public WebMvcAuthConfig(AdminAccessInterceptor adminAccessInterceptor,
                             AuthenticatedUserInterceptor authenticatedUserInterceptor,
-                            CsrfInterceptor csrfInterceptor) {
+                            CsrfInterceptor csrfInterceptor,
+                            RequestRateLimitInterceptor rateLimitInterceptor,
+                            RoleAuthorizationInterceptor roleAuthorizationInterceptor) {
         this.adminAccessInterceptor = adminAccessInterceptor;
         this.authenticatedUserInterceptor = authenticatedUserInterceptor;
         this.csrfInterceptor = csrfInterceptor;
+        this.rateLimitInterceptor = rateLimitInterceptor;
+        this.roleAuthorizationInterceptor = roleAuthorizationInterceptor;
     }
 
     @Override
@@ -25,8 +31,14 @@ public class WebMvcAuthConfig implements WebMvcConfigurer {
                 .addPathPatterns("/api/admin/**", "/api/map/**", "/api/school-map/**", "/api/ai/**",
                         "/api/auth/me", "/api/auth/profile", "/api/auth/password")
                 .excludePathPatterns("/api/map/client-config");
+        registry.addInterceptor(roleAuthorizationInterceptor)
+                .addPathPatterns("/api/admin/**", "/api/map/**", "/api/school-map/**", "/api/ai/**",
+                        "/api/auth/me", "/api/auth/profile", "/api/auth/password")
+                .excludePathPatterns("/api/map/client-config");
         registry.addInterceptor(adminAccessInterceptor)
                 .addPathPatterns("/api/admin/**");
+        registry.addInterceptor(rateLimitInterceptor)
+                .addPathPatterns("/api/auth/login", "/api/ai/**");
         registry.addInterceptor(csrfInterceptor)
                 .addPathPatterns("/api/**");
     }

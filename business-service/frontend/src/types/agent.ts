@@ -146,10 +146,20 @@ export interface AgentQaRequestPayload {
   theme?: string | null;
   topK?: number;
   modelId?: string | null;
+  attachments?: AgentAttachment[];
+}
+
+export interface AgentAttachment {
+  type: "image";
+  name: string;
+  mediaType: "image/jpeg" | "image/png" | "image/webp" | "image/gif";
+  dataUrl: string;
 }
 
 export type AgentSseEventName =
   | "run.started"
+  | "phase.started"
+  | "phase.completed"
   | "model.started"
   | "model.completed"
   | "model.failed"
@@ -173,6 +183,11 @@ export interface AgentSseEventData {
   status?: string;
   errorType?: string;
   message?: string;
+  phase?: string;
+  label?: string;
+  durationMs?: number;
+  arguments?: Record<string, unknown>;
+  outputSummary?: string;
   provider?: string;
   model?: string;
   response?: AgentQaResponse;

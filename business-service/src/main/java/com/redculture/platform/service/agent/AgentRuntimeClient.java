@@ -220,6 +220,7 @@ public class AgentRuntimeClient {
         body.setModelId(request.getModelId());
         body.setTaskType("CHAT");
         body.setMessage(context.getQuestion());
+        body.setAttachments(request.getAttachments());
         body.setGrade(context.getGrade());
         body.setTheme(context.getTheme());
         body.setIntent(context.getIntent() == null ? null : context.getIntent().name());
