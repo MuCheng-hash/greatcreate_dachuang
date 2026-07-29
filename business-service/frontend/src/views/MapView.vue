@@ -17,7 +17,7 @@ const mapStatus = ref("正在准备地图");
 const discoveryStatus = ref("");
 const discoveryInFlight = ref(false);
 const radiusKm = ref(5);
-const layers = reactive({ resources: true, candidates: true, connections: true });
+const layers = reactive({ resources: true, redCulture: true, candidates: true, connections: true });
 const DISCOVERY_COOLDOWN_MS = 30_000;
 let map;
 let AMapRef;
@@ -28,12 +28,13 @@ let lastDiscoveryAt = 0;
 const selectedTitle = computed(() => {
   if (selected.value?.kind === "school") return schoolStore.school?.schoolName;
   if (selected.value?.kind === "candidate") return selected.value?.detail?.placeName || selected.value?.item?.placeName;
+  if (selected.value?.kind === "redCulture") return selected.value?.detail?.name || selected.value?.item?.name;
   return selected.value?.detail?.resourceName || selected.value?.item?.resource?.resourceName || "资源详情";
 });
 
 onMounted(async () => {
   try {
-    await Promise.all([schoolStore.load(), schoolStore.loadConfig()]);
+    await Promise.all([schoolStore.load(), schoolStore.loadConfig(), schoolStore.loadRedCultureSites()]);
     selected.value = { kind: "school" };
     await nextTick();
     AMapRef = await loadAmap(schoolStore.config);
@@ -49,7 +50,7 @@ onBeforeUnmount(() => {
   map?.destroy();
 });
 
-watch(() => [layers.resources, layers.candidates, layers.connections], renderOverlays);
+watch(() => [layers.resources, layers.redCulture, layers.candidates, layers.connections], renderOverlays);
 watch(() => schoolStore.discoveryCandidates, renderOverlays, { deep: true });
 
 function initializeMap() {
@@ -104,6 +105,19 @@ function renderOverlays() {
           strokeOpacity: .45, strokeStyle: "dashed"
         }));
       }
+    });
+  }
+
+  if (layers.redCulture) {
+    schoolStore.redCultureSites.forEach((site) => {
+      if (!site.longitude || !site.latitude) return;
+      const marker = new AMapRef.Marker({
+        position: [Number(site.longitude), Number(site.latitude)],
+        content: '<span class="map-pin map-pin-red-culture">红</span>',
+        offset: new AMapRef.Pixel(-16, -16)
+      });
+      marker.on("click", () => void selectRedCultureSite(site));
+      overlays.push(marker);
     });
   }
 
@@ -227,6 +241,20 @@ async function selectCandidate(item) {
   }
 }
 
+async function selectRedCultureSite(item) {
+  map?.setZoomAndCenter(16, [Number(item.longitude), Number(item.latitude)]);
+  selected.value = { kind: "redCulture", item, detail: item };
+  drawerOpen.value = true;
+  detailLoading.value = true;
+  try {
+    selected.value.detail = await schoolStore.loadRedCultureSite(item.id);
+  } catch {
+    selected.value.detail = item;
+  } finally {
+    detailLoading.value = false;
+  }
+}
+
 function distanceText(meters) {
   if (meters == null) return "距离待计算";
   return meters >= 1000 ? `${(meters / 1000).toFixed(1)} 公里` : `${meters} 米`;
@@ -260,6 +288,7 @@ function analysisLabel(item) {
             <button class="icon-button" type="button" title="地图图层" @click="layerMenuOpen = !layerMenuOpen"><Layers3 :size="18" /></button>
             <span v-if="layerMenuOpen" class="layer-menu">
               <label><input v-model="layers.resources" type="checkbox" />正式资源</label>
+              <label><input v-model="layers.redCulture" type="checkbox" />红色文化图谱</label>
               <label><input v-model="layers.candidates" type="checkbox" />AI 候选</label>
               <label><input v-model="layers.connections" type="checkbox" />关联线</label>
             </span>
@@ -317,6 +346,27 @@ function analysisLabel(item) {
               <div><dt>活动建议</dt><dd>{{ selected.detail?.activitySuggestion || "暂无" }}</dd></div>
               <div><dt>数据来源</dt><dd>{{ selected.detail?.externalProvider === "amap" ? "高德地图 POI（已审核）" : "平台审核资源" }}</dd></div>
             </dl>
+          </template>
+
+          <template v-else-if="selected?.kind === 'redCulture'">
+            <p class="drawer-intro">{{ selected.detail?.intro || selected.detail?.summary || "暂无简介" }}</p>
+            <LoadingBlock v-if="detailLoading" />
+            <template v-else>
+              <dl class="detail-list">
+                <div><dt>地点类别</dt><dd>{{ selected.detail?.category || "暂无" }}</dd></div>
+                <div><dt>地址</dt><dd>{{ selected.detail?.address || "暂无" }}</dd></div>
+                <div><dt>历史时期</dt><dd>{{ selected.detail?.historicalPeriod || "暂无" }}</dd></div>
+                <div><dt>教学标签</dt><dd>{{ selected.detail?.teachingTags || "暂无" }}</dd></div>
+              </dl>
+              <h3>相关事件</h3>
+              <div class="graph-list"><article v-for="item in selected.detail?.events || []" :key="item.id"><strong>{{ item.name }}</strong><small>{{ item.extra || item.summary }}</small></article><div v-if="!selected.detail?.events?.length" class="empty-state">暂无相关事件</div></div>
+              <h3>相关人物</h3>
+              <div class="graph-list"><article v-for="item in selected.detail?.people || []" :key="item.id"><strong>{{ item.name }}</strong><small>{{ item.extra || item.summary }}</small></article><div v-if="!selected.detail?.people?.length" class="empty-state">暂无相关人物</div></div>
+              <h3>教学资源</h3>
+              <div class="graph-list"><article v-for="item in selected.detail?.teachingResources || []" :key="item.id"><strong>{{ item.name }}</strong><small>{{ item.extra || item.summary }}</small></article><div v-if="!selected.detail?.teachingResources?.length" class="empty-state">暂无教学资源</div></div>
+              <h3>官方来源</h3>
+              <div class="graph-list"><article v-for="item in selected.detail?.sources || []" :key="item.id"><a :href="item.url" target="_blank" rel="noopener noreferrer">{{ item.title }}</a><small>{{ item.publisher }} · {{ item.trustLevel }}</small></article><div v-if="!selected.detail?.sources?.length" class="empty-state">暂无来源</div></div>
+            </template>
           </template>
 
           <template v-else-if="selected?.kind === 'candidate'">
@@ -382,11 +432,16 @@ function analysisLabel(item) {
 .candidate-warning { display: flex; align-items: flex-start; gap: 9px; margin-top: 16px; padding: 12px; border-left: 3px solid #b7791f; background: #fff8e9; color: #704a12; font-size: 13px; line-height: 1.55; }
 .candidate-warning svg { flex: 0 0 auto; margin-top: 2px; }
 .badge-amber { background: #fff1cf; color: #805515; }
+.graph-list { display: grid; gap: 8px; }
+.graph-list article { display: grid; gap: 4px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 6px; }
+.graph-list strong, .graph-list a { color: var(--text); font-size: 14px; font-weight: 700; }
+.graph-list small { color: var(--muted); line-height: 1.5; }
 .drawer-reopen { position: absolute; top: 14px; right: 14px; }
 :global(.map-pin) { display: grid; place-items: center; border: 3px solid #fff; border-radius: 50%; color: #fff; font-size: 12px; font-weight: 800; box-shadow: 0 4px 12px rgba(20,40,28,.22); }
 :global(.map-pin-school) { width: 36px; height: 36px; background: #2f6b4f; }
 :global(.map-pin-resource), :global(.map-pin-user), :global(.map-pin-candidate), :global(.map-pin-unanalyzed) { width: 32px; height: 32px; background: #a6382f; }
 :global(.map-pin-user) { background: #2667a7; }
+:global(.map-pin-red-culture) { width: 32px; height: 32px; background: #8f241f; }
 :global(.map-pin-candidate) { background: #bd7419; }
 :global(.map-pin-unanalyzed) { background: #6f7772; }
 @media (max-width: 900px) {

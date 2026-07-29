@@ -4,6 +4,7 @@ import com.redculture.platform.common.ApiResponse;
 import com.redculture.platform.config.AppMapProperties;
 import com.redculture.platform.service.MapOverviewService;
 import com.redculture.platform.service.TownMapService;
+import com.redculture.platform.service.RedCultureGraphMapService;
 import com.redculture.platform.vo.ClientMapConfigVO;
 import com.redculture.platform.vo.MapOverviewVO;
 import com.redculture.platform.vo.NearbyResourceVO;
@@ -11,6 +12,8 @@ import com.redculture.platform.vo.TownBoundaryVO;
 import com.redculture.platform.vo.TownLocateRequest;
 import com.redculture.platform.vo.TownLocateResponse;
 import com.redculture.platform.vo.TownMapDetailVO;
+import com.redculture.platform.vo.RedCultureSiteDetailVO;
+import com.redculture.platform.vo.RedCultureSiteMarkerVO;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -29,13 +32,28 @@ public class MapOverviewController {
     private final MapOverviewService mapOverviewService;
     private final TownMapService townMapService;
     private final AppMapProperties appMapProperties;
+    private final RedCultureGraphMapService redCultureGraphMapService;
 
     public MapOverviewController(MapOverviewService mapOverviewService,
                                  TownMapService townMapService,
-                                 AppMapProperties appMapProperties) {
+                                 AppMapProperties appMapProperties,
+                                 RedCultureGraphMapService redCultureGraphMapService) {
         this.mapOverviewService = mapOverviewService;
         this.townMapService = townMapService;
         this.appMapProperties = appMapProperties;
+        this.redCultureGraphMapService = redCultureGraphMapService;
+    }
+
+    @GetMapping("/red-culture/sites")
+    public ApiResponse<List<RedCultureSiteMarkerVO>> listRedCultureSites(
+            @RequestParam(required = false) String district) {
+        return ApiResponse.success(redCultureGraphMapService.listPublishedSites(district));
+    }
+
+    @GetMapping("/red-culture/sites/{siteId}")
+    public ApiResponse<RedCultureSiteDetailVO> getRedCultureSite(@PathVariable String siteId) {
+        RedCultureSiteDetailVO detail = redCultureGraphMapService.getPublishedSite(siteId);
+        return detail == null ? ApiResponse.fail(404, "published red culture site not found") : ApiResponse.success(detail);
     }
 
     @GetMapping("/client-config")

@@ -34,6 +34,17 @@ export interface DiscoveryRun {
   candidates?: DiscoveryCandidate[];
 }
 
+export interface RedCultureSiteMarker {
+  id: string;
+  name: string;
+  category?: string;
+  address?: string;
+  district?: string;
+  longitude: number | string;
+  latitude: number | string;
+  summary?: string;
+}
+
 interface SchoolDetail {
   school: SchoolSummary;
   resources?: SchoolResourceRelation[];
@@ -49,6 +60,8 @@ interface SchoolState {
   discoveryLoading: boolean;
   discoveryError: string;
   discoveryRadiusKm: number;
+  redCultureSites: RedCultureSiteMarker[];
+  redCultureError: string;
 }
 
 function messageOf(error: unknown, fallback: string): string {
@@ -58,7 +71,8 @@ function messageOf(error: unknown, fallback: string): string {
 export const useSchoolStore = defineStore("school", {
   state: (): SchoolState => ({
     detail: null, config: null, loading: false, error: "",
-    discoveryRun: null, discoveryLoading: false, discoveryError: "", discoveryRadiusKm: 5
+    discoveryRun: null, discoveryLoading: false, discoveryError: "", discoveryRadiusKm: 5,
+    redCultureSites: [], redCultureError: ""
   }),
   getters: {
     school: (state): SchoolSummary | null => state.detail?.school || null,
@@ -67,6 +81,19 @@ export const useSchoolStore = defineStore("school", {
     discoveryCandidates: (state): DiscoveryCandidate[] => state.discoveryRun?.candidates || []
   },
   actions: {
+    async loadRedCultureSites(): Promise<RedCultureSiteMarker[]> {
+      this.redCultureError = "";
+      try {
+        this.redCultureSites = await api.get<RedCultureSiteMarker[]>("/api/map/red-culture/sites");
+        return this.redCultureSites;
+      } catch (error) {
+        this.redCultureError = messageOf(error, "红色文化图谱资源加载失败");
+        return [];
+      }
+    },
+    async loadRedCultureSite(siteId: string): Promise<Record<string, any>> {
+      return api.get(`/api/map/red-culture/sites/${encodeURIComponent(siteId)}`);
+    },
     async load(force = false): Promise<SchoolDetail | null> {
       const auth = useAuthStore();
       if (!auth.user?.schoolId) return null;
