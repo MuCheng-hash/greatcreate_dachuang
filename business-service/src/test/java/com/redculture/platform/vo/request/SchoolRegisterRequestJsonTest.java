@@ -7,8 +7,6 @@ import com.redculture.platform.enums.GeoConfidenceLevel;
 import com.redculture.platform.enums.GeoSourceType;
 import com.redculture.platform.enums.SchoolLevel;
 import com.redculture.platform.enums.SchoolNature;
-import com.redculture.platform.enums.ResourceCategory;
-import com.redculture.platform.vo.request.DiscoveryCandidateReviewRequest;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -89,13 +87,4 @@ class SchoolRegisterRequestJsonTest {
         assertEquals("\"volunteer_service\"", objectMapper.writeValueAsString(request.getActivityType()));
     }
 
-    @Test
-    void acceptsDiscoveryResourceCategoryDatabaseValue() throws Exception {
-        DiscoveryCandidateReviewRequest request = objectMapper.readValue("""
-                {"resourceCategory":"patriotism_base"}
-                """, DiscoveryCandidateReviewRequest.class);
-
-        assertEquals(ResourceCategory.PATRIOTISM_BASE, request.getResourceCategory());
-        assertEquals("\"patriotism_base\"", objectMapper.writeValueAsString(request.getResourceCategory()));
-    }
 }

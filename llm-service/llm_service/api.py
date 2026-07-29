@@ -14,7 +14,6 @@ from .container import AppContainer, build_container
 from .legacy_api import router as legacy_router
 from .legacy import (
     build_map_answer,
-    build_resource_discovery_classification,
     build_structured_teaching_plan,
     stream_structured_teaching_plan,
 )
@@ -389,10 +388,6 @@ def create_app(
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
-
-    @app.post("/llm/resource-discovery/classify")
-    async def classify_resource_discovery(payload: dict[str, Any]) -> dict[str, Any]:
-        return await build_resource_discovery_classification(payload, model)
 
     app.include_router(
         legacy_router,

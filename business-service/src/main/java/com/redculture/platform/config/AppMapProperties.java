@@ -17,21 +17,8 @@ public class AppMapProperties {
 
     private String amapSecurityJsCode;
 
-    private String amapWebServiceKey;
-
-    private String amapWebServiceBaseUrl = "https://restapi.amap.com";
-
-    private Long amapRequestIntervalMs = 700L;
-
     private String llmServiceBaseUrl = "http://127.0.0.1:5050";
 
     private boolean agentRuntimeEnabled = true;
 
-    private Integer discoveryCacheHours = 24;
-
-    private Integer discoveryMaxCandidates = 50;
-
-    private Integer discoveryLlmBatchSize = 20;
-
-    private Double discoveryMinConfidence = 0.60D;
 }

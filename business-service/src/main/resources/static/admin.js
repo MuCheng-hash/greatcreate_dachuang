@@ -193,11 +193,6 @@ function bindAdminEvents() {
     adminElements.resourceRefreshButton?.addEventListener("click", () => void loadResources());
     adminElements.resourceResetButton?.addEventListener("click", resetResourceForm);
 
-    adminElements.discoverySearchButton?.addEventListener("click", () => void loadDiscoveryCandidates());
-    adminElements.discoveryForceRefreshButton?.addEventListener("click", () => void forceDiscoveryRefresh());
-    adminElements.discoveryApproveButton?.addEventListener("click", () => void runDiscoveryReview("approve"));
-    adminElements.discoveryRejectButton?.addEventListener("click", () => void runDiscoveryReview("reject"));
-    adminElements.discoveryReopenButton?.addEventListener("click", () => void runDiscoveryReview("reopen"));
 
     adminElements.relationForm?.addEventListener("submit", async event => {
         event.preventDefault();
@@ -237,7 +232,6 @@ async function bootstrapAdmin() {
             loadRegistrations(),
             loadSchools(),
             loadResources(),
-            loadDiscoveryCandidates(),
             loadPlans()
         ]);
         syncSelectOptions();

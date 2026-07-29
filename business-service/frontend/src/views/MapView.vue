@@ -1,6 +1,6 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
-import { AlertTriangle, Layers3, LocateFixed, MapPinned, PanelRightClose, RefreshCw, Route, Sparkles } from "@lucide/vue";
+import { Layers3, LocateFixed, MapPinned, PanelRightClose, RefreshCw, Route } from "@lucide/vue";
 import AppShell from "@/components/AppShell.vue";
 import InlineNotice from "@/components/InlineNotice.vue";
 import LoadingBlock from "@/components/LoadingBlock.vue";
@@ -14,20 +14,13 @@ const drawerOpen = ref(true);
 const selected = ref(null);
 const detailLoading = ref(false);
 const mapStatus = ref("正在准备地图");
-const discoveryStatus = ref("");
-const discoveryInFlight = ref(false);
-const radiusKm = ref(5);
-const layers = reactive({ resources: true, redCulture: true, candidates: true, connections: true });
-const DISCOVERY_COOLDOWN_MS = 30_000;
+const layers = reactive({ resources: true, redCulture: true, connections: true });
 let map;
 let AMapRef;
 let overlays = [];
-let discoveryToken = 0;
-let lastDiscoveryAt = 0;
 
 const selectedTitle = computed(() => {
   if (selected.value?.kind === "school") return schoolStore.school?.schoolName;
-  if (selected.value?.kind === "candidate") return selected.value?.detail?.placeName || selected.value?.item?.placeName;
   if (selected.value?.kind === "redCulture") return selected.value?.detail?.name || selected.value?.item?.name;
   return selected.value?.detail?.resourceName || selected.value?.item?.resource?.resourceName || "资源详情";
 });
@@ -39,19 +32,16 @@ onMounted(async () => {
     await nextTick();
     AMapRef = await loadAmap(schoolStore.config);
     initializeMap();
-    void startDiscovery();
   } catch (error) {
     mapStatus.value = error.message || "地图初始化失败";
   }
 });
 
 onBeforeUnmount(() => {
-  discoveryToken += 1;
   map?.destroy();
 });
 
-watch(() => [layers.resources, layers.redCulture, layers.candidates, layers.connections], renderOverlays);
-watch(() => schoolStore.discoveryCandidates, renderOverlays, { deep: true });
+watch(() => [layers.resources, layers.redCulture, layers.connections], renderOverlays);
 
 function initializeMap() {
   const school = schoolStore.school;
@@ -121,74 +111,15 @@ function renderOverlays() {
     });
   }
 
-  if (layers.candidates) {
-    schoolStore.discoveryCandidates.forEach((item) => {
-      if (!item?.longitude || !item?.latitude) return;
-      const analyzed = item.analysisStatus === "completed";
-      const marker = new AMapRef.Marker({
-        position: [Number(item.longitude), Number(item.latitude)],
-        content: `<span class="map-pin ${analyzed ? "map-pin-candidate" : "map-pin-unanalyzed"}">${analyzed ? "候" : "?"}</span>`,
-        offset: new AMapRef.Pixel(-16, -16)
-      });
-      marker.on("click", () => void selectCandidate(item));
-      overlays.push(marker);
-    });
-  }
-
   map.add(overlays);
   const markers = overlays.filter((item) => item instanceof AMapRef.Marker);
   if (markers.length) map.setFitView(markers, false, [70, 70, 70, 70], 15);
 }
 
-async function startDiscovery() {
-  const now = Date.now();
-  if (discoveryInFlight.value) {
-    discoveryStatus.value = "正在发现周边场所";
-    return;
-  }
-  if (now - lastDiscoveryAt < DISCOVERY_COOLDOWN_MS) {
-    discoveryStatus.value = "请求过于频繁，请稍后再试";
-    return;
-  }
-
-  discoveryInFlight.value = true;
-  lastDiscoveryAt = now;
-  const token = ++discoveryToken;
-  discoveryStatus.value = "正在发现周边场所";
-  try {
-    let run = await schoolStore.startDiscovery(radiusKm.value);
-    renderOverlays();
-    for (let attempt = 0; token === discoveryToken && run && ["pending", "running"].includes(run.status) && attempt < 15; attempt += 1) {
-      await new Promise((resolve) => setTimeout(resolve, 2000));
-      if (token !== discoveryToken) return;
-      run = await schoolStore.loadDiscoveryRun(run.runId);
-      renderOverlays();
-    }
-    if (token !== discoveryToken) return;
-    if (run?.status === "completed") {
-      discoveryStatus.value = `${run.candidates?.length || 0} 个候选场所`;
-    } else if (run?.status === "failed") {
-      discoveryStatus.value = "发现服务暂不可用";
-    } else {
-      discoveryStatus.value = "分析仍在后台进行";
-    }
-  } catch (error) {
-    if (token === discoveryToken) discoveryStatus.value = error.message || "发现服务暂不可用";
-  } finally {
-    discoveryInFlight.value = false;
-  }
-}
-
-async function changeRadius() {
-  selected.value = { kind: "school" };
-  await startDiscovery();
-}
-
 async function refresh() {
   mapStatus.value = "正在刷新";
-  await schoolStore.load(true);
+  await Promise.all([schoolStore.load(true), schoolStore.loadRedCultureSites()]);
   renderOverlays();
-  await startDiscovery();
   mapStatus.value = "数据已刷新";
 }
 
@@ -225,22 +156,6 @@ async function selectResource(item) {
   }
 }
 
-async function selectCandidate(item) {
-  if (map && item?.longitude && item?.latitude) {
-    map.setZoomAndCenter(16, [Number(item.longitude), Number(item.latitude)]);
-  }
-  selected.value = { kind: "candidate", item, detail: item };
-  drawerOpen.value = true;
-  detailLoading.value = true;
-  try {
-    selected.value.detail = await schoolStore.loadCandidate(item.candidateId);
-  } catch {
-    selected.value.detail = item;
-  } finally {
-    detailLoading.value = false;
-  }
-}
-
 async function selectRedCultureSite(item) {
   map?.setZoomAndCenter(16, [Number(item.longitude), Number(item.latitude)]);
   selected.value = { kind: "redCulture", item, detail: item };
@@ -260,9 +175,6 @@ function distanceText(meters) {
   return meters >= 1000 ? `${(meters / 1000).toFixed(1)} 公里` : `${meters} 米`;
 }
 
-function analysisLabel(item) {
-  return item?.analysisStatus === "completed" ? "AI 候选" : "待分析场所";
-}
 </script>
 
 <template>
@@ -271,25 +183,17 @@ function analysisLabel(item) {
       <div class="map-toolbar">
         <div class="map-summary">
           <MapPinned :size="19" />
-          <span><strong>{{ schoolStore.school?.schoolName || "当前学校" }}</strong><small>{{ schoolStore.resources.length }} 个正式资源 · {{ discoveryStatus }}</small></span>
+          <span><strong>{{ schoolStore.school?.schoolName || "当前学校" }}</strong><small>{{ schoolStore.resources.length }} 个正式资源 · {{ schoolStore.redCultureSites.length }} 个图谱地点</small></span>
         </div>
         <div class="map-actions">
-          <label class="radius-control">
-            <span>范围</span>
-            <select v-model.number="radiusKm" aria-label="周边场所搜索范围" :disabled="discoveryInFlight" @change="changeRadius">
-              <option :value="1">1 km</option><option :value="3">3 km</option>
-              <option :value="5">5 km</option><option :value="10">10 km</option>
-            </select>
-          </label>
           <span class="map-status">{{ mapStatus }}</span>
           <button class="icon-button" type="button" title="定位我的位置" @click="locateMe"><LocateFixed :size="18" /></button>
-          <button class="icon-button" type="button" title="刷新资源" :disabled="discoveryInFlight" @click="refresh"><RefreshCw :size="18" /></button>
+          <button class="icon-button" type="button" title="刷新资源" @click="refresh"><RefreshCw :size="18" /></button>
           <span class="layer-menu-wrap">
             <button class="icon-button" type="button" title="地图图层" @click="layerMenuOpen = !layerMenuOpen"><Layers3 :size="18" /></button>
             <span v-if="layerMenuOpen" class="layer-menu">
               <label><input v-model="layers.resources" type="checkbox" />正式资源</label>
               <label><input v-model="layers.redCulture" type="checkbox" />红色文化图谱</label>
-              <label><input v-model="layers.candidates" type="checkbox" />AI 候选</label>
               <label><input v-model="layers.connections" type="checkbox" />关联线</label>
             </span>
           </span>
@@ -297,15 +201,15 @@ function analysisLabel(item) {
       </div>
 
       <InlineNotice v-if="schoolStore.error" tone="error">{{ schoolStore.error }}</InlineNotice>
-      <InlineNotice v-else-if="schoolStore.discoveryError" tone="info">{{ schoolStore.discoveryError }}，正式资源仍可正常使用。</InlineNotice>
+      <InlineNotice v-else-if="schoolStore.redCultureError" tone="info">{{ schoolStore.redCultureError }}，学校正式资源仍可正常使用。</InlineNotice>
       <LoadingBlock v-if="schoolStore.loading && !schoolStore.detail" />
       <div v-else class="map-body">
         <div ref="mapCanvas" class="map-canvas" aria-label="学校周边思政教育资源地图"></div>
         <aside v-if="drawerOpen" class="resource-drawer">
           <header>
             <div>
-              <span class="badge" :class="selected?.kind === 'school' ? 'badge-green' : selected?.kind === 'candidate' ? 'badge-amber' : 'badge-red'">
-                {{ selected?.kind === "school" ? "学校" : selected?.kind === "candidate" ? analysisLabel(selected.detail) : "正式资源" }}
+              <span class="badge" :class="selected?.kind === 'school' ? 'badge-green' : 'badge-red'">
+                {{ selected?.kind === "school" ? "学校" : selected?.kind === "redCulture" ? "图谱资源" : "正式资源" }}
               </span>
               <h2>{{ selectedTitle }}</h2>
             </div>
@@ -316,7 +220,7 @@ function analysisLabel(item) {
             <p class="drawer-intro">{{ schoolStore.school?.address || "暂无学校地址" }}</p>
             <div class="drawer-metrics">
               <span><strong>{{ schoolStore.resources.length }}</strong>正式资源</span>
-              <span><strong>{{ schoolStore.discoveryCandidates.length }}</strong>候选场所</span>
+              <span><strong>{{ schoolStore.redCultureSites.length }}</strong>图谱地点</span>
             </div>
             <h3>正式资源</h3>
             <div class="resource-list">
@@ -324,13 +228,6 @@ function analysisLabel(item) {
                 <span><strong>{{ item.resource?.resourceName }}</strong><small>{{ item.resource?.resourceCategory || "思政资源" }} · {{ distanceText(item.distanceMeters) }}</small></span><Route :size="17" />
               </button>
               <div v-if="!schoolStore.resources.length" class="empty-state">暂无正式资源</div>
-            </div>
-            <h3>AI 发现候选</h3>
-            <div class="resource-list candidate-list">
-              <button v-for="item in schoolStore.discoveryCandidates" :key="item.candidateId" type="button" @click="selectCandidate(item)">
-                <span><strong>{{ item.placeName }}</strong><small>{{ analysisLabel(item) }} · {{ distanceText(item.distanceMeters) }}</small></span><Sparkles :size="17" />
-              </button>
-              <div v-if="!schoolStore.discoveryCandidates.length" class="empty-state">暂未发现候选场所</div>
             </div>
           </template>
 
@@ -369,23 +266,6 @@ function analysisLabel(item) {
             </template>
           </template>
 
-          <template v-else-if="selected?.kind === 'candidate'">
-            <div class="candidate-warning"><AlertTriangle :size="18" /><span>该场所由地图 API 与 AI 自动发现，尚未经过平台审核，使用前请核实。</span></div>
-            <LoadingBlock v-if="detailLoading" />
-            <dl v-else class="detail-list">
-              <div><dt>地图分类</dt><dd>{{ selected.detail?.providerTypeName || "未提供" }}</dd></div>
-              <div><dt>地址</dt><dd>{{ selected.detail?.address || "未提供" }}</dd></div>
-              <div><dt>距离</dt><dd>{{ distanceText(selected.detail?.distanceMeters) }}</dd></div>
-              <div><dt>联系电话</dt><dd>{{ selected.detail?.contactPhone || "待核实" }}</dd></div>
-              <div><dt>开放信息</dt><dd>{{ selected.detail?.openingHours || "待核实" }}</dd></div>
-              <div><dt>AI 分类</dt><dd>{{ selected.detail?.aiCategory || "待分析" }}<template v-if="selected.detail?.aiConfidence != null"> · {{ Math.round(Number(selected.detail.aiConfidence) * 100) }}%</template></dd></div>
-              <div><dt>推荐理由</dt><dd>{{ selected.detail?.aiRationale || "尚未完成思政价值分析" }}</dd></div>
-              <div><dt>教育主题</dt><dd>{{ selected.detail?.educationThemes?.join("、") || "待分析" }}</dd></div>
-              <div><dt>适用年级</dt><dd>{{ selected.detail?.targetGrades || "待核实" }}</dd></div>
-              <div><dt>活动建议</dt><dd>{{ selected.detail?.activitySuggestion || "待分析" }}</dd></div>
-              <div><dt>人工核验</dt><dd>{{ selected.detail?.verificationNotes || "请核实地点真实性、开放时间和接待条件" }}</dd></div>
-            </dl>
-          </template>
         </aside>
         <button v-if="!drawerOpen" class="drawer-reopen secondary-button" type="button" @click="drawerOpen = true">打开详情</button>
       </div>
@@ -421,7 +301,6 @@ function analysisLabel(item) {
 .resource-list { display: grid; gap: 7px; }
 .resource-list button { width: 100%; min-height: 58px; display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 11px; border: 1px solid var(--line); border-radius: 6px; background: #fff; color: var(--text); text-align: left; }
 .resource-list button:hover { border-color: #9ab1a0; background: var(--green-soft); }
-.candidate-list button:hover { border-color: #d4a763; background: #fff8e9; }
 .resource-list button span { min-width: 0; display: grid; gap: 4px; }
 .resource-list strong, .resource-list small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .resource-list small { color: var(--muted); }
@@ -429,8 +308,6 @@ function analysisLabel(item) {
 .detail-list div { padding: 13px 0; border-bottom: 1px solid var(--line); }
 .detail-list dt { color: var(--muted); font-size: 12px; }
 .detail-list dd { margin: 5px 0 0; overflow-wrap: anywhere; font-size: 14px; line-height: 1.6; }
-.candidate-warning { display: flex; align-items: flex-start; gap: 9px; margin-top: 16px; padding: 12px; border-left: 3px solid #b7791f; background: #fff8e9; color: #704a12; font-size: 13px; line-height: 1.55; }
-.candidate-warning svg { flex: 0 0 auto; margin-top: 2px; }
 .badge-amber { background: #fff1cf; color: #805515; }
 .graph-list { display: grid; gap: 8px; }
 .graph-list article { display: grid; gap: 4px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 6px; }
@@ -439,11 +316,9 @@ function analysisLabel(item) {
 .drawer-reopen { position: absolute; top: 14px; right: 14px; }
 :global(.map-pin) { display: grid; place-items: center; border: 3px solid #fff; border-radius: 50%; color: #fff; font-size: 12px; font-weight: 800; box-shadow: 0 4px 12px rgba(20,40,28,.22); }
 :global(.map-pin-school) { width: 36px; height: 36px; background: #2f6b4f; }
-:global(.map-pin-resource), :global(.map-pin-user), :global(.map-pin-candidate), :global(.map-pin-unanalyzed) { width: 32px; height: 32px; background: #a6382f; }
+:global(.map-pin-resource), :global(.map-pin-user) { width: 32px; height: 32px; background: #a6382f; }
 :global(.map-pin-user) { background: #2667a7; }
 :global(.map-pin-red-culture) { width: 32px; height: 32px; background: #8f241f; }
-:global(.map-pin-candidate) { background: #bd7419; }
-:global(.map-pin-unanalyzed) { background: #6f7772; }
 @media (max-width: 900px) {
   .map-body { height: calc(100svh - 214px); min-height: 520px; grid-template-columns: 1fr; }
   .resource-drawer { position: absolute; z-index: 6; inset: auto 0 0; max-height: 52%; border-top: 1px solid var(--line); border-left: 0; box-shadow: 0 -10px 30px rgba(31,48,38,.12); }

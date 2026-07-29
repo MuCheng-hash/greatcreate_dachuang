@@ -162,7 +162,6 @@ def test_unified_tasks_and_legacy_routes_coexist(tmp_path: Path):
             "/llm/school/ask",
             "/llm/teaching-plan/generate",
             "/llm/teaching-plan/generate/stream",
-            "/llm/resource-discovery/classify",
         )
         registered_paths = client.get("/openapi.json").json()["paths"]
         assert all(path in registered_paths for path in legacy_paths)
