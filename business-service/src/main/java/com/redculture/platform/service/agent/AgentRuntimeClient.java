@@ -126,6 +126,11 @@ public class AgentRuntimeClient {
 
     public List<AssistantConversationSummary> listConversations(
             String ownerId, String scopeType, Long scopeId) {
+        return listConversations(ownerId, scopeType, scopeId, "active");
+    }
+
+    public List<AssistantConversationSummary> listConversations(
+            String ownerId, String scopeType, Long scopeId, String status) {
         List<AssistantConversationSummary> response = restClient.get()
                 .uri(uriBuilder -> uriBuilder.path("/agent/threads")
                         .queryParam("ownerId", ownerId)
@@ -133,6 +138,7 @@ public class AgentRuntimeClient {
                         .queryParam("scopeType", scopeType)
                         .queryParam("scopeId", scopeId)
                         .queryParam("limit", 50)
+                        .queryParam("status", status)
                         .build())
                 .headers(this::applyInternalServiceToken)
                 .retrieve()
@@ -160,6 +166,18 @@ public class AgentRuntimeClient {
     public void archiveConversation(String threadId, String ownerId, String scopeType, Long scopeId) {
         restClient.post()
                 .uri(uriBuilder -> uriBuilder.path("/agent/threads/{threadId}/archive")
+                        .queryParam("ownerId", ownerId)
+                        .queryParam("scopeType", scopeType)
+                        .queryParam("scopeId", scopeId)
+                        .build(threadId))
+                .headers(this::applyInternalServiceToken)
+                .retrieve()
+                .toBodilessEntity();
+    }
+
+    public void restoreConversation(String threadId, String ownerId, String scopeType, Long scopeId) {
+        restClient.post()
+                .uri(uriBuilder -> uriBuilder.path("/agent/threads/{threadId}/restore")
                         .queryParam("ownerId", ownerId)
                         .queryParam("scopeType", scopeType)
                         .queryParam("scopeId", scopeId)
