@@ -125,6 +125,26 @@ export interface AgentQaResponse {
   resourceDiscovery?: ResourceDiscoveryResponse | null;
 }
 
+export interface AgentThreadMessage {
+  id: number;
+  role: string;
+  content: string;
+  createdAt?: string;
+  metadata?: Record<string, unknown>;
+}
+
+export interface AgentThreadHistoryResponse {
+  threadId: string;
+  ownerId?: string;
+  scopeType?: string;
+  scopeId?: string | number;
+  status?: string;
+  summary?: string;
+  createdAt?: string;
+  updatedAt?: string;
+  messages?: AgentThreadMessage[];
+}
+
 export interface StatefulAgentRequest {
   taskType: AgentTaskType;
   taskPayload?: Record<string, unknown>;

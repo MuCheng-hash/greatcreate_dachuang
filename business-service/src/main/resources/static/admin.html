@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>后台管理台 | 乡村学校思政资源地图</title>
     <meta name="description" content="乡村学校周边思政教育资源数字地图平台后台管理台。">
-    <link rel="stylesheet" href="/admin.css?v=20260720b">
+    <link rel="stylesheet" href="/admin.css?v=20260727b">
 </head>
 <body>
 <div class="admin-shell">
@@ -55,6 +55,7 @@
         <button class="tab-chip" data-tab="resources" type="button">资源管理</button>
         <button class="tab-chip" data-tab="relations" type="button">周边关联</button>
         <button class="tab-chip" data-tab="plans" type="button">活动方案</button>
+        <button class="tab-chip" data-tab="agent-ops" type="button">Agent 运维</button>
     </section>
 
     <main class="workspace-stack">
@@ -745,9 +746,106 @@
                 </article>
             </div>
         </section>
+
+        <section class="workspace-panel agent-ops-panel" data-panel="agent-ops">
+            <div class="panel-heading">
+                <div>
+                    <p class="eyebrow">Module 05</p>
+                    <h2>Agent 运行与 Prompt 运维</h2>
+                    <p class="panel-description">查看模型调用质量、降级原因、Prompt 版本和受控工具调用轨迹。</p>
+                </div>
+                <div class="panel-tools">
+                    <select id="agentTraceStatusFilter" class="line-select">
+                        <option value="">全部状态</option>
+                        <option value="completed">completed</option>
+                        <option value="failed">failed</option>
+                        <option value="invalid_response">invalid_response</option>
+                        <option value="degraded">degraded</option>
+                    </select>
+                    <input id="agentTraceFeatureFilter" class="line-input" type="search" placeholder="按功能筛选">
+                    <input id="agentToolNameFilter" class="line-input" type="search" placeholder="按工具筛选">
+                    <button class="accent-button" id="agentOpsRefreshButton" type="button">刷新运维数据</button>
+                </div>
+            </div>
+
+            <div class="agent-metric-grid">
+                <article class="agent-metric-card">
+                    <span>模型调用</span>
+                    <strong id="agentCallsMetric">-</strong>
+                    <small id="agentSuccessMetric">成功率 -</small>
+                </article>
+                <article class="agent-metric-card">
+                    <span>平均耗时</span>
+                    <strong id="agentAverageLatencyMetric">-</strong>
+                    <small id="agentPercentileMetric">P50 - / P95 - / P99 -</small>
+                </article>
+                <article class="agent-metric-card">
+                    <span>Token 总量</span>
+                    <strong id="agentTotalTokensMetric">-</strong>
+                    <small id="agentTokenBreakdownMetric">输入 - / 输出 -</small>
+                </article>
+                <article class="agent-metric-card">
+                    <span>Fallback</span>
+                    <strong id="agentFallbackMetric">-</strong>
+                    <small id="agentFallbackHint">原因统计 -</small>
+                </article>
+            </div>
+
+            <div class="agent-ops-grid">
+                <article class="table-card">
+                    <div class="card-topline">
+                        <h3>Fallback 原因</h3>
+                        <span class="mini-stat" id="agentFallbackReasonCount">0 类</span>
+                    </div>
+                    <div id="agentFallbackReasons" class="agent-reason-list"></div>
+                </article>
+
+                <article class="table-card">
+                    <div class="card-topline">
+                        <h3>Prompt 版本</h3>
+                        <div class="panel-tools compact-tools">
+                            <select id="agentPromptKeySelect" class="line-select">
+                                <option value="agent">agent</option>
+                                <option value="teaching-plan">teaching-plan</option>
+                                <option value="resource-discovery">resource-discovery</option>
+                            </select>
+                            <span class="mini-stat" id="agentPromptListCount">0 个版本</span>
+                        </div>
+                    </div>
+                    <div class="table-shell">
+                        <table>
+                            <thead>
+                            <tr>
+                                <th>版本</th>
+                                <th>状态</th>
+                                <th>创建时间</th>
+                                <th>指标</th>
+                                <th>操作</th>
+                            </tr>
+                            </thead>
+                            <tbody id="agentPromptTableBody"></tbody>
+                        </table>
+                    </div>
+                </article>
+            </div>
+
+            <article class="table-card agent-timeline-card">
+                <div class="card-topline agent-timeline-heading">
+                    <div>
+                        <h3>最近 Agent 会话时间线</h3>
+                        <p class="agent-timeline-note">同一 sessionId / threadId 的模型与工具事件按时间展示，不代表单次请求精确配对。</p>
+                    </div>
+                    <div class="agent-timeline-meta" aria-live="polite">
+                        <span class="mini-stat" id="agentTimelineSessionCount">0 个会话</span>
+                        <span class="mini-stat" id="agentTimelineEventCount">0 个事件</span>
+                    </div>
+                </div>
+                <div id="agentTimelineList" class="agent-timeline-shell" aria-live="polite"></div>
+            </article>
+        </section>
     </main>
 </div>
 
-<script src="/admin.js?v=20260722b"></script>
+<script src="/admin.js?v=20260727b"></script>
 </body>
 </html>

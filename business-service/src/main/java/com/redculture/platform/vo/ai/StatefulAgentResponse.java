@@ -29,6 +29,8 @@ public class StatefulAgentResponse {
 
     private String fallbackLevel;
 
+    private String degradedReason;
+
     private List<AgentCitationVO> citations = new ArrayList<>();
 
     private List<String> relatedResources = new ArrayList<>();

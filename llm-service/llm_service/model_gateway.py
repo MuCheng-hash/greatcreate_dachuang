@@ -296,13 +296,28 @@ class ModelGateway:
 
     @staticmethod
     def parse_json(content: str) -> dict[str, Any] | None:
-        normalized = content.strip()
-        if normalized.startswith("```"):
-            normalized = normalized.strip("`")
-            if normalized.startswith("json"):
-                normalized = normalized[4:].lstrip()
-        try:
-            parsed = json.loads(normalized)
-        except (ValueError, TypeError, json.JSONDecodeError):
+        """Extract the first valid JSON object from a model response.
+
+        Providers do not all honor the same structured-output behavior. Some
+        return a JSON object directly, while others wrap it in Markdown or a
+        short explanatory sentence. Keep the result contract strict (a JSON
+        object) but tolerate that harmless presentation difference.
+        """
+        if not isinstance(content, str):
             return None
-        return parsed if isinstance(parsed, dict) else None
+
+        normalized = content.strip()
+        if not normalized:
+            return None
+
+        decoder = json.JSONDecoder()
+        for start, character in enumerate(normalized):
+            if character != "{":
+                continue
+            try:
+                parsed, _end = decoder.raw_decode(normalized, start)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(parsed, dict):
+                return parsed
+        return None

@@ -17,4 +17,13 @@ public class AgentRuntimeResult {
     private String status;
 
     private List<String> toolExecutions = new ArrayList<>();
+
+    private String degradedReason;
+
+    public AgentRuntimeResult(GeneratedAnswer answer,
+                              String threadId,
+                              String status,
+                              List<String> toolExecutions) {
+        this(answer, threadId, status, toolExecutions, null);
+    }
 }

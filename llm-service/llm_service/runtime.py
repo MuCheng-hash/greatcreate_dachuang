@@ -31,6 +31,7 @@ from .structured_tasks import (
     teaching_plan_fallback,
     teaching_plan_valid,
 )
+from .business_tool_client import BusinessToolClient
 from .tools import AGENT_TOOLS, ToolRuntimeContext, bind_tool_runtime, reset_tool_runtime
 
 
@@ -47,6 +48,7 @@ class AgentRuntime:
         observability: LlmObservability | None = None,
         alerts: FallbackAlertManager | None = None,
         prompts: PromptManager | None = None,
+        business_tool_client: BusinessToolClient | None = None,
     ):
         self.settings = settings
         self.repository = repository
@@ -54,6 +56,7 @@ class AgentRuntime:
         self.alerts = alerts or FallbackAlertManager(settings.llm_alert_webhook_url)
         self.model = model or ModelGateway(settings, observability, self.alerts)
         self.prompts = prompts
+        self.business_tool_client = business_tool_client
         self.context_manager = ContextWindowManager(
             settings.agent_context_token_budget,
             settings.agent_recent_message_count,
@@ -253,6 +256,9 @@ class AgentRuntime:
                 trusted_context=request.context,
                 repository=self.repository,
                 output_character_limit=self.settings.agent_tool_output_character_limit,
+                business_tool_client=self.business_tool_client,
+                grade=request.grade,
+                theme=request.theme,
             )
             token = bind_tool_runtime(runtime)
             try:
@@ -372,6 +378,9 @@ class AgentRuntime:
                 trusted_context=request.context,
                 repository=self.repository,
                 output_character_limit=self.settings.agent_tool_output_character_limit,
+                business_tool_client=self.business_tool_client,
+                grade=request.grade,
+                theme=request.theme,
                 event_sink=emit,
             )
             token = bind_tool_runtime(runtime)
@@ -680,6 +689,9 @@ class AgentRuntime:
             trusted_context=trusted,
             repository=self.repository,
             output_character_limit=self.settings.agent_tool_output_character_limit,
+            business_tool_client=self.business_tool_client,
+            grade=request.grade,
+            theme=request.theme,
         )
         target_agent = agent or self._agent
         if target_agent is None:
@@ -690,7 +702,14 @@ class AgentRuntime:
                 request, thread, model_config or self._primary_model_config(), plan
             ),
         )
-        return self._response_from_model_result(result, trusted, thread.thread_id, compacted, runtime.executions)
+        return self._response_from_model_result(
+            result,
+            trusted,
+            thread.thread_id,
+            compacted,
+            runtime.executions,
+            runtime.degraded_reasons,
+        )
 
     async def _invoke_agent_stream(
         self,
@@ -746,7 +765,8 @@ class AgentRuntime:
 
         parse_messages = [AIMessage(content=model_buffer)] if model_buffer else model_messages
         response = self._response_from_model_result(
-            {"messages": parse_messages}, trusted, thread.thread_id, compacted, runtime.executions
+            {"messages": parse_messages}, trusted, thread.thread_id, compacted,
+            runtime.executions, runtime.degraded_reasons
         )
         if emitted_answer_length < len(response.answer):
             self._emit_answer_chunks(response.answer[emitted_answer_length:], emit)
@@ -790,18 +810,30 @@ class AgentRuntime:
         thread_id: str,
         compacted: bool,
         executions: list[ToolExecution],
+        degraded_reasons: list[str] | None = None,
     ) -> AgentMessageResponse:
         parsed = self._parse_model_output(result)
         allowed = self._allowed_citations(trusted)
         citations = [self._citation_by_id(trusted, item) for item in parsed.citation_ids if item in allowed]
         citations = [item for item in citations if item is not None]
+        if not citations and any(
+            item.name == "query_graph_relations" and item.status in {"completed", "degraded"}
+            for item in executions
+        ):
+            citations = [
+                self._citation_by_id(trusted, item)
+                for item in self._ordered_evidence_citation_ids(trusted)[:5]
+            ]
+            citations = [item for item in citations if item is not None]
         answer = parsed.answer.strip()
+        normalized_reasons = list(dict.fromkeys(degraded_reasons or []))
         return AgentMessageResponse(
             threadId=thread_id,
             answer=answer or "暂时无法生成有效回答。",
             status="completed" if answer else "incomplete",
             generationStatus="completed" if answer else "degraded",
-            retrievalStatus=self._retrieval_status(trusted),
+            retrievalStatus=("degraded" if normalized_reasons else self._retrieval_status(trusted)),
+            degradedReason=";".join(normalized_reasons) if normalized_reasons else None,
             citations=citations,
             relatedResources=parsed.related_resources[:8],
             followUpQuestions=parsed.follow_up_questions[:4],
@@ -817,18 +849,32 @@ class AgentRuntime:
                 final_content = message_text(message.content).strip()
                 if final_content:
                     break
-        try:
-            parsed = AgentModelOutput.model_validate(json.loads(self._strip_json_fence(final_content)))
-        except (ValueError, TypeError, json.JSONDecodeError) as exc:
-            raise ValueError("invalid_model_output") from exc
-        if not parsed.answer.strip():
+        if not final_content:
             raise ValueError("invalid_model_output")
-        return parsed
+
+        payload = ModelGateway.parse_json(final_content)
+        if payload is not None:
+            try:
+                parsed = AgentModelOutput.model_validate(payload)
+            except (ValueError, TypeError) as exc:
+                raise ValueError("invalid_model_output") from exc
+            if not parsed.answer.strip():
+                raise ValueError("invalid_model_output")
+            return parsed
+
+        # 普通 CHAT 允许兼容返回纯文本；结构化任务仍由各自 validator 严格校验。
+        plain_answer = self._plain_text_answer(final_content)
+        if not plain_answer:
+            raise ValueError("invalid_model_output")
+        return AgentModelOutput(answer=plain_answer)
 
     def _partial_answer(self, content: str) -> str:
         normalized = content.strip()
         if not normalized:
             return ""
+        parsed_payload = ModelGateway.parse_json(normalized)
+        if parsed_payload is not None and isinstance(parsed_payload.get("answer"), str):
+            return parsed_payload["answer"]
         candidate = self._strip_json_fence(normalized)
         try:
             parsed = json.loads(candidate)
@@ -842,7 +888,28 @@ class AgentRuntime:
                 return json.loads('"' + match.group(1) + '"')
             except (ValueError, json.JSONDecodeError):
                 return match.group(1)
-        return normalized if not normalized.startswith("{") else ""
+        if "{" in normalized or normalized.startswith("```"):
+            return ""
+        return self._plain_text_answer(normalized)
+
+    @staticmethod
+    def _plain_text_answer(content: str) -> str:
+        normalized = content.strip()
+        if not normalized:
+            return ""
+        lowered = normalized.lower()
+        error_markers = (
+            "无效响应",
+            "模型不可用",
+            "服务不可用",
+            "invalid response",
+            "invalid_model_output",
+            "model_unavailable",
+            "service unavailable",
+        )
+        if len(normalized) <= 160 and any(marker in lowered for marker in error_markers):
+            return ""
+        return normalized
 
     def _strip_json_fence(self, value: str) -> str:
         normalized = value.strip()
@@ -880,9 +947,18 @@ class AgentRuntime:
             emit("token", {"delta": answer[index:index + size]})
 
     def _load_prompt(self) -> str:
+        if self.prompts is not None:
+            try:
+                return self.prompts.active_content("agent")
+            except LookupError:
+                pass
         if not self.settings.prompt_path.is_file():
             raise FileNotFoundError(f"Agent prompt not found: {self.settings.prompt_path}")
         return self.settings.prompt_path.read_text(encoding="utf-8")
+
+    def invalidate_prompt(self, prompt_key: str) -> None:
+        if prompt_key.strip() == "agent":
+            self._agents.clear()
 
     def _degraded_answer(
         self, request: AgentMessageRequest, trusted: TrustedContext, thread_id: str,
@@ -926,6 +1002,25 @@ class AgentRuntime:
         retrieval = trusted.retrieval or {}
         for group in (retrieval.get("chunks", []), retrieval.get("graphFacts", [])):
             values.update(str(item.get("citationId")) for item in group if isinstance(item, dict) and item.get("citationId"))
+        return values
+
+    def _ordered_evidence_citation_ids(self, trusted: TrustedContext) -> list[str]:
+        values: list[str] = []
+        seen: set[str] = set()
+        retrieval = trusted.retrieval or {}
+        groups = (
+            trusted.citation_candidates,
+            retrieval.get("graphFacts", []),
+            retrieval.get("chunks", []),
+        )
+        for group in groups:
+            for item in group:
+                if not isinstance(item, dict):
+                    continue
+                citation_id = str(item.get("citationId") or "")
+                if citation_id and citation_id not in seen:
+                    seen.add(citation_id)
+                    values.append(citation_id)
         return values
 
     def _citation_by_id(self, trusted: TrustedContext, citation_id: str) -> Citation | None:

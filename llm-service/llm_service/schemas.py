@@ -16,6 +16,8 @@ class ApiModel(BaseModel):
 
 
 class TrustedContext(ApiModel):
+    actor: dict[str, Any] | None = None
+    scope: dict[str, Any] | None = None
     school: dict[str, Any] | None = None
     region: dict[str, Any] | None = None
     resource: dict[str, Any] | None = None
@@ -100,7 +102,7 @@ class Citation(ApiModel):
 
 class ToolExecution(ApiModel):
     name: str
-    status: Literal["completed", "failed"]
+    status: Literal["completed", "degraded", "failed"]
     duration_ms: int = Field(alias="durationMs")
 
 
@@ -116,6 +118,7 @@ class AgentMessageResponse(ApiModel):
     provider: str | None = None
     model: str | None = None
     fallback_level: int | str | None = Field(default=None, alias="fallbackLevel")
+    degraded_reason: str | None = Field(default=None, alias="degradedReason")
     citations: list[Citation] = Field(default_factory=list)
     related_resources: list[str] = Field(default_factory=list, alias="relatedResources")
     follow_up_questions: list[str] = Field(default_factory=list, alias="followUpQuestions")

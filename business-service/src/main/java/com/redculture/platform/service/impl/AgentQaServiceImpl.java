@@ -140,6 +140,35 @@ public class AgentQaServiceImpl implements AgentQaService {
     }
 
     @Override
+    public Map<String, Object> getThreadHistory(String threadId,
+                                                AuthCurrentUserVO currentUser,
+                                                String scopeType,
+                                                Long scopeId) {
+        if (!StringUtils.hasText(threadId)) {
+            throw new IllegalArgumentException("threadId is required");
+        }
+        if (agentRuntimeClient == null) {
+            throw new IllegalArgumentException("Agent 会话历史服务不可用");
+        }
+        String normalizedScopeType = StringUtils.hasText(scopeType)
+                ? scopeType.trim().toUpperCase(Locale.ROOT) : KnowledgeScopeType.SCHOOL.name();
+        Long normalizedScopeId = scopeId != null ? scopeId : currentUser.getSchoolId();
+        if (KnowledgeScopeType.SCHOOL.name().equals(normalizedScopeType)
+                && currentUser.getSchoolId() != null
+                && normalizedScopeId != null
+                && !currentUser.getSchoolId().equals(normalizedScopeId)) {
+            throw new IllegalArgumentException("cannot access another school history");
+        }
+        try {
+            return agentRuntimeClient.getThreadHistory(
+                    threadId, currentUser, normalizedScopeType, normalizedScopeId
+            );
+        } catch (RuntimeException exception) {
+            throw new IllegalArgumentException("Agent 会话历史暂时无法读取", exception);
+        }
+    }
+
+    @Override
     public SseEmitter stream(AgentQaRequest request, AuthCurrentUserVO currentUser) {
         validateRequest(request);
         if (currentUser == null) {
@@ -300,6 +329,7 @@ public class AgentQaServiceImpl implements AgentQaService {
         response.setAnswer(StringUtils.hasText(answer) ? answer : "暂时无法生成有效回答。");
         response.setThreadId(firstText(responseMap.get("threadId"), eventData.get("threadId")));
         response.setStatus(firstText(responseMap.get("status"), "degraded"));
+        response.setDegradedReason(textValue(responseMap.get("degradedReason")));
         response.setRunId(textValue(eventData.get("runId")));
         response.setConversationId(request.getConversationId());
         response.setIntent(context.getIntent());
@@ -308,7 +338,10 @@ public class AgentQaServiceImpl implements AgentQaService {
 
         KnowledgeRetrieveResult retrieval = context.getRetrieval() == null
                 ? KnowledgeRetrieveResult.empty() : context.getRetrieval();
-        response.setRetrievalStatus(retrieval.getRetrievalStatus());
+        String remoteRetrievalStatus = textValue(responseMap.get("retrievalStatus"));
+        response.setRetrievalStatus("degraded".equalsIgnoreCase(remoteRetrievalStatus)
+                || StringUtils.hasText(response.getDegradedReason())
+                ? KnowledgeRetrievalStatus.DEGRADED : retrieval.getRetrievalStatus());
         AgentGenerationStatus generationStatus = "completed".equalsIgnoreCase(response.getStatus())
                 ? AgentGenerationStatus.COMPLETED : AgentGenerationStatus.DEGRADED;
         response.setGenerationStatus(generationStatus);
@@ -484,6 +517,10 @@ public class AgentQaServiceImpl implements AgentQaService {
         response.setThreadId(remote == null ? request.getThreadId() : remote.getThreadId());
         response.setConversationId(request.getConversationId());
         response.setStatus(remote == null ? "degraded" : remote.getStatus());
+        response.setDegradedReason(remote == null ? null : remote.getDegradedReason());
+        if (StringUtils.hasText(response.getDegradedReason())) {
+            response.setRetrievalStatus(KnowledgeRetrievalStatus.DEGRADED);
+        }
         response.setToolExecutions(remote == null ? new ArrayList<>() : nonNullList(remote.getToolExecutions()));
         return response;
     }
