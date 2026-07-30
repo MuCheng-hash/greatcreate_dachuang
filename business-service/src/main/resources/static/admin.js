@@ -177,10 +177,9 @@ const adminElements = {
     agentPromptKeySelect: document.querySelector("#agentPromptKeySelect"),
     agentPromptListCount: document.querySelector("#agentPromptListCount"),
     agentPromptTableBody: document.querySelector("#agentPromptTableBody"),
-    agentTraceListCount: document.querySelector("#agentTraceListCount"),
-    agentTraceTableBody: document.querySelector("#agentTraceTableBody"),
-    agentToolTraceListCount: document.querySelector("#agentToolTraceListCount"),
-    agentToolTraceTableBody: document.querySelector("#agentToolTraceTableBody")
+    agentTimelineSessionCount: document.querySelector("#agentTimelineSessionCount"),
+    agentTimelineEventCount: document.querySelector("#agentTimelineEventCount"),
+    agentTimelineList: document.querySelector("#agentTimelineList")
 };
 
 document.addEventListener("DOMContentLoaded", () => {
@@ -282,7 +281,8 @@ async function bootstrapAdmin() {
 }
 
 async function loadAgentOps() {
-    if (!adminElements.agentTraceTableBody) return;
+    if (!adminElements.agentTimelineList) return;
+    const openKeys = getOpenAgentTimelineKeys();
     const traceParams = new URLSearchParams({ limit: "50" });
     const status = adminElements.agentTraceStatusFilter?.value || "";
     const feature = adminElements.agentTraceFeatureFilter?.value?.trim() || "";
@@ -304,13 +304,11 @@ async function loadAgentOps() {
         adminState.agentTraces = Array.isArray(traces) ? traces : [];
         adminState.agentToolTraces = Array.isArray(toolTraces) ? toolTraces : [];
         renderAgentSummary(adminState.agentSummary);
-        renderAgentTraces(adminState.agentTraces);
-        renderAgentToolTraces(adminState.agentToolTraces);
+        renderAgentTimeline(adminState.agentTraces, adminState.agentToolTraces, openKeys);
         await loadAgentPrompts();
     } catch (error) {
         setGlobalStatus("Agent 运维异常", error.message || "Agent 运维接口请求失败。");
-        renderAgentEmptyState(error.message || "Agent 运维数据暂不可用。", "agentTraceTableBody", 8);
-        renderAgentEmptyState(error.message || "Agent 工具轨迹暂不可用。", "agentToolTraceTableBody", 6);
+        renderAgentTimelineError(error.message || "Agent 运维数据暂不可用。");
     }
 }
 
@@ -400,49 +398,221 @@ async function activateAgentPrompt(promptKey, version) {
     }
 }
 
-function renderAgentTraces(records) {
-    adminElements.agentTraceListCount.textContent = `${records.length} 条`;
-    adminElements.agentTraceTableBody.innerHTML = "";
-    if (!records.length) {
-        renderAgentEmptyState("暂无模型 Trace。", "agentTraceTableBody", 8);
-        return;
-    }
-    records.forEach(record => {
-        const metadata = record.metadata || {};
-        const tr = document.createElement("tr");
-        tr.innerHTML = `
-            <td>${escapeHtml(formatAgentDate(record.startedAt))}</td>
-            <td>${escapeHtml(record.feature || "-")}</td>
-            <td>${escapeHtml([record.provider, record.model].filter(Boolean).join(" / ") || "-")}</td>
-            <td>${renderStatus(record.status)}</td>
-            <td>${escapeHtml(record.latencyMs == null ? "-" : `${record.latencyMs} ms`)}</td>
-            <td>${escapeHtml(record.totalTokens == null ? "-" : String(record.totalTokens))}</td>
-            <td>${escapeHtml(metadata.fallbackLevel == null ? "-" : String(metadata.fallbackLevel))}</td>
-            <td title="${escapeHtml(record.errorMessage || "")}">${escapeHtml(record.errorType || "-")}</td>
-        `;
-        adminElements.agentTraceTableBody.appendChild(tr);
-    });
+function getOpenAgentTimelineKeys() {
+    if (!adminElements.agentTimelineList) return new Set();
+    return new Set(Array.from(
+        adminElements.agentTimelineList.querySelectorAll("details.agent-session-group[open]")
+    ).map(element => element.dataset.sessionKey).filter(Boolean));
 }
 
-function renderAgentToolTraces(records) {
-    adminElements.agentToolTraceListCount.textContent = `${records.length} 条`;
-    adminElements.agentToolTraceTableBody.innerHTML = "";
-    if (!records.length) {
-        renderAgentEmptyState("暂无 Agent 工具 Trace。", "agentToolTraceTableBody", 6);
+function buildAgentSessionTimelines(modelRecords, toolRecords) {
+    const groups = new Map();
+
+    function ensureGroup(key, id, kind) {
+        if (!groups.has(key)) {
+            groups.set(key, {
+                key,
+                id,
+                kind,
+                modelRecords: [],
+                toolRecords: [],
+                events: []
+            });
+        }
+        return groups.get(key);
+    }
+
+    modelRecords.forEach(record => {
+        const id = String(record.sessionId || "").trim();
+        const group = ensureGroup(
+            id ? `session:${id}` : "model:unlinked",
+            id || "未关联会话",
+            id ? "session" : "unlinked-model"
+        );
+        group.modelRecords.push(record);
+        group.events.push({
+            type: "model",
+            timestamp: record.startedAt || record.completedAt,
+            record
+        });
+    });
+
+    toolRecords.forEach(record => {
+        const id = String(record.threadId || "").trim();
+        const group = ensureGroup(
+            id ? `session:${id}` : "tool:unlinked",
+            id || "未关联模型 Trace",
+            id ? "session" : "unlinked-tool"
+        );
+        group.toolRecords.push(record);
+        group.events.push({
+            type: "tool",
+            timestamp: record.createdAt,
+            record
+        });
+    });
+
+    return Array.from(groups.values())
+        .map(group => {
+            group.events.sort((left, right) => agentTimestampValue(right.timestamp) - agentTimestampValue(left.timestamp));
+            group.latestAt = group.events[0]?.timestamp || "";
+            group.status = summarizeAgentTimelineStatus(group.events);
+            return group;
+        })
+        .sort((left, right) => agentTimestampValue(right.latestAt) - agentTimestampValue(left.latestAt));
+}
+
+function summarizeAgentTimelineStatus(events) {
+    const statuses = new Set(events.map(event => normalizeAgentStatus(event.record?.status)));
+    if (statuses.has("failed")) return "failed";
+    if (statuses.has("degraded") || statuses.has("invalid_response")) return "degraded";
+    if (statuses.has("completed")) return "completed";
+    return Array.from(statuses)[0] || "started";
+}
+
+function renderAgentTimeline(modelRecords, toolRecords, openKeys = new Set()) {
+    const groups = buildAgentSessionTimelines(modelRecords, toolRecords);
+    const eventCount = groups.reduce((total, group) => total + group.events.length, 0);
+    adminElements.agentTimelineSessionCount.textContent = `${groups.length} 个会话`;
+    adminElements.agentTimelineEventCount.textContent = `${eventCount} 个事件`;
+    adminElements.agentTimelineList.innerHTML = "";
+
+    if (!groups.length) {
+        adminElements.agentTimelineList.innerHTML = '<div class="agent-empty-note">暂无符合条件的 Agent Trace。</div>';
         return;
     }
-    records.forEach(record => {
-        const tr = document.createElement("tr");
-        tr.innerHTML = `
-            <td>${escapeHtml(formatAgentDate(record.createdAt))}</td>
-            <td><strong>${escapeHtml(record.toolName || "-")}</strong></td>
-            <td>${renderStatus(record.status)}</td>
-            <td>${escapeHtml(record.durationMs == null ? "-" : `${record.durationMs} ms`)}</td>
-            <td title="${escapeHtml(record.threadId || "")}">${escapeHtml(shortAgentId(record.threadId))}</td>
-            <td title="${escapeHtml(record.resultPreview || "")}">${escapeHtml(truncateAgentText(record.resultPreview, 180))}</td>
-        `;
-        adminElements.agentToolTraceTableBody.appendChild(tr);
-    });
+
+    const hasPreservedGroup = groups.some(group => openKeys.has(group.key));
+    adminElements.agentTimelineList.innerHTML = groups.map((group, index) => {
+        const shouldOpen = openKeys.has(group.key) || (!hasPreservedGroup && index === 0);
+        return renderAgentSessionGroup(group, shouldOpen);
+    }).join("");
+}
+
+function renderAgentSessionGroup(group, open) {
+    const title = group.kind === "unlinked-tool" ? "未关联模型 Trace" : shortAgentId(group.id);
+    const subtitle = group.kind === "session"
+        ? `sessionId / threadId：${shortAgentId(group.id)}`
+        : "接口返回中没有可用于关联的会话标识";
+    const openAttribute = open ? " open" : "";
+    return `
+        <details class="agent-session-group" data-session-key="${escapeHtml(group.key)}"${openAttribute}>
+            <summary class="agent-session-summary">
+                <span class="agent-session-main">
+                    <span class="agent-session-kind">会话时间线</span>
+                    <strong class="agent-session-id" title="${escapeHtml(group.id)}">${escapeHtml(title)}</strong>
+                    <span class="agent-session-time">最近 ${escapeHtml(formatAgentDate(group.latestAt))}</span>
+                    <span class="agent-session-subtitle">${escapeHtml(subtitle)}</span>
+                </span>
+                <span class="agent-session-stats">
+                    <span>模型 ${group.modelRecords.length}</span>
+                    <span>工具 ${group.toolRecords.length}</span>
+                </span>
+                ${renderAgentStatus(group.status)}
+            </summary>
+            <div class="agent-session-events">
+                <div class="agent-timeline-events">
+                    ${group.events.map(renderAgentTimelineEvent).join("")}
+                </div>
+            </div>
+        </details>
+    `;
+}
+
+function renderAgentTimelineEvent(event) {
+    const record = event.record || {};
+    const isModel = event.type === "model";
+    const metadata = record.metadata || {};
+    const status = normalizeAgentStatus(record.status);
+    const title = isModel ? (record.feature || "模型调用") : (record.toolName || "工具调用");
+    const subtitle = isModel
+        ? ([record.provider, record.model].filter(Boolean).join(" / ") || "模型信息不可用")
+        : "受控业务工具";
+    const details = isModel
+        ? [
+            ["耗时", record.latencyMs == null ? "-" : `${record.latencyMs} ms`],
+            ["Token", record.totalTokens == null ? "-" : String(record.totalTokens)],
+            ["Fallback", metadata.fallbackLevel == null ? "-" : String(metadata.fallbackLevel)],
+            ["Trace ID", shortAgentId(record.traceId)]
+        ]
+        : [
+            ["耗时", record.durationMs == null ? "-" : `${record.durationMs} ms`],
+            ["线程", shortAgentId(record.threadId)],
+            ["工具状态", status],
+            ["创建时间", formatAgentDate(record.createdAt)]
+        ];
+    const preview = isModel
+        ? (record.errorType || record.errorMessage || "模型调用完成，无错误摘要")
+        : (record.resultPreview || "工具未返回结果摘要");
+    const argumentsText = !isModel && record.arguments && Object.keys(record.arguments).length
+        ? formatAgentJson(record.arguments)
+        : "";
+
+    return `
+        <article class="agent-timeline-event agent-timeline-event--${isModel ? "model" : "tool"}">
+            <span class="agent-event-marker" aria-hidden="true"></span>
+            <div class="agent-event-card">
+                <div class="agent-event-topline">
+                    <div>
+                        <span class="agent-event-kind">${isModel ? "模型" : "工具"}</span>
+                        <strong class="agent-event-title">${escapeHtml(title)}</strong>
+                        <span class="agent-event-subtitle">${escapeHtml(subtitle)}</span>
+                    </div>
+                    <div class="agent-event-status">
+                        ${renderAgentStatus(status)}
+                        <time>${escapeHtml(formatAgentDate(event.timestamp))}</time>
+                    </div>
+                </div>
+                <div class="agent-event-meta">
+                    ${details.map(([label, value]) => `
+                        <span class="agent-event-meta-item">
+                            <span>${escapeHtml(label)}</span>
+                            <strong>${escapeHtml(value)}</strong>
+                        </span>
+                    `).join("")}
+                </div>
+                <div class="agent-event-preview" title="${escapeHtml(preview)}">
+                    <span>${isModel ? "错误 / 说明" : "结果摘要"}</span>
+                    <p>${escapeHtml(truncateAgentText(preview, 260))}</p>
+                </div>
+                ${argumentsText ? `
+                    <details class="agent-event-details">
+                        <summary>查看工具参数</summary>
+                        <pre>${escapeHtml(argumentsText)}</pre>
+                    </details>
+                ` : ""}
+            </div>
+        </article>
+    `;
+}
+
+function renderAgentTimelineError(message) {
+    adminElements.agentTimelineSessionCount.textContent = "0 个会话";
+    adminElements.agentTimelineEventCount.textContent = "0 个事件";
+    adminElements.agentTimelineList.innerHTML = `<div class="agent-empty-note agent-empty-note--error">${escapeHtml(message)}</div>`;
+}
+
+function renderAgentStatus(value) {
+    const key = normalizeAgentStatus(value);
+    return `<span class="status-pill status-${escapeHtml(key)}">${escapeHtml(key)}</span>`;
+}
+
+function normalizeAgentStatus(value) {
+    const key = String(value || "started").toLowerCase();
+    return key === "ok" ? "completed" : key;
+}
+
+function agentTimestampValue(value) {
+    const timestamp = Date.parse(value || "");
+    return Number.isNaN(timestamp) ? 0 : timestamp;
+}
+
+function formatAgentJson(value) {
+    try {
+        return truncateAgentText(JSON.stringify(value, null, 2), 1600);
+    } catch (error) {
+        return String(value || "-");
+    }
 }
 
 function renderAgentEmptyState(message, elementId, colspan) {

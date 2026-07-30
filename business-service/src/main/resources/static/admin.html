@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>后台管理台 | 乡村学校思政资源地图</title>
     <meta name="description" content="乡村学校周边思政教育资源数字地图平台后台管理台。">
-    <link rel="stylesheet" href="/admin.css?v=20260727a">
+    <link rel="stylesheet" href="/admin.css?v=20260727b">
 </head>
 <body>
 <div class="admin-shell">
@@ -757,7 +757,7 @@
                 </div>
                 <div class="panel-tools">
                     <select id="agentTraceStatusFilter" class="line-select">
-                        <option value="">全部模型状态</option>
+                        <option value="">全部状态</option>
                         <option value="completed">completed</option>
                         <option value="failed">failed</option>
                         <option value="invalid_response">invalid_response</option>
@@ -830,55 +830,23 @@
                 </article>
             </div>
 
-            <article class="table-card agent-trace-card">
-                <div class="card-topline">
-                    <h3>最近模型 Trace</h3>
-                    <span class="mini-stat" id="agentTraceListCount">0 条</span>
+            <article class="table-card agent-timeline-card">
+                <div class="card-topline agent-timeline-heading">
+                    <div>
+                        <h3>最近 Agent 会话时间线</h3>
+                        <p class="agent-timeline-note">同一 sessionId / threadId 的模型与工具事件按时间展示，不代表单次请求精确配对。</p>
+                    </div>
+                    <div class="agent-timeline-meta" aria-live="polite">
+                        <span class="mini-stat" id="agentTimelineSessionCount">0 个会话</span>
+                        <span class="mini-stat" id="agentTimelineEventCount">0 个事件</span>
+                    </div>
                 </div>
-                <div class="table-shell">
-                    <table>
-                        <thead>
-                        <tr>
-                            <th>时间</th>
-                            <th>功能</th>
-                            <th>模型</th>
-                            <th>状态</th>
-                            <th>耗时</th>
-                            <th>Token</th>
-                            <th>Fallback</th>
-                            <th>错误</th>
-                        </tr>
-                        </thead>
-                        <tbody id="agentTraceTableBody"></tbody>
-                    </table>
-                </div>
-            </article>
-
-            <article class="table-card agent-trace-card">
-                <div class="card-topline">
-                    <h3>最近 Agent Tool Trace</h3>
-                    <span class="mini-stat" id="agentToolTraceListCount">0 条</span>
-                </div>
-                <div class="table-shell">
-                    <table>
-                        <thead>
-                        <tr>
-                            <th>时间</th>
-                            <th>工具</th>
-                            <th>状态</th>
-                            <th>耗时</th>
-                            <th>线程</th>
-                            <th>结果摘要</th>
-                        </tr>
-                        </thead>
-                        <tbody id="agentToolTraceTableBody"></tbody>
-                    </table>
-                </div>
+                <div id="agentTimelineList" class="agent-timeline-shell" aria-live="polite"></div>
             </article>
         </section>
     </main>
 </div>
 
-<script src="/admin.js?v=20260727a"></script>
+<script src="/admin.js?v=20260727b"></script>
 </body>
 </html>
