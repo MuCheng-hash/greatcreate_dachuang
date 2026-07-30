@@ -1,6 +1,6 @@
 export type AgentGenerationStatus = "completed" | "degraded" | "skipped" | "incomplete" | string;
 export type AgentRetrievalStatus = "ok" | "empty" | "degraded" | string;
-export type AgentTaskType = "CHAT" | "TEACHING_PLAN" | "RESOURCE_DISCOVERY";
+export type AgentTaskType = "CHAT" | "TEACHING_PLAN";
 
 export interface LlmModelOption {
   id: string;
@@ -82,25 +82,6 @@ export interface TeachingPlanResponse {
   followUpSuggestions?: string[];
 }
 
-export interface ResourceDiscoveryResult {
-  providerPlaceId?: string | null;
-  ideologicalRelevant?: boolean | null;
-  resourceCategory?: string | null;
-  resourceSubcategory?: string | null;
-  confidence?: number | null;
-  rationale?: string | null;
-  educationThemes?: string[];
-  targetGrades?: string | null;
-  activitySuggestion?: string | null;
-  verificationNotes?: string | null;
-}
-
-export interface ResourceDiscoveryResponse {
-  analysisStatus?: string | null;
-  message?: string | null;
-  results?: ResourceDiscoveryResult[];
-}
-
 export interface AgentQaResponse {
   taskType?: AgentTaskType | string | null;
   answer?: string;
@@ -122,7 +103,6 @@ export interface AgentQaResponse {
   provider?: string | null;
   model?: string | null;
   teachingPlan?: TeachingPlanResponse | null;
-  resourceDiscovery?: ResourceDiscoveryResponse | null;
 }
 
 export interface StatefulAgentRequest {

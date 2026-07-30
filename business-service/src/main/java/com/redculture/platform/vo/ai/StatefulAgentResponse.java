@@ -2,7 +2,6 @@ package com.redculture.platform.vo.ai;
 
 import com.redculture.platform.vo.AgentCitationVO;
 import com.redculture.platform.vo.GeneratedTeachingPlanResponse;
-import com.redculture.platform.vo.discovery.DiscoveryClassificationResponse;
 import lombok.Data;
 
 import java.util.ArrayList;
@@ -40,8 +39,6 @@ public class StatefulAgentResponse {
     private boolean contextCompacted;
 
     private GeneratedTeachingPlanResponse teachingPlan;
-
-    private DiscoveryClassificationResponse resourceDiscovery;
 
     @Data
     public static class ToolExecutionResponse {
