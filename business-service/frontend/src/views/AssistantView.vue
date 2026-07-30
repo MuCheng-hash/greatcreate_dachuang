@@ -677,8 +677,8 @@ function clearChat(): void {
 </template>
 
 <style scoped>
-.assistant-layout { display: grid; grid-template-columns: 280px minmax(0,1fr); height: calc(100vh - 122px); min-height: 600px; overflow: hidden; }
-.assistant-side { display: flex; flex-direction: column; gap: 20px; padding: 22px; border-right: 1px solid var(--line); background: #f8f9f7; }
+.assistant-layout { display: grid; grid-template-columns: 280px minmax(0,1fr); grid-template-rows: minmax(0,1fr); height: calc(100vh - 122px); min-height: 600px; overflow: hidden; }
+.assistant-side { display: flex; min-height: 0; flex-direction: column; gap: 20px; overflow-y: auto; padding: 22px; border-right: 1px solid var(--line); background: #f8f9f7; }
 .assistant-mark { display: grid; place-items: center; width: 42px; height: 42px; border-radius: 8px; background: var(--green); color: #fff; }
 .assistant-side h2 { margin: 15px 0 6px; font-size: 18px; }
 .assistant-side p { color: var(--muted); font-size: 13px; line-height: 1.65; }
