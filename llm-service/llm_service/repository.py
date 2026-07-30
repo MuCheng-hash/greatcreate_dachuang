@@ -4,10 +4,11 @@ import json
 import sqlite3
 import threading
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 
 class ThreadNotFoundError(LookupError):
@@ -53,12 +54,20 @@ class ConversationRepository:
         self._lock = threading.RLock()
         self._initialize()
 
-    def _connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
         connection = sqlite3.connect(self.database_path, timeout=10)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
         connection.execute("PRAGMA journal_mode = WAL")
-        return connection
+        try:
+            yield connection
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
 
     def _initialize(self) -> None:
         with self._lock, self._connect() as connection:
@@ -242,6 +251,55 @@ class ConversationRepository:
                 (thread_id, tool_name, json.dumps(arguments, ensure_ascii=False), status,
                  duration_ms, result_preview[:1000], utc_now()),
             )
+
+    def list_tool_audits(
+        self,
+        tool_name: str | None = None,
+        status: str | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        clauses: list[str] = []
+        parameters: list[Any] = []
+        if tool_name and tool_name.strip():
+            clauses.append("tool_name = ?")
+            parameters.append(tool_name.strip())
+        if status and status.strip():
+            clauses.append("status = ?")
+            parameters.append(status.strip())
+
+        safe_limit = max(1, min(int(limit), 100))
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        sql = f"""
+            SELECT id, thread_id, tool_name, arguments_json, status,
+                   duration_ms, result_preview, created_at
+            FROM agent_tool_audit
+            {where}
+            ORDER BY id DESC
+            LIMIT ?
+        """
+        parameters.append(safe_limit)
+        with self._connect() as connection:
+            rows = connection.execute(sql, parameters).fetchall()
+
+        audits: list[dict[str, Any]] = []
+        for row in rows:
+            try:
+                arguments = json.loads(row["arguments_json"] or "{}")
+            except (TypeError, json.JSONDecodeError):
+                arguments = {}
+            audits.append(
+                {
+                    "id": row["id"],
+                    "threadId": row["thread_id"],
+                    "toolName": row["tool_name"],
+                    "arguments": arguments,
+                    "status": row["status"],
+                    "durationMs": row["duration_ms"],
+                    "resultPreview": row["result_preview"],
+                    "createdAt": row["created_at"],
+                }
+            )
+        return audits
 
     def archive_thread(
         self, thread_id: str, owner_id: str,
