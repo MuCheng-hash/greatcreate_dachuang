@@ -22,14 +22,14 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class AssistantConversationHistoryControllerTest {
 
     @Test
-    void forwardsOwnedSchoolHistoryAndArchivesWithoutModelCalls() throws Exception {
+    void forwardsOwnedSchoolHistoryStatusAndArchiveRestoreWithoutModelCalls() throws Exception {
         HttpServer server = HttpServer.create(new InetSocketAddress(0), 0);
         List<String> requests = new ArrayList<>();
         server.createContext("/agent/threads", exchange -> {
             requests.add(exchange.getRequestMethod() + " " + exchange.getRequestURI());
             String path = exchange.getRequestURI().getPath();
             String body;
-            if (path.endsWith("/archive")) {
+            if (path.endsWith("/archive") || path.endsWith("/restore")) {
                 body = "{}";
             } else if (path.equals("/agent/threads/thread-1")) {
                 body = "{\"threadId\":\"thread-1\",\"scopeType\":\"SCHOOL\",\"scopeId\":\"7\",\"status\":\"active\",\"summary\":\"\",\"createdAt\":\"2026-07-28T00:00:00Z\",\"updatedAt\":\"2026-07-28T01:00:00Z\",\"messages\":[{\"id\":1,\"role\":\"user\",\"content\":\"历史问题\",\"createdAt\":\"2026-07-28T00:00:00Z\",\"metadata\":{}}]}";
@@ -55,18 +55,25 @@ class AssistantConversationHistoryControllerTest {
             MockHttpServletRequest request = new MockHttpServletRequest();
             request.setAttribute(AuthContext.CURRENT_USER_ATTRIBUTE, user);
 
-            var history = controller.list(request);
+            var history = controller.list("active", request);
+            var archivedHistory = controller.list("archived", request);
             var detail = controller.detail("thread-1", request);
             var archived = controller.archive("thread-1", request);
+            var restored = controller.restore("thread-1", request);
 
             assertEquals("历史问题", history.getData().get(0).getTitle());
+            assertEquals("历史问题", archivedHistory.getData().get(0).getTitle());
             assertEquals("历史问题", detail.getData().getMessages().get(0).getContent());
             assertEquals(200, archived.getCode());
-            assertEquals(3, requests.size());
+            assertEquals(200, restored.getCode());
+            assertEquals(5, requests.size());
             assertTrue(requests.stream().allMatch(value -> value.contains("ownerId=account:1")));
             assertTrue(requests.stream().allMatch(value -> value.contains("scopeType=SCHOOL")));
             assertTrue(requests.stream().allMatch(value -> value.contains("scopeId=7")));
-            assertTrue(requests.get(2).startsWith("POST "));
+            assertTrue(requests.stream().anyMatch(value -> value.contains("status=active")));
+            assertTrue(requests.stream().anyMatch(value -> value.contains("status=archived")));
+            assertTrue(requests.stream().anyMatch(value -> value.startsWith("POST ") && value.contains("/archive")));
+            assertTrue(requests.stream().anyMatch(value -> value.startsWith("POST ") && value.contains("/restore")));
         } finally {
             server.stop(0);
         }

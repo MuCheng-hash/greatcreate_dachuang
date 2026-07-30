@@ -10,6 +10,8 @@ import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
@@ -25,10 +27,12 @@ public class AssistantConversationHistoryController {
     }
 
     @GetMapping
-    public ApiResponse<List<AssistantConversationSummary>> list(HttpServletRequest request) {
+    public ApiResponse<List<AssistantConversationSummary>> list(
+            @RequestParam(name = "status", defaultValue = "active") String status,
+            HttpServletRequest request) {
         AuthCurrentUserVO user = requireSchoolUser(request);
         return ApiResponse.success(agentRuntimeClient.listConversations(
-                agentRuntimeClient.ownerIdFor(user), "SCHOOL", user.getSchoolId()));
+                agentRuntimeClient.ownerIdFor(user), "SCHOOL", user.getSchoolId(), normalizeStatus(status)));
     }
 
     @GetMapping("/{threadId}")
@@ -46,6 +50,23 @@ public class AssistantConversationHistoryController {
         agentRuntimeClient.archiveConversation(
                 threadId, agentRuntimeClient.ownerIdFor(user), "SCHOOL", user.getSchoolId());
         return ApiResponse.success(null);
+    }
+
+    @PostMapping("/{threadId}/restore")
+    public ApiResponse<Void> restore(
+            @PathVariable String threadId, HttpServletRequest request) {
+        AuthCurrentUserVO user = requireSchoolUser(request);
+        agentRuntimeClient.restoreConversation(
+                threadId, agentRuntimeClient.ownerIdFor(user), "SCHOOL", user.getSchoolId());
+        return ApiResponse.success(null);
+    }
+
+    private String normalizeStatus(String status) {
+        String normalized = status == null ? "active" : status.trim().toLowerCase();
+        if (!"active".equals(normalized) && !"archived".equals(normalized)) {
+            throw new IllegalArgumentException("status must be active or archived");
+        }
+        return normalized;
     }
 
     private AuthCurrentUserVO requireSchoolUser(HttpServletRequest request) {

@@ -125,6 +125,18 @@ class ConversationRepository:
     def require_thread(
         self, thread_id: str, owner_id: str, scope_type: str | None = None, scope_id: str | int | None = None
     ) -> ThreadRecord:
+        record = self.get_thread(thread_id, owner_id, scope_type, scope_id)
+        if record.status != "active":
+            raise ThreadScopeError("thread is archived")
+        return record
+
+    def get_thread(
+        self,
+        thread_id: str,
+        owner_id: str,
+        scope_type: str | None = None,
+        scope_id: str | int | None = None,
+    ) -> ThreadRecord:
         with self._connect() as connection:
             row = connection.execute(
                 "SELECT * FROM agent_thread WHERE thread_id = ? AND owner_id = ?", (thread_id, owner_id)
@@ -136,18 +148,7 @@ class ConversationRepository:
             raise ThreadScopeError("thread scope does not match")
         if scope_id is not None and record.scope_id != str(scope_id):
             raise ThreadScopeError("thread scope does not match")
-        if record.status != "active":
-            raise ThreadScopeError("thread is archived")
         return record
-
-    def get_thread(self, thread_id: str, owner_id: str) -> ThreadRecord:
-        with self._connect() as connection:
-            row = connection.execute(
-                "SELECT * FROM agent_thread WHERE thread_id = ? AND owner_id = ?", (thread_id, owner_id)
-            ).fetchone()
-        if row is None:
-            raise ThreadNotFoundError(thread_id)
-        return ThreadRecord(**dict(row))
 
     def list_threads(
         self,
@@ -156,9 +157,11 @@ class ConversationRepository:
         scope_type: str | None = None,
         scope_id: str | int | None = None,
         limit: int = 50,
+        status: str = "active",
     ) -> list[ThreadSummaryRecord]:
-        clauses = ["t.owner_id = ?", "t.status = 'active'"]
-        parameters: list[Any] = [owner_id]
+        normalized_status = self._normalize_thread_status(status)
+        clauses = ["t.owner_id = ?", "t.status = ?"]
+        parameters: list[Any] = [owner_id, normalized_status]
         if scope_type is not None:
             clauses.append("t.scope_type = ?")
             parameters.append(scope_type)
@@ -311,3 +314,23 @@ class ConversationRepository:
                 "UPDATE agent_thread SET status = 'archived', updated_at = ? WHERE thread_id = ?",
                 (utc_now(), thread_id),
             )
+
+    def restore_thread(
+        self, thread_id: str, owner_id: str,
+        scope_type: str | None = None, scope_id: str | int | None = None,
+    ) -> None:
+        record = self.get_thread(thread_id, owner_id, scope_type, scope_id)
+        if record.status != "archived":
+            return
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                "UPDATE agent_thread SET status = 'active', updated_at = ? WHERE thread_id = ?",
+                (utc_now(), thread_id),
+            )
+
+    @staticmethod
+    def _normalize_thread_status(status: str) -> str:
+        normalized = str(status or "").strip().lower()
+        if normalized not in {"active", "archived"}:
+            raise ValueError("thread status must be active or archived")
+        return normalized

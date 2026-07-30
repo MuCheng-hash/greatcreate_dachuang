@@ -77,6 +77,67 @@ describe("assistant view", () => {
     expect(wrapper.find(".history-row").exists()).toBe(false);
   });
 
+  it("opens archived conversations as read-only and restores them without losing messages", async () => {
+    const activeSummary = {
+      threadId: "active-1", title: "当前历史", preview: "当前回答", messageCount: 2,
+      scopeType: "SCHOOL", scopeId: "1", createdAt: "2026-07-28T00:00:00Z", updatedAt: "2026-07-28T01:00:00Z"
+    };
+    const archivedSummary = {
+      threadId: "archived-1", title: "已归档问题", preview: "已归档回答", messageCount: 2,
+      scopeType: "SCHOOL", scopeId: "1", createdAt: "2026-07-28T00:00:00Z", updatedAt: "2026-07-28T01:00:00Z"
+    };
+    apiMock.get.mockImplementation(async (path) => {
+      if (path === "/api/ai/models") return [];
+      if (path === "/api/ai/qa/history") return [activeSummary];
+      if (path === "/api/ai/qa/history?status=archived") return [archivedSummary];
+      if (path === "/api/ai/qa/history/archived-1") return {
+        ...archivedSummary,
+        status: "archived",
+        messages: [
+          { id: 1, role: "user", content: "已归档问题", createdAt: "2026-07-28T00:00:00Z" },
+          { id: 2, role: "assistant", content: "已归档回答", createdAt: "2026-07-28T00:01:00Z" }
+        ]
+      };
+      return [];
+    });
+    apiMock.post.mockImplementation(async (path) => path.endsWith("/restore") ? undefined : {
+      threadId: "thread-1",
+      answer: "回答",
+      citations: [],
+      retrievalStatus: "ok",
+      generationStatus: "completed"
+    });
+
+    const wrapper = mount(AssistantView, {
+      global: { stubs: { AppShell: { template: "<div><slot /></div>" }, InlineNotice: true } }
+    });
+    await flushPromises();
+
+    await wrapper.get(".history-mode-toggle").trigger("click");
+    await flushPromises();
+    expect(apiMock.get).toHaveBeenCalledWith("/api/ai/qa/history?status=archived");
+    expect(wrapper.text()).toContain("已归档对话");
+    await wrapper.get(".history-open").trigger("click");
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("这是归档对话，仅供查看。");
+    expect(wrapper.text()).toContain("已归档回答");
+    expect(wrapper.get("textarea").attributes("disabled")).toBeDefined();
+    expect(wrapper.get("textarea").attributes("placeholder")).toContain("请先恢复对话");
+
+    await wrapper.get(".history-restore").trigger("click");
+    await flushPromises();
+    expect(apiMock.post).toHaveBeenCalledWith("/api/ai/qa/history/archived-1/restore");
+    expect(wrapper.text()).toContain("历史对话");
+    expect(wrapper.text()).toContain("已归档回答");
+    expect(wrapper.get("textarea").attributes("disabled")).toBeUndefined();
+    expect(wrapper.find(".archived-banner").exists()).toBe(false);
+    await wrapper.get("textarea").setValue("恢复后继续追问");
+    await wrapper.get("form").trigger("submit.prevent");
+    await flushPromises();
+    expect(apiMock.post).toHaveBeenCalledWith("/api/ai/qa/ask", expect.objectContaining({ threadId: "archived-1" }));
+  });
+
   it("keeps question answering usable when history loading fails", async () => {
     apiMock.get.mockImplementation(async (path) => {
       if (path === "/api/ai/models") return [];

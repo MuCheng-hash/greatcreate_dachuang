@@ -4,7 +4,7 @@ import json
 import hmac
 import secrets
 import sqlite3
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -190,6 +190,7 @@ def create_app(
         scope_type: str | None = Query(default=None, alias="scopeType"),
         scope_id: str | int | None = Query(default=None, alias="scopeId"),
         limit: int = Query(default=50, ge=1, le=100),
+        status: Literal["active", "archived"] = Query(default="active"),
     ) -> list[ThreadSummaryResponse]:
         return [
             ThreadSummaryResponse(
@@ -198,7 +199,7 @@ def create_app(
                 createdAt=item.created_at, updatedAt=item.updated_at,
             )
             for item in repository.list_threads(
-                owner_id, task_type, scope_type, scope_id, limit
+                owner_id, task_type, scope_type, scope_id, limit, status
             )
         ]
 
@@ -213,7 +214,7 @@ def create_app(
         scope_id: str | int | None = Query(default=None, alias="scopeId"),
     ) -> ThreadResponse:
         try:
-            record = repository.require_thread(thread_id, owner_id, scope_type, scope_id)
+            record = repository.get_thread(thread_id, owner_id, scope_type, scope_id)
         except (ThreadNotFoundError, ThreadScopeError) as exc:
             raise HTTPException(status_code=404, detail="thread not found") from exc
         return _thread_response(runtime, record)
@@ -282,6 +283,23 @@ def create_app(
         except ThreadScopeError:
             raise HTTPException(status_code=404, detail="thread not found")
         except ThreadNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="thread not found") from exc
+        return _thread_response(runtime, record)
+
+    @app.post(
+        "/agent/threads/{thread_id}/restore", response_model=ThreadResponse,
+        dependencies=[Depends(require_internal_agent_token)],
+    )
+    async def restore_thread(
+        thread_id: str,
+        owner_id: str = Query(alias="ownerId"),
+        scope_type: str | None = Query(default=None, alias="scopeType"),
+        scope_id: str | int | None = Query(default=None, alias="scopeId"),
+    ) -> ThreadResponse:
+        try:
+            repository.restore_thread(thread_id, owner_id, scope_type, scope_id)
+            record = repository.get_thread(thread_id, owner_id, scope_type, scope_id)
+        except (ThreadNotFoundError, ThreadScopeError) as exc:
             raise HTTPException(status_code=404, detail="thread not found") from exc
         return _thread_response(runtime, record)
 
