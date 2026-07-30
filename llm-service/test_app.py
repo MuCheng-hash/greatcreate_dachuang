@@ -258,6 +258,40 @@ def test_conversation_history_is_filtered_restored_isolated_and_archived(tmp_pat
             f"/agent/threads/{newer.thread_id}/archive",
             params={"ownerId": "school-user:1", "scopeType": "SCHOOL", "scopeId": 1},
         )
+        archived_history = client.get(
+            "/agent/threads",
+            params={
+                "ownerId": "school-user:1",
+                "taskType": "CHAT",
+                "scopeType": "SCHOOL",
+                "scopeId": 1,
+                "status": "archived",
+            },
+        )
+        archived_detail = client.get(
+            f"/agent/threads/{newer.thread_id}",
+            params={"ownerId": "school-user:1", "scopeType": "SCHOOL", "scopeId": 1},
+        )
+        archived_message = client.post(
+            "/agent/messages",
+            json=message_payload(threadId=newer.thread_id, message="归档后不应继续追问"),
+        )
+        cross_scope_detail = client.get(
+            f"/agent/threads/{newer.thread_id}",
+            params={"ownerId": "school-user:1", "scopeType": "SCHOOL", "scopeId": 2},
+        )
+        cross_scope_restore = client.post(
+            f"/agent/threads/{newer.thread_id}/restore",
+            params={"ownerId": "school-user:1", "scopeType": "SCHOOL", "scopeId": 2},
+        )
+        restored = client.post(
+            f"/agent/threads/{newer.thread_id}/restore",
+            params={"ownerId": "school-user:1", "scopeType": "SCHOOL", "scopeId": 1},
+        )
+        continued = client.post(
+            "/agent/messages",
+            json=message_payload(threadId=newer.thread_id, message="恢复后继续追问"),
+        )
         after_archive = client.get(
             "/agent/threads",
             params={"ownerId": "school-user:1", "taskType": "CHAT", "scopeType": "SCHOOL", "scopeId": 1},
@@ -271,7 +305,18 @@ def test_conversation_history_is_filtered_restored_isolated_and_archived(tmp_pat
     assert [message["role"] for message in detail.json()["messages"]] == ["user", "assistant"]
     assert forbidden.status_code == 404
     assert archived.status_code == 200
-    assert [item["threadId"] for item in after_archive.json()] == [older.thread_id]
+    assert archived_history.status_code == 200
+    assert [item["threadId"] for item in archived_history.json()] == [newer.thread_id]
+    assert archived_detail.status_code == 200
+    assert archived_detail.json()["status"] == "archived"
+    assert archived_message.status_code == 404
+    assert cross_scope_detail.status_code == 404
+    assert cross_scope_restore.status_code == 404
+    assert restored.status_code == 200
+    assert restored.json()["status"] == "active"
+    assert continued.status_code == 200
+    assert continued.json()["threadId"] == newer.thread_id
+    assert [item["threadId"] for item in after_archive.json()] == [newer.thread_id, older.thread_id]
 
 
 def test_new_thread_and_multiturn_persistence(tmp_path: Path):
