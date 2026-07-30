@@ -22,7 +22,8 @@ public class RedCultureGraphMapServiceImpl implements RedCultureGraphMapService 
     @Override
     public List<RedCultureSiteMarkerVO> listPublishedSites(String district) {
         String cypher = "MATCH (site:Location) "
-                + "WHERE site.published = true AND site.longitude IS NOT NULL AND site.latitude IS NOT NULL "
+                + "WHERE site.published = true AND coalesce(site.active, true) = true "
+                + "AND site.longitude IS NOT NULL AND site.latitude IS NOT NULL "
                 + "AND ($district = '' OR site.district = $district) "
                 + "RETURN site.id AS id, site.name AS name, site.category AS category, site.address AS address, "
                 + "site.district AS district, site.longitude AS longitude, site.latitude AS latitude, site.intro AS summary "
@@ -34,6 +35,7 @@ public class RedCultureGraphMapServiceImpl implements RedCultureGraphMapService 
     @Override
     public RedCultureSiteDetailVO getPublishedSite(String siteId) {
         String cypher = "MATCH (site:Location {id:$siteId, published:true}) "
+                + "WHERE coalesce(site.active, true) = true "
                 + "RETURN site.id AS id, site.name AS name, site.category AS category, site.address AS address, "
                 + "site.district AS district, site.historicalPeriod AS historicalPeriod, site.intro AS intro, "
                 + "site.teachingTags AS teachingTags, site.longitude AS longitude, site.latitude AS latitude";
@@ -46,10 +48,10 @@ public class RedCultureGraphMapServiceImpl implements RedCultureGraphMapService 
         detail.setDistrict(text(row.get("district"))); detail.setHistoricalPeriod(text(row.get("historicalPeriod")));
         detail.setIntro(text(row.get("intro"))); detail.setTeachingTags(text(row.get("teachingTags")));
         detail.setLongitude(decimal(row.get("longitude"))); detail.setLatitude(decimal(row.get("latitude")));
-        detail.setEvents(loadRelated("MATCH (e:Event)-[:OCCURRED_AT]->(:Location {id:$siteId}) RETURN DISTINCT e.id AS id, e.name AS name, e.intro AS summary, e.startTime AS extra ORDER BY name", siteId));
-        detail.setPeople(loadRelated("MATCH (p:Person)-[:PARTICIPATED_IN]->(e:Event)-[:OCCURRED_AT]->(:Location {id:$siteId}) RETURN DISTINCT p.id AS id, p.name AS name, p.intro AS summary, p.identity AS extra ORDER BY name", siteId));
-        detail.setThemes(loadRelated("MATCH (e:Event)-[:OCCURRED_AT]->(:Location {id:$siteId}) MATCH (e)-[:EMBODIES]->(t:IdeologyTheme) RETURN DISTINCT t.id AS id, t.name AS name, t.summary AS summary, t.category AS extra ORDER BY name", siteId));
-        detail.setTeachingResources(loadRelated("MATCH (r:TeachingResource) WHERE EXISTS { MATCH (r)-[:USES]->(:Location {id:$siteId}) } OR EXISTS { MATCH (r)-[:REFERENCES]->(:Event)-[:OCCURRED_AT]->(:Location {id:$siteId}) } RETURN DISTINCT r.id AS id, r.title AS name, r.objectives AS summary, r.resourceType AS extra ORDER BY name", siteId));
+        detail.setEvents(loadRelated("MATCH (e:Event)-[:OCCURRED_AT]->(:Location {id:$siteId, published:true}) WHERE coalesce(e.active, true) = true RETURN DISTINCT e.id AS id, e.name AS name, e.intro AS summary, e.startTime AS extra ORDER BY name", siteId));
+        detail.setPeople(loadRelated("MATCH (p:Person)-[:PARTICIPATED_IN]->(e:Event)-[:OCCURRED_AT]->(:Location {id:$siteId, published:true}) WHERE coalesce(p.active, true) = true AND coalesce(e.active, true) = true RETURN DISTINCT p.id AS id, p.name AS name, p.intro AS summary, p.identity AS extra ORDER BY name", siteId));
+        detail.setThemes(loadRelated("MATCH (e:Event)-[:OCCURRED_AT]->(:Location {id:$siteId, published:true}) MATCH (e)-[:EMBODIES]->(t:IdeologyTheme) WHERE coalesce(e.active, true) = true AND coalesce(t.active, true) = true RETURN DISTINCT t.id AS id, t.name AS name, t.summary AS summary, t.category AS extra ORDER BY name", siteId));
+        detail.setTeachingResources(loadRelated("MATCH (r:TeachingResource) WHERE coalesce(r.active, true) = true AND (EXISTS { MATCH (r)-[:USES]->(:Location {id:$siteId, published:true}) } OR EXISTS { MATCH (r)-[:REFERENCES]->(e:Event)-[:OCCURRED_AT]->(:Location {id:$siteId, published:true}) WHERE coalesce(e.active, true) = true }) RETURN DISTINCT r.id AS id, r.title AS name, r.objectives AS summary, r.resourceType AS extra ORDER BY name", siteId));
         detail.setSources(loadSources(siteId));
         return detail;
     }
@@ -65,6 +67,7 @@ public class RedCultureGraphMapServiceImpl implements RedCultureGraphMapService 
 
     private List<RedCultureSiteDetailVO.SourceItem> loadSources(String siteId) {
         String cypher = "MATCH (:Location {id:$siteId})-[:SUPPORTED_BY]->(s:Source) "
+                + "WHERE coalesce(s.active, true) = true "
                 + "RETURN DISTINCT s.id AS id, s.title AS title, s.publisher AS publisher, s.url AS url, s.trustLevel AS trustLevel ORDER BY title";
         return neo4jClient.query(cypher).bind(siteId).to("siteId").fetch().all().stream().map(row -> {
             RedCultureSiteDetailVO.SourceItem item = new RedCultureSiteDetailVO.SourceItem();

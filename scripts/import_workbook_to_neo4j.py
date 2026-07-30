@@ -12,7 +12,6 @@ import os
 from pathlib import Path
 from typing import Any
 
-from neo4j import GraphDatabase
 from openpyxl import load_workbook
 
 
@@ -26,6 +25,8 @@ SHEETS = {
 
 TYPE_LABEL = {"地点": "Location", "人物": "Person", "事件": "Event", "思政主题": "IdeologyTheme", "教学资源": "TeachingResource"}
 REL_TYPES = {"发生于/关联地点": "OCCURRED_AT", "参与/关联": "PARTICIPATED_IN", "体现": "EMBODIES", "引用": "REFERENCES", "使用": "USES"}
+APPROVED_REVIEW_STATUSES = {"已初核", "教学加工", "审核通过", "approved"}
+SOURCE_DATASET = "石家庄红色文化原型资源首批数据"
 
 
 def rows(ws) -> list[dict[str, Any]]:
@@ -46,12 +47,21 @@ def load_data(path: Path) -> dict[str, Any]:
     for sheet, (label, id_col, _, mapping) in SHEETS.items():
         for row in rows(wb[sheet]):
             node_id = str(row[id_col]).strip()
+            status_column = "状态" if label == "TeachingResource" else "审核状态"
+            if str(row.get(status_column, "")).strip() not in APPROVED_REVIEW_STATUSES:
+                continue
             if label == "Location":
                 rule = control.get(node_id)
                 if not rule or str(rule["导入Location"]).upper() != "YES" or rule["图谱状态"] == "EXCLUDED":
                     continue
             props = clean({target: row.get(source) for source, target in mapping.items()})
-            props.update({"id": node_id, "sourceDataset": "石家庄红色文化原型资源首批数据"})
+            props.update({
+                "id": node_id,
+                "active": True,
+                "sourceDataset": SOURCE_DATASET,
+                "sourceSystem": "workbook",
+                "canonicalId": f"workbook:{label}:{node_id}",
+            })
             if label == "Location":
                 props["publishStatus"] = control[node_id]["图谱状态"]
                 props["published"] = control[node_id]["图谱状态"] == "PUBLISHED"
@@ -66,6 +76,8 @@ def load_data(path: Path) -> dict[str, Any]:
 
     relations = []
     for row in rows(wb["知识图谱关系"]):
+        if str(row.get("审核状态", "")).strip() not in APPROVED_REVIEW_STATUSES:
+            continue
         start, end = str(row["起点ID"]).strip(), str(row["终点ID"]).strip()
         if start not in valid_ids or end not in valid_ids:
             continue
@@ -88,6 +100,18 @@ def import_data(driver, data: dict[str, Any]) -> None:
     with driver.session() as session:
         for cypher in constraints:
             session.run(cypher).consume()
+        # This workbook is a curated snapshot. Clear its previous derived projection
+        # so removed, excluded, or downgraded rows cannot remain publicly queryable.
+        session.run(
+            "MATCH ()-[r]->() WHERE r.id STARTS WITH 'REL' DELETE r"
+        ).consume()
+        session.run(
+            "MATCH (g:GraphRelation) WHERE g.id STARTS WITH 'REL' DETACH DELETE g"
+        ).consume()
+        session.run(
+            "MATCH (n {sourceDataset:$dataset}) SET n.active=false, n.published=false",
+            dataset=SOURCE_DATASET,
+        ).consume()
         for node in data["nodes"]:
             # Locations also carry :Site for compatibility with existing app queries;
             # people also carry :Hero for the same reason.
@@ -95,10 +119,16 @@ def import_data(driver, data: dict[str, Any]) -> None:
             set_clause = f"SET n{extra}, n += $props" if extra else "SET n += $props"
             session.run(f"MERGE (n:{node['label']} {{id: $id}}) {set_clause}", id=node["props"]["id"], props=node["props"]).consume()
         for props in data["sources"]:
+            props.update({
+                "active": True,
+                "sourceDataset": SOURCE_DATASET,
+                "sourceSystem": "workbook",
+                "canonicalId": f"workbook:Source:{props['id']}",
+            })
             session.run("MERGE (n:Source {id: $id}) SET n += $props", id=props["id"], props=props).consume()
         for rel in data["relations"]:
-            query = f"MATCH (a:{rel['startLabel']} {{id:$start}}), (b:{rel['endLabel']} {{id:$end}}) MERGE (a)-[r:{rel['relType']} {{id:$id}}]->(b) SET r.originalType=$originalType, r.reviewStatus=$reviewStatus, r.notes=$notes MERGE (g:GraphRelation {{id:$id}}) SET g.type=$relType, g.originalType=$originalType, g.reviewStatus=$reviewStatus MERGE (g)-[:FROM]->(a) MERGE (g)-[:TO]->(b)"
-            session.run(query, **rel).consume()
+            query = f"MATCH (a:{rel['startLabel']} {{id:$start, active:true}}), (b:{rel['endLabel']} {{id:$end, active:true}}) MERGE (a)-[r:{rel['relType']} {{id:$id}}]->(b) SET r.originalType=$originalType, r.reviewStatus=$reviewStatus, r.notes=$notes, r.sourceSystem='workbook' MERGE (g:GraphRelation {{id:$id}}) SET g.type=$relType, g.originalType=$originalType, g.reviewStatus=$reviewStatus, g.sourceSystem='workbook', g.sourceDataset=$dataset MERGE (g)-[:FROM]->(a) MERGE (g)-[:TO]->(b)"
+            session.run(query, dataset=SOURCE_DATASET, **rel).consume()
         session.run("UNWIND $rows AS row MATCH (e {id:row.entity}), (s:Source {id:row.source}) MERGE (e)-[r:SUPPORTED_BY]->(s) SET r.role=row.role, r.verification=row.verification", rows=data["entitySources"]).consume()
         session.run("UNWIND $rows AS row MATCH (g:GraphRelation {id:row.relation}), (s:Source {id:row.source}) MERGE (g)-[r:SUPPORTED_BY]->(s) SET r.notes=row.notes", rows=data["relationSources"]).consume()
 
@@ -125,6 +155,8 @@ def main() -> None:
     print({k: len(v) for k, v in data.items()})
     if args.dry_run:
         return
+    from neo4j import GraphDatabase
+
     uri = os.getenv("NEO4J_URI", "bolt://127.0.0.1:7687")
     user = os.getenv("NEO4J_USERNAME", "neo4j")
     password = os.getenv("NEO4J_PASSWORD", "12345678")

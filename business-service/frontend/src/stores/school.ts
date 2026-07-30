@@ -30,6 +30,39 @@ export interface RedCultureSiteMarker {
   summary?: string;
 }
 
+export interface RegionCenter {
+  longitude?: number | string;
+  latitude?: number | string;
+}
+
+export interface TownBoundary {
+  regionId: number;
+  parentRegionId?: number;
+  regionName: string;
+  regionLevel?: string;
+  adcode?: string;
+  boundaryGeoJson?: string;
+  boundaryStatus?: string;
+  center?: RegionCenter;
+}
+
+export interface TownMapDetail {
+  regionId: number;
+  regionName: string;
+  regionLevel?: string;
+  intro?: string;
+  boundaryGeoJson?: string;
+  boundaryStatus?: string;
+  center?: RegionCenter;
+  graphAvailable?: boolean;
+  graphStatusMessage?: string;
+  markers?: Array<Record<string, any>>;
+  heroes?: Array<Record<string, any>>;
+  stories?: Array<Record<string, any>>;
+  events?: Array<Record<string, any>>;
+  suggestedQuestions?: string[];
+}
+
 interface SchoolDetail {
   school: SchoolSummary;
   resources?: SchoolResourceRelation[];
@@ -43,6 +76,9 @@ interface SchoolState {
   error: string;
   redCultureSites: RedCultureSiteMarker[];
   redCultureError: string;
+  towns: TownBoundary[];
+  townDetail: TownMapDetail | null;
+  townError: string;
 }
 
 function messageOf(error: unknown, fallback: string): string {
@@ -52,7 +88,8 @@ function messageOf(error: unknown, fallback: string): string {
 export const useSchoolStore = defineStore("school", {
   state: (): SchoolState => ({
     detail: null, config: null, loading: false, error: "",
-    redCultureSites: [], redCultureError: ""
+    redCultureSites: [], redCultureError: "",
+    towns: [], townDetail: null, townError: ""
   }),
   getters: {
     school: (state): SchoolSummary | null => state.detail?.school || null,
@@ -72,6 +109,26 @@ export const useSchoolStore = defineStore("school", {
     },
     async loadRedCultureSite(siteId: string): Promise<Record<string, any>> {
       return api.get(`/api/map/red-culture/sites/${encodeURIComponent(siteId)}`);
+    },
+    async loadTowns(): Promise<TownBoundary[]> {
+      this.townError = "";
+      try {
+        this.towns = await api.get<TownBoundary[]>("/api/map/regions/boundaries?regionLevel=township&ancestorRegionId=1");
+        return this.towns;
+      } catch (error) {
+        this.townError = messageOf(error, "乡镇列表加载失败");
+        return [];
+      }
+    },
+    async loadTownDetail(regionId: number): Promise<TownMapDetail> {
+      this.townError = "";
+      try {
+        this.townDetail = await api.get<TownMapDetail>(`/api/map/towns/${encodeURIComponent(regionId)}`);
+        return this.townDetail;
+      } catch (error) {
+        this.townError = messageOf(error, "乡镇红色资源加载失败");
+        throw error;
+      }
     },
     async load(force = false): Promise<SchoolDetail | null> {
       const auth = useAuthStore();

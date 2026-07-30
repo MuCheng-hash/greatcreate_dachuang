@@ -45,35 +45,35 @@ NODE_SQL = {
     "sites": """
         SELECT site_id, site_code, site_name, site_alias, region_id, address,
                longitude, latitude, established_year, site_level, protection_level,
-               historical_background, intro, opening_time_desc, is_active
+               historical_background, intro, opening_time_desc, is_active,
+               review_status
         FROM red_site
-        WHERE review_status = 'approved' AND is_active = 1
     """,
     "heroes": """
         SELECT hero_id, hero_code, hero_name, hero_alias, gender, birth_year, death_year,
-               native_place_region_id, native_place_text, profile_summary, main_deeds, is_active
+               native_place_region_id, native_place_text, profile_summary, main_deeds, is_active,
+               review_status
         FROM hero_person
-        WHERE review_status = 'approved' AND is_active = 1
     """,
     "events": """
         SELECT event_id, event_code, event_name, event_alias, primary_region_id, event_time_text,
                start_date, end_date, start_year, end_year, longitude, latitude,
-               historical_significance, event_process, result_impact, is_active
+               historical_significance, event_process, result_impact, is_active,
+               review_status
         FROM historical_event
-        WHERE review_status = 'approved' AND is_active = 1
     """,
     "memorials": """
         SELECT memorial_id, memorial_code, memorial_name, region_id, address,
                longitude, latitude, exhibition_content, intro, opening_time_desc,
-               ticket_info, is_active
+               ticket_info, is_active,
+               review_status
         FROM memorial_hall
-        WHERE review_status = 'approved' AND is_active = 1
     """,
     "stories": """
         SELECT story_id, story_code, story_title, related_region_id, age_group,
-               summary, story_content, is_active
+               summary, story_content, is_active,
+               review_status
         FROM red_story
-        WHERE review_status = 'approved' AND is_active = 1
     """,
     "tags": """
         SELECT tag_id, tag_name, tag_type, description
@@ -84,25 +84,25 @@ NODE_SQL = {
                county_region_id, township_region_id, village_region_id,
                school_level, school_type, school_nature, is_rural_school,
                is_teaching_point, address, longitude, latitude, geo_confidence,
-               geo_verified, intro, is_active
+               geo_verified, intro, is_active,
+               review_status
         FROM school
-        WHERE review_status = 'approved' AND is_active = 1
     """,
     "local_resources": """
         SELECT resource_id, resource_code, resource_name, resource_alias,
                resource_category, resource_subcategory, region_id,
                county_region_id, township_region_id, address, longitude, latitude,
                organization_name, opening_time_desc, intro, education_value,
-               activity_suggestion, target_grade, safety_note, is_active
+               activity_suggestion, target_grade, safety_note, is_active,
+               review_status
         FROM local_edu_resource
-        WHERE review_status = 'approved' AND is_active = 1
     """,
     "activity_plans": """
         SELECT plan_id, plan_code, school_id, resource_id, theme, activity_type,
                suitable_grade, objective_text, activity_content, preparation_text,
-               safety_text, expected_outcome, duration_minutes, is_active
+               safety_text, expected_outcome, duration_minutes, is_active,
+               review_status
         FROM teaching_activity_plan
-        WHERE review_status = 'approved' AND is_active = 1
     """,
 }
 
@@ -206,6 +206,25 @@ CREATE_CONSTRAINTS = [
     "CREATE CONSTRAINT school_id_unique IF NOT EXISTS FOR (n:School) REQUIRE n.id IS UNIQUE",
     "CREATE CONSTRAINT local_resource_id_unique IF NOT EXISTS FOR (n:LocalEduResource) REQUIRE n.id IS UNIQUE",
     "CREATE CONSTRAINT activity_plan_id_unique IF NOT EXISTS FOR (n:ActivityPlan) REQUIRE n.id IS UNIQUE",
+    "CREATE CONSTRAINT year_value_unique IF NOT EXISTS FOR (n:Year) REQUIRE n.value IS UNIQUE",
+    "CREATE CONSTRAINT time_period_code_unique IF NOT EXISTS FOR (n:TimePeriod) REQUIRE n.code IS UNIQUE",
+]
+
+MYSQL_RELATION_TYPES = [
+    "HAS_CHILD_REGION", "LOCATED_IN", "NATIVE_TO", "HAPPENED_IN", "RELATED_TO_REGION",
+    "OCCURRED_AT", "RELATED_TO", "MEMORIALIZED_AT", "BORN_IN", "FOUGHT_IN", "VISITED",
+    "PARTICIPATED_IN", "LED", "WITNESSED", "MARTYR_IN", "LOCATED_AT", "DISPLAYS",
+    "COMMEMORATES", "EXHIBITS", "ABOUT", "MENTIONS", "TEACHES", "HAS_TAG",
+    "SCHOOL_NEAR_RESOURCE", "HAS_ACTIVITY_PLAN", "RESOURCE_SUPPORTS_ACTIVITY",
+    "HAPPENED_IN_YEAR", "STARTED_IN_YEAR", "ENDED_IN_YEAR", "HAPPENED_DURING",
+    "BORN_IN_YEAR", "DIED_IN_YEAR", "ESTABLISHED_IN_YEAR",
+]
+
+TIME_PERIODS = [
+    {"code": "land_revolution", "name": "土地革命战争时期", "startYear": 1927, "endYear": 1937},
+    {"code": "war_of_resistance", "name": "全民族抗日战争时期", "startYear": 1937, "endYear": 1945},
+    {"code": "liberation_war", "name": "解放战争时期", "startYear": 1945, "endYear": 1949},
+    {"code": "early_prc", "name": "社会主义革命和建设初期", "startYear": 1949, "endYear": 1956},
 ]
 
 
@@ -247,6 +266,16 @@ def to_iso_date(value: Any) -> str | None:
     return value.isoformat()
 
 
+def prepare_reviewed_nodes(
+    rows: list[dict[str, Any]], entity_type: str, id_key: str
+) -> list[dict[str, Any]]:
+    """Keep rejected/disabled rows in the projection, but make them unqueryable."""
+    for row in rows:
+        row["graph_active"] = bool(row.get("is_active")) and row.get("review_status") == "approved"
+        row["canonical_id"] = f"mysql:{entity_type}:{row[id_key]}"
+    return rows
+
+
 def execute_write(tx, cypher: str, rows: list[dict[str, Any]]) -> None:
     for row in rows:
         tx.run(cypher, **row)
@@ -258,6 +287,25 @@ def create_constraints(driver) -> None:
             session.run(cypher)
 
 
+def clear_mysql_relationships(driver) -> None:
+    """Rebuild the derived MySQL projection so removed or revoked links cannot linger."""
+    cypher = """
+    MATCH (a)-[r]->(b)
+    WHERE type(r) IN $relation_types
+      AND (a.sourceSystem = 'mysql' OR b.sourceSystem = 'mysql')
+    DELETE r
+    """
+    with driver.session() as session:
+        session.run(cypher, relation_types=MYSQL_RELATION_TYPES).consume()
+
+
+def require_relation_type(mapping: dict[str, str], raw_type: str, family: str) -> str:
+    try:
+        return mapping[raw_type]
+    except KeyError as exc:
+        raise ValueError(f"Unsupported {family} relation type: {raw_type!r}") from exc
+
+
 def sync_regions(mysql_conn, neo4j_driver, stats: SyncStats) -> None:
     rows = fetch_rows(mysql_conn, NODE_SQL["regions"])
     cypher = """
@@ -267,7 +315,10 @@ def sync_regions(mysql_conn, neo4j_driver, stats: SyncStats) -> None:
         r.adcode = $adcode,
         r.longitude = $center_longitude,
         r.latitude = $center_latitude,
-        r.intro = $intro
+        r.intro = $intro,
+        r.active = true,
+        r.sourceSystem = 'mysql',
+        r.canonicalId = 'mysql:Region:' + toString($region_id)
     """
     with neo4j_driver.session() as session:
         session.execute_write(execute_write, cypher, rows)
@@ -275,7 +326,7 @@ def sync_regions(mysql_conn, neo4j_driver, stats: SyncStats) -> None:
 
 
 def sync_sites(mysql_conn, neo4j_driver, stats: SyncStats) -> None:
-    rows = fetch_rows(mysql_conn, NODE_SQL["sites"])
+    rows = prepare_reviewed_nodes(fetch_rows(mysql_conn, NODE_SQL["sites"]), "Site", "site_id")
     cypher = """
     MERGE (s:Site {id: $site_id})
     SET s.code = $site_code,
@@ -290,7 +341,9 @@ def sync_sites(mysql_conn, neo4j_driver, stats: SyncStats) -> None:
         s.historicalBackground = $historical_background,
         s.intro = $intro,
         s.openingTime = $opening_time_desc,
-        s.active = $is_active
+        s.active = $graph_active,
+        s.sourceSystem = 'mysql',
+        s.canonicalId = $canonical_id
     """
     with neo4j_driver.session() as session:
         session.execute_write(execute_write, cypher, rows)
@@ -298,7 +351,7 @@ def sync_sites(mysql_conn, neo4j_driver, stats: SyncStats) -> None:
 
 
 def sync_heroes(mysql_conn, neo4j_driver, stats: SyncStats) -> None:
-    rows = fetch_rows(mysql_conn, NODE_SQL["heroes"])
+    rows = prepare_reviewed_nodes(fetch_rows(mysql_conn, NODE_SQL["heroes"]), "Hero", "hero_id")
     cypher = """
     MERGE (h:Hero {id: $hero_id})
     SET h.code = $hero_code,
@@ -310,7 +363,9 @@ def sync_heroes(mysql_conn, neo4j_driver, stats: SyncStats) -> None:
         h.nativePlace = $native_place_text,
         h.profileSummary = $profile_summary,
         h.mainDeeds = $main_deeds,
-        h.active = $is_active
+        h.active = $graph_active,
+        h.sourceSystem = 'mysql',
+        h.canonicalId = $canonical_id
     """
     with neo4j_driver.session() as session:
         session.execute_write(execute_write, cypher, rows)
@@ -318,7 +373,7 @@ def sync_heroes(mysql_conn, neo4j_driver, stats: SyncStats) -> None:
 
 
 def sync_events(mysql_conn, neo4j_driver, stats: SyncStats) -> None:
-    rows = fetch_rows(mysql_conn, NODE_SQL["events"])
+    rows = prepare_reviewed_nodes(fetch_rows(mysql_conn, NODE_SQL["events"]), "Event", "event_id")
     for row in rows:
         row["start_date"] = to_iso_date(row["start_date"])
         row["end_date"] = to_iso_date(row["end_date"])
@@ -337,7 +392,9 @@ def sync_events(mysql_conn, neo4j_driver, stats: SyncStats) -> None:
         e.significance = $historical_significance,
         e.process = $event_process,
         e.impact = $result_impact,
-        e.active = $is_active
+        e.active = $graph_active,
+        e.sourceSystem = 'mysql',
+        e.canonicalId = $canonical_id
     """
     with neo4j_driver.session() as session:
         session.execute_write(execute_write, cypher, rows)
@@ -345,7 +402,7 @@ def sync_events(mysql_conn, neo4j_driver, stats: SyncStats) -> None:
 
 
 def sync_memorials(mysql_conn, neo4j_driver, stats: SyncStats) -> None:
-    rows = fetch_rows(mysql_conn, NODE_SQL["memorials"])
+    rows = prepare_reviewed_nodes(fetch_rows(mysql_conn, NODE_SQL["memorials"]), "Memorial", "memorial_id")
     cypher = """
     MERGE (m:Memorial {id: $memorial_id})
     SET m.code = $memorial_code,
@@ -357,7 +414,9 @@ def sync_memorials(mysql_conn, neo4j_driver, stats: SyncStats) -> None:
         m.intro = $intro,
         m.openingTime = $opening_time_desc,
         m.ticketInfo = $ticket_info,
-        m.active = $is_active
+        m.active = $graph_active,
+        m.sourceSystem = 'mysql',
+        m.canonicalId = $canonical_id
     """
     with neo4j_driver.session() as session:
         session.execute_write(execute_write, cypher, rows)
@@ -365,7 +424,7 @@ def sync_memorials(mysql_conn, neo4j_driver, stats: SyncStats) -> None:
 
 
 def sync_stories(mysql_conn, neo4j_driver, stats: SyncStats) -> None:
-    rows = fetch_rows(mysql_conn, NODE_SQL["stories"])
+    rows = prepare_reviewed_nodes(fetch_rows(mysql_conn, NODE_SQL["stories"]), "Story", "story_id")
     cypher = """
     MERGE (s:Story {id: $story_id})
     SET s.code = $story_code,
@@ -373,7 +432,9 @@ def sync_stories(mysql_conn, neo4j_driver, stats: SyncStats) -> None:
         s.ageGroup = $age_group,
         s.summary = $summary,
         s.content = $story_content,
-        s.active = $is_active
+        s.active = $graph_active,
+        s.sourceSystem = 'mysql',
+        s.canonicalId = $canonical_id
     """
     with neo4j_driver.session() as session:
         session.execute_write(execute_write, cypher, rows)
@@ -386,7 +447,10 @@ def sync_tags(mysql_conn, neo4j_driver, stats: SyncStats) -> None:
     MERGE (t:Tag {id: $tag_id})
     SET t.name = $tag_name,
         t.type = $tag_type,
-        t.description = $description
+        t.description = $description,
+        t.active = true,
+        t.sourceSystem = 'mysql',
+        t.canonicalId = 'mysql:Tag:' + toString($tag_id)
     """
     with neo4j_driver.session() as session:
         session.execute_write(execute_write, cypher, rows)
@@ -394,7 +458,7 @@ def sync_tags(mysql_conn, neo4j_driver, stats: SyncStats) -> None:
 
 
 def sync_schools(mysql_conn, neo4j_driver, stats: SyncStats) -> None:
-    rows = fetch_rows(mysql_conn, NODE_SQL["schools"])
+    rows = prepare_reviewed_nodes(fetch_rows(mysql_conn, NODE_SQL["schools"]), "School", "school_id")
     cypher = """
     MERGE (s:School {id: $school_id})
     SET s.code = $school_code,
@@ -411,7 +475,9 @@ def sync_schools(mysql_conn, neo4j_driver, stats: SyncStats) -> None:
         s.geoConfidence = $geo_confidence,
         s.geoVerified = $geo_verified,
         s.intro = $intro,
-        s.active = $is_active
+        s.active = $graph_active,
+        s.sourceSystem = 'mysql',
+        s.canonicalId = $canonical_id
     """
     with neo4j_driver.session() as session:
         session.execute_write(execute_write, cypher, rows)
@@ -419,7 +485,7 @@ def sync_schools(mysql_conn, neo4j_driver, stats: SyncStats) -> None:
 
 
 def sync_local_resources(mysql_conn, neo4j_driver, stats: SyncStats) -> None:
-    rows = fetch_rows(mysql_conn, NODE_SQL["local_resources"])
+    rows = prepare_reviewed_nodes(fetch_rows(mysql_conn, NODE_SQL["local_resources"]), "LocalEduResource", "resource_id")
     cypher = """
     MERGE (r:LocalEduResource {id: $resource_id})
     SET r.code = $resource_code,
@@ -437,7 +503,9 @@ def sync_local_resources(mysql_conn, neo4j_driver, stats: SyncStats) -> None:
         r.activitySuggestion = $activity_suggestion,
         r.targetGrade = $target_grade,
         r.safetyNote = $safety_note,
-        r.active = $is_active
+        r.active = $graph_active,
+        r.sourceSystem = 'mysql',
+        r.canonicalId = $canonical_id
     """
     with neo4j_driver.session() as session:
         session.execute_write(execute_write, cypher, rows)
@@ -445,7 +513,7 @@ def sync_local_resources(mysql_conn, neo4j_driver, stats: SyncStats) -> None:
 
 
 def sync_activity_plans(mysql_conn, neo4j_driver, stats: SyncStats) -> None:
-    rows = fetch_rows(mysql_conn, NODE_SQL["activity_plans"])
+    rows = prepare_reviewed_nodes(fetch_rows(mysql_conn, NODE_SQL["activity_plans"]), "ActivityPlan", "plan_id")
     cypher = """
     MERGE (a:ActivityPlan {id: $plan_id})
     SET a.code = $plan_code,
@@ -458,7 +526,9 @@ def sync_activity_plans(mysql_conn, neo4j_driver, stats: SyncStats) -> None:
         a.safetyText = $safety_text,
         a.expectedOutcome = $expected_outcome,
         a.durationMinutes = $duration_minutes,
-        a.active = $is_active
+        a.active = $graph_active,
+        a.sourceSystem = 'mysql',
+        a.canonicalId = $canonical_id
     """
     with neo4j_driver.session() as session:
         session.execute_write(execute_write, cypher, rows)
@@ -468,8 +538,8 @@ def sync_activity_plans(mysql_conn, neo4j_driver, stats: SyncStats) -> None:
 def sync_region_parent_relations(mysql_conn, neo4j_driver, stats: SyncStats) -> None:
     rows = fetch_rows(mysql_conn, RELATION_SQL["region_parent"])
     cypher = """
-    MATCH (child:Region {id: $region_id})
-    MATCH (parent:Region {id: $parent_region_id})
+    MATCH (child:Region {id: $region_id, active: true})
+    MATCH (parent:Region {id: $parent_region_id, active: true})
     MERGE (parent)-[:HAS_CHILD_REGION]->(child)
     """
     with neo4j_driver.session() as session:
@@ -491,8 +561,8 @@ def sync_entity_region_relations(mysql_conn, neo4j_driver, stats: SyncStats) -> 
         for sql_key, label, entity_id_key, region_id_key, relation_name in mapping:
             rows = fetch_rows(mysql_conn, RELATION_SQL[sql_key])
             cypher = f"""
-            MATCH (a:{label} {{id: ${entity_id_key}}})
-            MATCH (r:Region {{id: ${region_id_key}}})
+            MATCH (a:{label} {{id: ${entity_id_key}, active: true}})
+            MATCH (r:Region {{id: ${region_id_key}, active: true}})
             MERGE (a)-[:{relation_name}]->(r)
             """
             session.execute_write(execute_write, cypher, rows)
@@ -508,10 +578,10 @@ def sync_site_event_relations(mysql_conn, neo4j_driver, stats: SyncStats) -> Non
     }
     with neo4j_driver.session() as session:
         for row in rows:
-            relation_name = type_mapping.get(row["relation_type"], "RELATED_TO")
+            relation_name = require_relation_type(type_mapping, row["relation_type"], "site-event")
             cypher = f"""
-            MATCH (e:Event {{id: $event_id}})
-            MATCH (s:Site {{id: $site_id}})
+            MATCH (e:Event {{id: $event_id, active: true}})
+            MATCH (s:Site {{id: $site_id, active: true}})
             MERGE (e)-[r:{relation_name}]->(s)
             SET r.importanceLevel = $importance_level,
                 r.remark = $remark
@@ -531,10 +601,10 @@ def sync_site_hero_relations(mysql_conn, neo4j_driver, stats: SyncStats) -> None
     }
     with neo4j_driver.session() as session:
         for row in rows:
-            relation_name = type_mapping.get(row["relation_type"], "RELATED_TO")
+            relation_name = require_relation_type(type_mapping, row["relation_type"], "site-hero")
             cypher = f"""
-            MATCH (h:Hero {{id: $hero_id}})
-            MATCH (s:Site {{id: $site_id}})
+            MATCH (h:Hero {{id: $hero_id, active: true}})
+            MATCH (s:Site {{id: $site_id, active: true}})
             MERGE (h)-[r:{relation_name}]->(s)
             SET r.importanceLevel = $importance_level,
                 r.remark = $remark
@@ -554,10 +624,10 @@ def sync_event_hero_relations(mysql_conn, neo4j_driver, stats: SyncStats) -> Non
     }
     with neo4j_driver.session() as session:
         for row in rows:
-            relation_name = type_mapping.get(row["relation_type"], "RELATED_TO")
+            relation_name = require_relation_type(type_mapping, row["relation_type"], "event-hero")
             cypher = f"""
-            MATCH (h:Hero {{id: $hero_id}})
-            MATCH (e:Event {{id: $event_id}})
+            MATCH (h:Hero {{id: $hero_id, active: true}})
+            MATCH (e:Event {{id: $event_id, active: true}})
             MERGE (h)-[r:{relation_name}]->(e)
             SET r.contributionText = $contribution_text
             """
@@ -574,10 +644,10 @@ def sync_memorial_site_relations(mysql_conn, neo4j_driver, stats: SyncStats) -> 
     }
     with neo4j_driver.session() as session:
         for row in rows:
-            relation_name = type_mapping.get(row["relation_type"], "RELATED_TO")
+            relation_name = require_relation_type(type_mapping, row["relation_type"], "memorial-site")
             cypher = f"""
-            MATCH (m:Memorial {{id: $memorial_id}})
-            MATCH (s:Site {{id: $site_id}})
+            MATCH (m:Memorial {{id: $memorial_id, active: true}})
+            MATCH (s:Site {{id: $site_id, active: true}})
             MERGE (m)-[:{relation_name}]->(s)
             """
             session.run(cypher, **row)
@@ -593,10 +663,10 @@ def sync_memorial_hero_relations(mysql_conn, neo4j_driver, stats: SyncStats) -> 
     }
     with neo4j_driver.session() as session:
         for row in rows:
-            relation_name = type_mapping.get(row["relation_type"], "RELATED_TO")
+            relation_name = require_relation_type(type_mapping, row["relation_type"], "memorial-hero")
             cypher = f"""
-            MATCH (m:Memorial {{id: $memorial_id}})
-            MATCH (h:Hero {{id: $hero_id}})
+            MATCH (m:Memorial {{id: $memorial_id, active: true}})
+            MATCH (h:Hero {{id: $hero_id, active: true}})
             MERGE (m)-[:{relation_name}]->(h)
             """
             session.run(cypher, **row)
@@ -612,10 +682,10 @@ def sync_memorial_event_relations(mysql_conn, neo4j_driver, stats: SyncStats) ->
     }
     with neo4j_driver.session() as session:
         for row in rows:
-            relation_name = type_mapping.get(row["relation_type"], "RELATED_TO")
+            relation_name = require_relation_type(type_mapping, row["relation_type"], "memorial-event")
             cypher = f"""
-            MATCH (m:Memorial {{id: $memorial_id}})
-            MATCH (e:Event {{id: $event_id}})
+            MATCH (m:Memorial {{id: $memorial_id, active: true}})
+            MATCH (e:Event {{id: $event_id, active: true}})
             MERGE (m)-[:{relation_name}]->(e)
             """
             session.run(cypher, **row)
@@ -638,12 +708,12 @@ def sync_story_entity_relations(mysql_conn, neo4j_driver, stats: SyncStats) -> N
     with neo4j_driver.session() as session:
         for row in rows:
             label = entity_label_mapping.get(row["entity_type"])
-            relation_name = relation_mapping.get(row["relation_type"], "ABOUT")
+            relation_name = require_relation_type(relation_mapping, row["relation_type"], "story-entity")
             if not label:
                 continue
             cypher = f"""
-            MATCH (s:Story {{id: $story_id}})
-            MATCH (e:{label} {{id: $entity_id}})
+            MATCH (s:Story {{id: $story_id, active: true}})
+            MATCH (e:{label} {{id: $entity_id, active: true}})
             MERGE (s)-[:{relation_name}]->(e)
             """
             session.run(cypher, **row)
@@ -668,8 +738,8 @@ def sync_entity_tag_relations(mysql_conn, neo4j_driver, stats: SyncStats) -> Non
             if not label:
                 continue
             cypher = f"""
-            MATCH (e:{label} {{id: $entity_id}})
-            MATCH (t:Tag {{id: $tag_id}})
+            MATCH (e:{label} {{id: $entity_id, active: true}})
+            MATCH (t:Tag {{id: $tag_id, active: true}})
             MERGE (e)-[:HAS_TAG]->(t)
             """
             session.run(cypher, **row)
@@ -681,8 +751,8 @@ def sync_school_resource_relations(mysql_conn, neo4j_driver, stats: SyncStats) -
     with neo4j_driver.session() as session:
         for row in rows:
             cypher = """
-            MATCH (s:School {id: $school_id})
-            MATCH (r:LocalEduResource {id: $resource_id})
+            MATCH (s:School {id: $school_id, active: true})
+            MATCH (r:LocalEduResource {id: $resource_id, active: true})
             MERGE (s)-[rel:SCHOOL_NEAR_RESOURCE]->(r)
             SET rel.relationType = $relation_type,
                 rel.distanceMeters = $distance_meters,
@@ -701,8 +771,8 @@ def sync_activity_plan_relations(mysql_conn, neo4j_driver, stats: SyncStats) -> 
     with neo4j_driver.session() as session:
         for row in plan_rows:
             cypher = """
-            MATCH (s:School {id: $school_id})
-            MATCH (a:ActivityPlan {id: $plan_id})
+            MATCH (s:School {id: $school_id, active: true})
+            MATCH (a:ActivityPlan {id: $plan_id, active: true})
             MERGE (s)-[:HAS_ACTIVITY_PLAN]->(a)
             """
             session.run(cypher, **row)
@@ -712,12 +782,127 @@ def sync_activity_plan_relations(mysql_conn, neo4j_driver, stats: SyncStats) -> 
     with neo4j_driver.session() as session:
         for row in resource_rows:
             cypher = """
-            MATCH (a:ActivityPlan {id: $plan_id})
-            MATCH (r:LocalEduResource {id: $resource_id})
+            MATCH (a:ActivityPlan {id: $plan_id, active: true})
+            MATCH (r:LocalEduResource {id: $resource_id, active: true})
             MERGE (r)-[:RESOURCE_SUPPORTS_ACTIVITY]->(a)
             """
             session.run(cypher, **row)
     stats.relations += len(resource_rows)
+
+
+def sync_time_dimension_relations(neo4j_driver, stats: SyncStats) -> None:
+    """Create first-class time nodes and connect reviewed graph entities to them."""
+    cyphers = [
+        (
+            """
+            UNWIND $periods AS period
+            MERGE (p:TimePeriod {code: period.code})
+            SET p.name = period.name,
+                p.startYear = period.startYear,
+                p.endYear = period.endYear,
+                p.active = true,
+                p.sourceSystem = 'system',
+                p.canonicalId = 'system:TimePeriod:' + period.code
+            """,
+            {"periods": TIME_PERIODS},
+        ),
+        (
+            """
+            MATCH (e:Event {sourceSystem: 'mysql', active: true})
+            WHERE e.startYear IS NOT NULL
+            WITH e, toInteger(e.startYear) AS startYear,
+                 toInteger(coalesce(e.endYear, e.startYear)) AS rawEndYear
+            WITH e, startYear,
+                 CASE WHEN rawEndYear < startYear THEN startYear ELSE rawEndYear END AS endYear
+            WHERE endYear - startYear <= 20
+            UNWIND range(startYear, endYear) AS yearValue
+            MERGE (y:Year {value: yearValue})
+            SET y.active = true,
+                y.sourceSystem = 'system',
+                y.canonicalId = 'system:Year:' + toString(yearValue)
+            MERGE (e)-[:HAPPENED_IN_YEAR]->(y)
+            """,
+            {},
+        ),
+        (
+            """
+            MATCH (e:Event {sourceSystem: 'mysql', active: true})
+            WHERE e.startYear IS NOT NULL
+            MERGE (y:Year {value: toInteger(e.startYear)})
+            SET y.active = true,
+                y.sourceSystem = 'system',
+                y.canonicalId = 'system:Year:' + toString(toInteger(e.startYear))
+            MERGE (e)-[:STARTED_IN_YEAR]->(y)
+            """,
+            {},
+        ),
+        (
+            """
+            MATCH (e:Event {sourceSystem: 'mysql', active: true})
+            WHERE e.endYear IS NOT NULL
+            MERGE (y:Year {value: toInteger(e.endYear)})
+            SET y.active = true,
+                y.sourceSystem = 'system',
+                y.canonicalId = 'system:Year:' + toString(toInteger(e.endYear))
+            MERGE (e)-[:ENDED_IN_YEAR]->(y)
+            """,
+            {},
+        ),
+        (
+            """
+            MATCH (e:Event {sourceSystem: 'mysql', active: true})
+            WHERE e.startYear IS NOT NULL
+            WITH e, toInteger(e.startYear) AS startYear,
+                 toInteger(coalesce(e.endYear, e.startYear)) AS rawEndYear
+            WITH e, startYear,
+                 CASE WHEN rawEndYear < startYear THEN startYear ELSE rawEndYear END AS endYear
+            MATCH (p:TimePeriod {active: true})
+            WHERE startYear <= p.endYear AND endYear >= p.startYear
+            MERGE (e)-[:HAPPENED_DURING]->(p)
+            """,
+            {},
+        ),
+        (
+            """
+            MATCH (h:Hero {sourceSystem: 'mysql', active: true})
+            WHERE h.birthYear IS NOT NULL
+            MERGE (y:Year {value: toInteger(h.birthYear)})
+            SET y.active = true,
+                y.sourceSystem = 'system',
+                y.canonicalId = 'system:Year:' + toString(toInteger(h.birthYear))
+            MERGE (h)-[:BORN_IN_YEAR]->(y)
+            """,
+            {},
+        ),
+        (
+            """
+            MATCH (h:Hero {sourceSystem: 'mysql', active: true})
+            WHERE h.deathYear IS NOT NULL
+            MERGE (y:Year {value: toInteger(h.deathYear)})
+            SET y.active = true,
+                y.sourceSystem = 'system',
+                y.canonicalId = 'system:Year:' + toString(toInteger(h.deathYear))
+            MERGE (h)-[:DIED_IN_YEAR]->(y)
+            """,
+            {},
+        ),
+        (
+            """
+            MATCH (s:Site {sourceSystem: 'mysql', active: true})
+            WHERE s.establishedYear IS NOT NULL
+            MERGE (y:Year {value: toInteger(s.establishedYear)})
+            SET y.active = true,
+                y.sourceSystem = 'system',
+                y.canonicalId = 'system:Year:' + toString(toInteger(s.establishedYear))
+            MERGE (s)-[:ESTABLISHED_IN_YEAR]->(y)
+            """,
+            {},
+        ),
+    ]
+    with neo4j_driver.session() as session:
+        for cypher, parameters in cyphers:
+            summary = session.run(cypher, **parameters).consume()
+            stats.relations += summary.counters.relationships_created
 
 
 def main() -> None:
@@ -745,6 +930,7 @@ def main() -> None:
         sync_activity_plans(mysql_conn, neo4j_driver, stats)
 
         print("Syncing relations...")
+        clear_mysql_relationships(neo4j_driver)
         sync_region_parent_relations(mysql_conn, neo4j_driver, stats)
         sync_entity_region_relations(mysql_conn, neo4j_driver, stats)
         sync_site_event_relations(mysql_conn, neo4j_driver, stats)
@@ -757,6 +943,7 @@ def main() -> None:
         sync_entity_tag_relations(mysql_conn, neo4j_driver, stats)
         sync_school_resource_relations(mysql_conn, neo4j_driver, stats)
         sync_activity_plan_relations(mysql_conn, neo4j_driver, stats)
+        sync_time_dimension_relations(neo4j_driver, stats)
 
         print("Sync completed.")
         print(f"Regions: {stats.regions}")

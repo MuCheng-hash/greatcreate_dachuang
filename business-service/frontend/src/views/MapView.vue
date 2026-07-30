@@ -14,20 +14,21 @@ const drawerOpen = ref(true);
 const selected = ref(null);
 const detailLoading = ref(false);
 const mapStatus = ref("正在准备地图");
-const layers = reactive({ resources: true, redCulture: true, connections: true });
+const layers = reactive({ resources: true, redCulture: true, towns: true, connections: true });
 let map;
 let AMapRef;
 let overlays = [];
 
 const selectedTitle = computed(() => {
   if (selected.value?.kind === "school") return schoolStore.school?.schoolName;
+  if (selected.value?.kind === "town") return selected.value?.detail?.regionName || selected.value?.item?.regionName;
   if (selected.value?.kind === "redCulture") return selected.value?.detail?.name || selected.value?.item?.name;
   return selected.value?.detail?.resourceName || selected.value?.item?.resource?.resourceName || "资源详情";
 });
 
 onMounted(async () => {
   try {
-    await Promise.all([schoolStore.load(), schoolStore.loadConfig(), schoolStore.loadRedCultureSites()]);
+    await Promise.all([schoolStore.load(), schoolStore.loadConfig(), schoolStore.loadRedCultureSites(), schoolStore.loadTowns()]);
     selected.value = { kind: "school" };
     await nextTick();
     AMapRef = await loadAmap(schoolStore.config);
@@ -41,7 +42,7 @@ onBeforeUnmount(() => {
   map?.destroy();
 });
 
-watch(() => [layers.resources, layers.redCulture, layers.connections], renderOverlays);
+watch(() => [layers.resources, layers.redCulture, layers.towns, layers.connections], renderOverlays);
 
 function initializeMap() {
   const school = schoolStore.school;
@@ -69,6 +70,7 @@ function renderOverlays() {
   clearOverlays();
   const school = schoolStore.school;
   const schoolPoint = [Number(school.longitude), Number(school.latitude)];
+  const fitTargets = [];
   const schoolMarker = new AMapRef.Marker({
     position: schoolPoint,
     content: '<span class="map-pin map-pin-school">校</span>',
@@ -76,6 +78,7 @@ function renderOverlays() {
   });
   schoolMarker.on("click", () => { selected.value = { kind: "school" }; drawerOpen.value = true; });
   overlays.push(schoolMarker);
+  fitTargets.push(schoolMarker);
 
   if (layers.resources) {
     schoolStore.resources.forEach((item) => {
@@ -89,6 +92,7 @@ function renderOverlays() {
       });
       marker.on("click", () => void selectResource(item));
       overlays.push(marker);
+      fitTargets.push(marker);
       if (layers.connections) {
         overlays.push(new AMapRef.Polyline({
           path: [schoolPoint, point], strokeColor: "#2f6b4f", strokeWeight: 2,
@@ -108,17 +112,32 @@ function renderOverlays() {
       });
       marker.on("click", () => void selectRedCultureSite(site));
       overlays.push(marker);
+      fitTargets.push(marker);
+    });
+  }
+
+  if (layers.towns) {
+    schoolStore.towns.forEach((town) => {
+      const center = town.center || {};
+      if (!Number.isFinite(Number(center.longitude)) || !Number.isFinite(Number(center.latitude))) return;
+      const label = new AMapRef.Marker({
+        position: [Number(center.longitude), Number(center.latitude)],
+        content: `<button class="town-label" type="button">${escapeHtml(town.regionName || "未命名乡镇")}</button>`,
+        offset: new AMapRef.Pixel(-34, -14),
+        zIndex: selected.value?.kind === "town" && selected.value?.item?.regionId === town.regionId ? 80 : 30
+      });
+      label.on("click", () => void selectTown(town));
+      overlays.push(label);
     });
   }
 
   map.add(overlays);
-  const markers = overlays.filter((item) => item instanceof AMapRef.Marker);
-  if (markers.length) map.setFitView(markers, false, [70, 70, 70, 70], 15);
+  if (fitTargets.length) map.setFitView(fitTargets, false, [70, 70, 70, 70], 15);
 }
 
 async function refresh() {
   mapStatus.value = "正在刷新";
-  await Promise.all([schoolStore.load(true), schoolStore.loadRedCultureSites()]);
+  await Promise.all([schoolStore.load(true), schoolStore.loadRedCultureSites(), schoolStore.loadTowns()]);
   renderOverlays();
   mapStatus.value = "数据已刷新";
 }
@@ -170,9 +189,38 @@ async function selectRedCultureSite(item) {
   }
 }
 
+async function selectTown(item) {
+  const center = item.center || {};
+  if (map && Number.isFinite(Number(center.longitude)) && Number.isFinite(Number(center.latitude))) {
+    map.setZoomAndCenter(12, [Number(center.longitude), Number(center.latitude)]);
+  }
+  selected.value = { kind: "town", item, detail: item };
+  drawerOpen.value = true;
+  detailLoading.value = true;
+  mapStatus.value = `正在加载 ${item.regionName || "乡镇"} 红色资源`;
+  try {
+    selected.value.detail = await schoolStore.loadTownDetail(item.regionId);
+    mapStatus.value = selected.value.detail?.graphStatusMessage || "乡镇红色资源已加载";
+  } catch {
+    selected.value.detail = item;
+    mapStatus.value = schoolStore.townError || "乡镇红色资源加载失败";
+  } finally {
+    detailLoading.value = false;
+  }
+}
+
 function distanceText(meters) {
   if (meters == null) return "距离待计算";
   return meters >= 1000 ? `${(meters / 1000).toFixed(1)} 公里` : `${meters} 米`;
+}
+
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
 }
 
 </script>
@@ -192,6 +240,7 @@ function distanceText(meters) {
           <span class="layer-menu-wrap">
             <button class="icon-button" type="button" title="地图图层" @click="layerMenuOpen = !layerMenuOpen"><Layers3 :size="18" /></button>
             <span v-if="layerMenuOpen" class="layer-menu">
+              <label><input v-model="layers.towns" type="checkbox" />乡镇名称</label>
               <label><input v-model="layers.resources" type="checkbox" />正式资源</label>
               <label><input v-model="layers.redCulture" type="checkbox" />红色文化图谱</label>
               <label><input v-model="layers.connections" type="checkbox" />关联线</label>
@@ -208,8 +257,8 @@ function distanceText(meters) {
         <aside v-if="drawerOpen" class="resource-drawer">
           <header>
             <div>
-              <span class="badge" :class="selected?.kind === 'school' ? 'badge-green' : 'badge-red'">
-                {{ selected?.kind === "school" ? "学校" : selected?.kind === "redCulture" ? "图谱资源" : "正式资源" }}
+              <span class="badge" :class="selected?.kind === 'school' ? 'badge-green' : selected?.kind === 'town' ? 'badge-amber' : 'badge-red'">
+                {{ selected?.kind === "school" ? "学校" : selected?.kind === "town" ? "乡镇资源" : selected?.kind === "redCulture" ? "图谱资源" : "正式资源" }}
               </span>
               <h2>{{ selectedTitle }}</h2>
             </div>
@@ -243,6 +292,31 @@ function distanceText(meters) {
               <div><dt>活动建议</dt><dd>{{ selected.detail?.activitySuggestion || "暂无" }}</dd></div>
               <div><dt>数据来源</dt><dd>{{ selected.detail?.externalProvider === "amap" ? "高德地图 POI（已审核）" : "平台审核资源" }}</dd></div>
             </dl>
+          </template>
+
+          <template v-else-if="selected?.kind === 'town'">
+            <p class="drawer-intro">{{ selected.detail?.intro || "该乡镇暂无补充简介，可从已审核红色资源、人物、事件和故事中继续了解。" }}</p>
+            <LoadingBlock v-if="detailLoading" />
+            <template v-else>
+              <div class="drawer-metrics">
+                <span><strong>{{ selected.detail?.markers?.length || 0 }}</strong>遗址/纪念馆/事件</span>
+                <span><strong>{{ selected.detail?.heroes?.length || 0 }}</strong>英雄人物</span>
+                <span><strong>{{ selected.detail?.events?.length || 0 }}</strong>历史事件</span>
+                <span><strong>{{ selected.detail?.stories?.length || 0 }}</strong>红色故事</span>
+              </div>
+              <dl class="detail-list">
+                <div><dt>图谱状态</dt><dd>{{ selected.detail?.graphAvailable ? "图谱已命中" : "基础数据回退" }}</dd></div>
+                <div><dt>状态说明</dt><dd>{{ selected.detail?.graphStatusMessage || "已按行政区和图谱关系聚合该乡镇资源" }}</dd></div>
+              </dl>
+              <h3>红色遗址、纪念馆与事件点位</h3>
+              <div class="graph-list"><article v-for="item in selected.detail?.markers || []" :key="`${item.type}-${item.id}`"><strong>{{ item.name }}</strong><small>{{ item.relationHint || item.address || item.summary }}</small></article><div v-if="!selected.detail?.markers?.length" class="empty-state">当前乡镇暂无已审核点位资源</div></div>
+              <h3>英雄人物</h3>
+              <div class="graph-list"><article v-for="item in selected.detail?.heroes || []" :key="item.heroId"><strong>{{ item.heroName }}</strong><small>{{ item.nativePlaceText || item.profileSummary || item.relatedResourceNames?.join('、') }}</small></article><div v-if="!selected.detail?.heroes?.length" class="empty-state">当前乡镇暂无已审核关联人物</div></div>
+              <h3>历史事件</h3>
+              <div class="graph-list"><article v-for="item in selected.detail?.events || []" :key="item.eventId"><strong>{{ item.eventName }}</strong><small>{{ item.eventTimeText || item.summary }}</small></article><div v-if="!selected.detail?.events?.length" class="empty-state">当前乡镇暂无已审核历史事件</div></div>
+              <h3>红色故事</h3>
+              <div class="graph-list"><article v-for="item in selected.detail?.stories || []" :key="item.storyId"><strong>{{ item.storyTitle }}</strong><small>{{ item.summary || item.relatedEntityNames?.join('、') }}</small></article><div v-if="!selected.detail?.stories?.length" class="empty-state">当前乡镇暂无已审核红色故事</div></div>
+            </template>
           </template>
 
           <template v-else-if="selected?.kind === 'redCulture'">
@@ -319,6 +393,8 @@ function distanceText(meters) {
 :global(.map-pin-resource), :global(.map-pin-user) { width: 32px; height: 32px; background: #a6382f; }
 :global(.map-pin-user) { background: #2667a7; }
 :global(.map-pin-red-culture) { width: 32px; height: 32px; background: #8f241f; }
+:global(.town-label) { min-width: 68px; max-width: 120px; min-height: 28px; padding: 0 10px; border: 1px solid rgba(143,36,31,.28); border-radius: 5px; background: rgba(255,255,255,.94); color: #7b211d; font-size: 12px; font-weight: 700; box-shadow: 0 4px 12px rgba(20,40,28,.14); cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+:global(.town-label:hover) { border-color: #8f241f; background: #fff7f2; }
 @media (max-width: 900px) {
   .map-body { height: calc(100svh - 214px); min-height: 520px; grid-template-columns: 1fr; }
   .resource-drawer { position: absolute; z-index: 6; inset: auto 0 0; max-height: 52%; border-top: 1px solid var(--line); border-left: 0; box-shadow: 0 -10px 30px rgba(31,48,38,.12); }
