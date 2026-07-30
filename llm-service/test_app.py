@@ -62,6 +62,7 @@ def settings_for(tmp_path: Path, **overrides) -> Settings:
         fallback_api_key=overrides.pop("fallback_api_key", ""),
         agent_context_token_budget=overrides.pop("agent_context_token_budget", 1000),
         agent_recent_message_count=overrides.pop("agent_recent_message_count", 6),
+        business_health_required=overrides.pop("business_health_required", False),
         **overrides,
     )
 
@@ -710,6 +711,57 @@ def test_model_output_filters_invented_citations(tmp_path: Path):
     response = asyncio.run(runtime.handle(AgentMessageRequest.model_validate(message_payload())))
     assert response.status == "completed"
     assert [item.citation_id for item in response.citations] == ["chunk:1"]
+
+
+def test_stream_prefetches_graph_tool_for_trusted_scope(tmp_path: Path):
+    settings = settings_for(tmp_path)
+    application = create_app(settings)
+    runtime = application.state.runtime
+    calls = []
+
+    class FakeBusinessToolClient:
+        def query_graph_relations(self, payload):
+            calls.append(payload)
+            return {
+                "retrievalStatus": "ok",
+                "graphFacts": [{"citationId": "graph:1", "text": "人物关联学校"}],
+                "citationCandidates": [{"citationId": "graph:1", "title": "图谱关系"}],
+            }
+
+    class FakeAgent:
+        async def ainvoke(self, _input, config=None):
+            return {
+                "messages": [AIMessage(content=(
+                    '{"answer":"基于图谱关系回答。","citationIds":["graph:1"],'
+                    '"relatedResources":[],"followUpQuestions":[]}'
+                ))]
+            }
+
+    runtime.business_tool_client = FakeBusinessToolClient()
+    runtime._agent = FakeAgent()
+    request = AgentMessageRequest.model_validate(message_payload(
+        message="李大钊与学校有什么关系？",
+        context={
+            "actor": {"accountId": 1, "roleCode": "school_admin", "schoolId": 1},
+            "scope": {"scopeType": "SCHOOL", "scopeId": 1},
+        },
+    ))
+
+    async def collect_events():
+        return [event async for event in runtime.stream_events(request)]
+
+    events = asyncio.run(collect_events())
+    names = [event.split("\n", 1)[0].removeprefix("event: ") for event in events]
+    assert "tool.started" in names
+    assert "tool.completed" in names
+    assert calls[0]["actor"]["schoolId"] == 1
+    assert calls[0]["scope"]["scopeId"] == 1
+    final_block = next(event for event in events if event.startswith("event: final"))
+    final_data = json.loads(final_block.split("data: ", 1)[1])
+    final_response = final_data["response"]
+    assert final_response["retrievalStatus"] == "ok"
+    assert final_response["toolExecutions"][0]["name"] == "query_graph_relations"
+    assert final_response["citations"][0]["citationId"] == "graph:1"
 
 
 @pytest.mark.parametrize(
