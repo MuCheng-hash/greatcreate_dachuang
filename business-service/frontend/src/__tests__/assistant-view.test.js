@@ -49,7 +49,13 @@ describe("assistant view", () => {
         createdAt: "2026-07-28T00:00:00Z", updatedAt: "2026-07-28T01:00:00Z",
         messages: [
           { id: 1, role: "user", content: "历史问题", createdAt: "2026-07-28T00:00:00Z" },
-          { id: 2, role: "assistant", content: "历史回答", createdAt: "2026-07-28T00:01:00Z" }
+          {
+            id: 2,
+            role: "assistant",
+            content: "历史回答",
+            createdAt: "2026-07-28T00:01:00Z",
+            metadata: { followUpQuestions: ["历史追问"] }
+          }
         ]
       };
       return [];
@@ -59,10 +65,15 @@ describe("assistant view", () => {
     });
     await flushPromises();
 
+    expect(wrapper.find(".chat-main .chat-scroll").exists()).toBe(true);
+    expect(wrapper.find(".chat-area > .chat-composer").exists()).toBe(true);
+    expect(wrapper.find(".chat-composer .composer-model-select").exists()).toBe(true);
+    expect(wrapper.find(".assistant-side .composer-model-select").exists()).toBe(false);
     expect(wrapper.text()).toContain("历史问题");
     await wrapper.get(".history-open").trigger("click");
     await flushPromises();
     expect(wrapper.text()).toContain("历史回答");
+    expect(wrapper.get(".follow-ups button").text()).toBe("历史追问");
 
     await wrapper.get("textarea").setValue("继续追问");
     await wrapper.get("form").trigger("submit.prevent");
@@ -95,7 +106,13 @@ describe("assistant view", () => {
         status: "archived",
         messages: [
           { id: 1, role: "user", content: "已归档问题", createdAt: "2026-07-28T00:00:00Z" },
-          { id: 2, role: "assistant", content: "已归档回答", createdAt: "2026-07-28T00:01:00Z" }
+          {
+            id: 2,
+            role: "assistant",
+            content: "已归档回答",
+            createdAt: "2026-07-28T00:01:00Z",
+            metadata: { followUpQuestions: ["归档追问"] }
+          }
         ]
       };
       return [];
@@ -122,6 +139,9 @@ describe("assistant view", () => {
 
     expect(wrapper.text()).toContain("这是归档对话，仅供查看。");
     expect(wrapper.text()).toContain("已归档回答");
+    expect(wrapper.get(".follow-ups button").text()).toBe("归档追问");
+    expect(wrapper.get(".follow-ups button").attributes("disabled")).toBeDefined();
+    expect(wrapper.find(".chat-area > .chat-composer").exists()).toBe(true);
     expect(wrapper.get("textarea").attributes("disabled")).toBeDefined();
     expect(wrapper.get("textarea").attributes("placeholder")).toContain("请先恢复对话");
 
@@ -164,12 +184,67 @@ describe("assistant view", () => {
       global: { stubs: { AppShell: { template: "<div><slot /></div>" }, InlineNotice: true } }
     });
     await flushPromises();
-    await wrapper.get("select").setValue("deepseek");
+    expect(wrapper.find(".chat-composer .composer-model-select").exists()).toBe(true);
+    expect(wrapper.find(".assistant-side .composer-model-select").exists()).toBe(false);
+    await wrapper.get(".composer-model-select").setValue("deepseek");
     await wrapper.get("textarea").setValue("测试模型切换");
     await wrapper.get("form").trigger("submit.prevent");
     await flushPromises();
 
     expect(wrapper.text()).toContain("deepseek / deepseek-chat");
+  });
+
+  it("renders answer-specific follow-ups and removes the sidebar suggestions", async () => {
+    const responses = [
+      {
+        threadId: "thread-1", answer: "第一回答", relatedResources: [], citations: [],
+        followUpQuestions: ["第一追问", "重复追问", "第一追问"], generationStatus: "completed"
+      },
+      {
+        threadId: "thread-1", answer: "第二回答", relatedResources: [], citations: [],
+        followUpQuestions: ["第二追问"], generationStatus: "completed"
+      },
+      {
+        threadId: "thread-1", answer: "第三回答", relatedResources: [], citations: [],
+        followUpQuestions: ["第三追问"], generationStatus: "completed"
+      }
+    ];
+    apiMock.post.mockImplementation(async () => responses.shift());
+    const wrapper = mount(AssistantView, {
+      global: { stubs: { AppShell: { template: "<div><slot /></div>" }, InlineNotice: true } }
+    });
+    await flushPromises();
+
+    await wrapper.get("textarea").setValue("第一问题");
+    await wrapper.get("form").trigger("submit.prevent");
+    await flushPromises();
+    expect(wrapper.find(".suggestion-list").exists()).toBe(false);
+    expect(wrapper.findAll(".follow-ups button").map((button) => button.text())).toEqual(["第一追问", "重复追问"]);
+
+    await wrapper.get("textarea").setValue("第二问题");
+    await wrapper.get("form").trigger("submit.prevent");
+    await flushPromises();
+    expect(wrapper.findAll(".follow-ups").map((item) => item.text())).toEqual(["你还可以问第一追问重复追问", "你还可以问第二追问"]);
+
+    await wrapper.findAll(".follow-ups button")[0].trigger("click");
+    await flushPromises();
+    expect(apiMock.post).toHaveBeenLastCalledWith("/api/ai/qa/ask", expect.objectContaining({ question: "第一追问" }));
+  });
+
+  it("uses a resource-aware fallback when the server returns no follow-ups", async () => {
+    apiMock.post.mockResolvedValueOnce({
+      threadId: "thread-1", answer: "回答", relatedResources: ["常安镇敬老院"], citations: [],
+      followUpQuestions: [], generationStatus: "completed"
+    });
+    const wrapper = mount(AssistantView, {
+      global: { stubs: { AppShell: { template: "<div><slot /></div>" }, InlineNotice: true } }
+    });
+    await flushPromises();
+    await wrapper.get("textarea").setValue("请介绍资源");
+    await wrapper.get("form").trigger("submit.prevent");
+    await flushPromises();
+
+    expect(wrapper.find(".follow-ups").text()).toContain("怎样利用常安镇敬老院开展一节实践课？");
   });
 
   it("previews and forwards an image attachment", async () => {
