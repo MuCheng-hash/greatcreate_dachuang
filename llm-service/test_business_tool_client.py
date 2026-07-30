@@ -41,6 +41,48 @@ def test_business_tool_client_sends_authenticated_relation_query() -> None:
     assert result["graphFacts"][0]["fact"] == "李大钊"
 
 
+def test_business_tool_client_sends_authenticated_knowledge_query() -> None:
+    received = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        received["url"] = str(request.url)
+        received["token"] = request.headers.get("X-Agent-Service-Token")
+        received["body"] = json.loads(request.content)
+        return httpx.Response(
+            200,
+            json={
+                "code": 200,
+                "message": "success",
+                "data": {
+                    "retrievalStatus": "ok",
+                    "chunks": [{"citationId": "chunk:1", "text": "红色教育"}],
+                },
+            },
+        )
+
+    client = BusinessToolClient(
+        "http://business-service",
+        "secret",
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+    result = client.query_knowledge(
+        {
+            "actor": {"accountId": 1},
+            "scope": {"scopeType": "SCHOOL", "scopeId": 1},
+            "query": "红色教育",
+            "grade": "四年级",
+            "theme": "家乡文化",
+            "topK": 5,
+        }
+    )
+
+    assert received["url"].endswith("/internal/agent/tools/knowledge-retrieve")
+    assert received["token"] == "secret"
+    assert received["body"]["grade"] == "四年级"
+    assert result["chunks"][0]["citationId"] == "chunk:1"
+
+
 def test_graph_tool_keeps_explicit_degraded_fallback_and_audit(tmp_path: Path) -> None:
     repository = ConversationRepository(tmp_path / "agent.sqlite3")
     thread = repository.create_thread("account:1", "SCHOOL", 1)
@@ -62,7 +104,7 @@ def test_graph_tool_keeps_explicit_degraded_fallback_and_audit(tmp_path: Path) -
         reset_tool_runtime(token)
 
     payload = json.loads(output)
-    assert payload["retrievalStatus"] == "DEGRADED"
+    assert payload["retrievalStatus"] == "degraded"
     assert payload["degradedReason"] == "business_tool_unconfigured"
     assert payload["graphFacts"] == [{"fact": "可信关系"}]
     assert runtime.executions[0].status == "degraded"

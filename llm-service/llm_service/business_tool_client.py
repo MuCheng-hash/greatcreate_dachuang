@@ -16,6 +16,7 @@ class BusinessToolError(RuntimeError):
 class BusinessToolClient:
     """Calls Java's authenticated, non-Cypher Agent tool endpoints."""
 
+    KNOWLEDGE_RETRIEVE_PATH = "/internal/agent/tools/knowledge-retrieve"
     RELATION_QUERY_PATH = "/internal/agent/tools/relation-query"
 
     def __init__(
@@ -34,13 +35,21 @@ class BusinessToolClient:
     def configured(self) -> bool:
         return bool(self.base_url and self.service_token)
 
+    def query_knowledge(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        return self._post_retrieval(self.KNOWLEDGE_RETRIEVE_PATH, payload)
+
     def query_graph_relations(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        return self._post_retrieval(self.RELATION_QUERY_PATH, payload)
+
+    def _post_retrieval(
+        self, path: str, payload: Mapping[str, Any]
+    ) -> dict[str, Any]:
         if not self.configured:
             raise BusinessToolError("business_tool_unconfigured")
 
         try:
             response = self._client.post(
-                f"{self.base_url}{self.RELATION_QUERY_PATH}",
+                f"{self.base_url}{path}",
                 headers={"X-Agent-Service-Token": self.service_token},
                 json=dict(payload),
             )

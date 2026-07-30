@@ -32,7 +32,14 @@ from .structured_tasks import (
     teaching_plan_valid,
 )
 from .business_tool_client import BusinessToolClient
-from .tools import AGENT_TOOLS, ToolRuntimeContext, bind_tool_runtime, reset_tool_runtime
+from .tools import (
+    AGENT_TOOLS,
+    ToolRuntimeContext,
+    bind_tool_runtime,
+    query_graph_relations,
+    reset_tool_runtime,
+    retrieve_knowledge,
+)
 
 
 LOGGER = logging.getLogger("llm.stateful_agent")
@@ -248,7 +255,10 @@ class AgentRuntime:
     ) -> AgentMessageResponse:
         if request.task_type != "CHAT":
             return await self._run_structured_task(request, thread, compacted)
-        executions: list[ToolExecution] = []
+        prefetched_executions, prefetched_reasons = await self._prefetch_planned_tools(
+            request, thread, plan
+        )
+        executions: list[ToolExecution] = list(prefetched_executions)
         model_attempts = self._model_attempts(request.model_id)
         for attempt_index, (config, injected_agent) in enumerate(model_attempts):
             runtime = ToolRuntimeContext(
@@ -259,6 +269,8 @@ class AgentRuntime:
                 business_tool_client=self.business_tool_client,
                 grade=request.grade,
                 theme=request.theme,
+                executions=list(prefetched_executions),
+                degraded_reasons=list(prefetched_reasons),
             )
             token = bind_tool_runtime(runtime)
             try:
@@ -277,7 +289,7 @@ class AgentRuntime:
                 )
                 return self._with_model_metadata(result, config)
             except Exception as exc:
-                executions.extend(runtime.executions)
+                executions.extend(runtime.executions[len(prefetched_executions):])
                 error_type = classify_llm_error(exc)
                 LOGGER.warning(
                     "stateful_agent_model_failed",
@@ -352,7 +364,10 @@ class AgentRuntime:
             "label": "正在分析问题并规划处理步骤",
             "recommendedTools": plan.recommended_tools,
         })
-        executions: list[ToolExecution] = []
+        prefetched_executions, prefetched_reasons = await self._prefetch_planned_tools(
+            request, thread, plan, emit
+        )
+        executions: list[ToolExecution] = list(prefetched_executions)
         model_attempts = self._model_attempts(request.model_id)
         if not model_attempts:
             emit(
@@ -382,6 +397,8 @@ class AgentRuntime:
                 grade=request.grade,
                 theme=request.theme,
                 event_sink=emit,
+                executions=list(prefetched_executions),
+                degraded_reasons=list(prefetched_reasons),
             )
             token = bind_tool_runtime(runtime)
             emit(
@@ -425,7 +442,7 @@ class AgentRuntime:
                 emit("phase.completed", {"phase": "response", "label": "回答生成完成"})
                 return result
             except Exception as exc:
-                executions.extend(runtime.executions)
+                executions.extend(runtime.executions[len(prefetched_executions):])
                 LOGGER.warning(
                     "stateful_agent_stream_model_failed",
                     extra={
@@ -462,6 +479,42 @@ class AgentRuntime:
         )
         self._emit_answer_chunks(result.answer, emit)
         return result
+
+    async def _prefetch_planned_tools(
+        self,
+        request: AgentMessageRequest,
+        thread: ThreadRecord,
+        plan: AgentPlan,
+        emit: EventSink | None = None,
+    ) -> tuple[list[ToolExecution], list[str]]:
+        """Run deterministic evidence retrieval before model generation.
+
+        The model remains free to call tools itself, but a model that returns a
+        final JSON answer without emitting a tool call must not bypass the
+        authenticated business retrieval boundary.
+        """
+        if not request.context.actor or not request.context.scope:
+            return [], []
+
+        runtime = ToolRuntimeContext(
+            thread_id=thread.thread_id,
+            trusted_context=request.context,
+            repository=self.repository,
+            output_character_limit=self.settings.agent_tool_output_character_limit,
+            business_tool_client=self.business_tool_client,
+            grade=request.grade,
+            theme=request.theme,
+            event_sink=emit,
+        )
+        token = bind_tool_runtime(runtime)
+        try:
+            if "retrieve_knowledge" in plan.recommended_tools:
+                retrieve_knowledge.invoke({"query": request.message, "limit": 5})
+            if "query_graph_relations" in plan.recommended_tools:
+                query_graph_relations.invoke({"query": request.message, "limit": 5})
+        finally:
+            reset_tool_runtime(token)
+        return list(runtime.executions), list(runtime.degraded_reasons)
 
     async def _run_structured_task(
         self,
@@ -783,6 +836,10 @@ class AgentRuntime:
             "本轮策略计划：先完成目标，再按需调用推荐工具 "
             f"{', '.join(plan.recommended_tools)}；最多执行 {plan.max_tool_rounds} 轮工具调用。"
         )))
+        if request:
+            evidence_prompt = self._prefetched_evidence_message(request.context)
+            if evidence_prompt:
+                lc_messages.append(SystemMessage(content=evidence_prompt))
         last_user_index = max(
             (index for index, item in enumerate(messages) if item["role"] == "user"),
             default=-1,
@@ -802,6 +859,23 @@ class AgentRuntime:
                 else AIMessage(content=item["content"])
             )
         return lc_messages
+
+    def _prefetched_evidence_message(self, trusted: TrustedContext) -> str:
+        retrieval = trusted.retrieval or {}
+        evidence = {
+            "retrievalStatus": retrieval.get("retrievalStatus", "empty"),
+            "chunks": retrieval.get("chunks", [])[:8],
+            "graphFacts": retrieval.get("graphFacts", [])[:8],
+            "citationCandidates": trusted.citation_candidates[:8],
+        }
+        if not any(evidence[key] for key in ("chunks", "graphFacts", "citationCandidates")):
+            return ""
+        serialized = json.dumps(evidence, ensure_ascii=False, default=str)
+        return (
+            "业务服务已在本轮生成前完成可信范围内的检索。只能使用以下证据回答，"
+            "citationIds 只能来自其中的 citationId；不要声称没有调用工具，也不要补造事实：\n"
+            f"{serialized[:6000]}"
+        )
 
     def _response_from_model_result(
         self,
