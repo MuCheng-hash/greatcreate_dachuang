@@ -339,6 +339,8 @@ def test_new_thread_and_multiturn_persistence(tmp_path: Path):
             params={"ownerId": "school-user:1", "scopeType": "SCHOOL", "scopeId": 1},
         ).json()
         assert [item["role"] for item in stored["messages"]] == ["user", "assistant", "user", "assistant"]
+        assert data["followUpQuestions"]
+        assert stored["messages"][1]["metadata"]["followUpQuestions"] == data["followUpQuestions"]
 
 
 def test_stateful_stream_emits_events_and_persists_final_response(tmp_path: Path):
@@ -366,6 +368,8 @@ def test_stateful_stream_emits_events_and_persists_final_response(tmp_path: Path
         ).json()
         assert [item["role"] for item in stored["messages"]] == ["user", "assistant"]
         assert stored["messages"][-1]["content"] == final_data["response"]["answer"]
+        assert final_data["response"]["followUpQuestions"]
+        assert stored["messages"][-1]["metadata"]["followUpQuestions"] == final_data["response"]["followUpQuestions"]
 
 
 def test_teaching_plan_and_resource_discovery_streams_use_unified_protocol(tmp_path: Path):

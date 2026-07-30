@@ -687,7 +687,9 @@ class AgentRuntime:
             fallbackLevel=metadata.get("fallbackLevel"),
             citations=self._task_citations(result, request.context),
             relatedResources=result.get("relatedResources") or [],
-            followUpQuestions=(result.get("followUpSuggestions") or [])[:4],
+            followUpQuestions=self._follow_up_questions(
+                result.get("followUpSuggestions"), result.get("relatedResources"), request.message
+            ),
             contextCompacted=compacted,
         )
         if status == "degraded":
@@ -720,8 +722,31 @@ class AgentRuntime:
                 "toolExecutions": [item.model_dump(by_alias=True) for item in result.tool_executions],
                 "teachingPlan": result.teaching_plan,
                 "resourceDiscovery": result.resource_discovery,
+                "followUpQuestions": result.follow_up_questions,
             },
         )
+
+    @staticmethod
+    def _follow_up_questions(
+        questions: list[str] | None,
+        related_resources: list[str] | None = None,
+        question: str = "",
+    ) -> list[str]:
+        normalized = list(dict.fromkeys(
+            item.strip() for item in (questions or []) if isinstance(item, str) and item.strip()
+        ))[:4]
+        if normalized:
+            return normalized
+        resource_name = next(
+            (item.strip() for item in (related_resources or []) if isinstance(item, str) and item.strip()),
+            "",
+        )
+        return [
+            "这个资源适合哪些年级？" if resource_name else "哪些资源更适合当前年级的思政教育？",
+            f"怎样利用{resource_name}开展一节实践课？" if resource_name else "怎样利用学校周边资源开展一节实践课？",
+            "请给出一次校外实践活动的安全注意事项。",
+            f"如何将“{question.strip()}”转化为课堂活动？" if question.strip() else "如何将这个问题转化为课堂活动？",
+        ]
 
     async def _invoke_agent(
         self,
@@ -762,6 +787,7 @@ class AgentRuntime:
             compacted,
             runtime.executions,
             runtime.degraded_reasons,
+            request.message,
         )
 
     async def _invoke_agent_stream(
@@ -819,7 +845,7 @@ class AgentRuntime:
         parse_messages = [AIMessage(content=model_buffer)] if model_buffer else model_messages
         response = self._response_from_model_result(
             {"messages": parse_messages}, trusted, thread.thread_id, compacted,
-            runtime.executions, runtime.degraded_reasons
+            runtime.executions, runtime.degraded_reasons, request.message
         )
         if emitted_answer_length < len(response.answer):
             self._emit_answer_chunks(response.answer[emitted_answer_length:], emit)
@@ -885,6 +911,7 @@ class AgentRuntime:
         compacted: bool,
         executions: list[ToolExecution],
         degraded_reasons: list[str] | None = None,
+        question: str = "",
     ) -> AgentMessageResponse:
         parsed = self._parse_model_output(result)
         allowed = self._allowed_citations(trusted)
@@ -910,7 +937,9 @@ class AgentRuntime:
             degradedReason=";".join(normalized_reasons) if normalized_reasons else None,
             citations=citations,
             relatedResources=parsed.related_resources[:8],
-            followUpQuestions=parsed.follow_up_questions[:4],
+            followUpQuestions=self._follow_up_questions(
+                parsed.follow_up_questions, parsed.related_resources, question
+            ),
             toolExecutions=executions,
             contextCompacted=compacted,
         )
@@ -1058,7 +1087,15 @@ class AgentRuntime:
             model="local",
             fallbackLevel="local",
             citations=[item for item in citations[:5] if item is not None], relatedResources=names,
-            followUpQuestions=["请介绍一个具体资源的教育价值。", "这些资源适合哪个年级？"],
+            followUpQuestions=self._follow_up_questions(
+                [
+                    "请介绍一个具体资源的教育价值。",
+                    "这些资源适合哪个年级？",
+                    f"如何围绕“{request.message}”设计实践活动？",
+                ],
+                names,
+                request.message,
+            ),
             toolExecutions=executions or [], contextCompacted=compacted,
         )
 
