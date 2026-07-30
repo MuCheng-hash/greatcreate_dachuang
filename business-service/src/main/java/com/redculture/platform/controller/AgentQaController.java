@@ -7,11 +7,8 @@ import com.redculture.platform.vo.AgentQaResponse;
 import com.redculture.platform.vo.AuthCurrentUserVO;
 import com.redculture.platform.vo.request.AgentQaRequest;
 import jakarta.servlet.http.HttpServletRequest;
-import org.springframework.web.bind.annotation.GetMapping;
-import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
-import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
@@ -38,25 +35,6 @@ public class AgentQaController {
         }
         try {
             return ApiResponse.success(agentQaService.ask(request, currentUser));
-        } catch (IllegalArgumentException exception) {
-            return ApiResponse.fail(exception.getMessage());
-        }
-    }
-
-    @GetMapping("/thread/{threadId}")
-    public ApiResponse<Map<String, Object>> getThreadHistory(
-            @PathVariable String threadId,
-            @RequestParam(defaultValue = "SCHOOL") String scopeType,
-            @RequestParam(required = false) Long scopeId,
-            HttpServletRequest servletRequest) {
-        AuthCurrentUserVO currentUser = AuthContext.currentUser(servletRequest);
-        if (currentUser == null) {
-            return ApiResponse.fail(401, "school account is required");
-        }
-        try {
-            return ApiResponse.success(agentQaService.getThreadHistory(
-                    threadId, currentUser, scopeType, scopeId
-            ));
         } catch (IllegalArgumentException exception) {
             return ApiResponse.fail(exception.getMessage());
         }
