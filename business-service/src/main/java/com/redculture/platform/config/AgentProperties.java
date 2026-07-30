@@ -9,9 +9,9 @@ public class AgentProperties {
 
     /**
      * 仅供 llm-service 调用 Java 内部工具接口的共享服务令牌。
-     * 本地使用固定开发默认值，部署时必须通过环境变量替换，避免误暴露业务数据。
+     * 必须通过 AGENT_INTERNAL_SERVICE_TOKEN 注入，缺失时内部工具保持拒绝访问。
      */
-    private String internalServiceToken = "red-culture-agent-development-token-change-me";
+    private String internalServiceToken = "";
 
     /** FastAPI Prompt 管理令牌，仅由 Java 服务端代理使用。 */
     private String promptAdminToken;

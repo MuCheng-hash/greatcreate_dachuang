@@ -97,7 +97,7 @@ class Settings(BaseSettings):
         "", validation_alias=AliasChoices("internal_service_token", "AGENT_INTERNAL_SERVICE_TOKEN")
     )
     business_health_path: str = "/internal/agent/tools/health"
-    business_health_required: bool = False
+    business_health_required: bool = True
     health_check_timeout_seconds: float = 2.0
     require_llm_model: bool = False
 

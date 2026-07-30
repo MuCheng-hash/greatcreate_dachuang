@@ -53,7 +53,7 @@ app:
     amap-security-js-code: ${AMAP_SECURITY_JS_CODE:}
     llm-service-base-url: ${LLM_SERVICE_BASE_URL:http://127.0.0.1:5050}
   agent:
-    internal-service-token: ${AGENT_INTERNAL_SERVICE_TOKEN:red-culture-agent-development-token-change-me}
+    internal-service-token: ${AGENT_INTERNAL_SERVICE_TOKEN:}
     prompt-admin-token: ${PROMPT_ADMIN_TOKEN:}
     observability-admin-token: ${OBSERVABILITY_ADMIN_TOKEN:}
     connect-timeout-ms: ${AGENT_CONNECT_TIMEOUT_MS:3000}
