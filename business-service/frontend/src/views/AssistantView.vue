@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref, watch } from "vue";
-import { Archive, Bot, BrainCircuit, Check, ChevronDown, Clock3, History, ImagePlus, LoaderCircle, MessageCircleQuestion, Mic, Plus, Send, Sparkles, Trash2, UserRound, Volume2, VolumeX, Wrench, X } from "@lucide/vue";
+import { Archive, ArchiveRestore, Bot, BrainCircuit, Check, ChevronDown, Clock3, History, ImagePlus, LoaderCircle, MessageCircleQuestion, Mic, Plus, Send, Sparkles, Trash2, UserRound, Volume2, VolumeX, Wrench, X } from "@lucide/vue";
 import AppShell from "@/components/AppShell.vue";
 import InlineNotice from "@/components/InlineNotice.vue";
 import { api } from "@/services/api";
@@ -57,6 +57,8 @@ interface SpeechRecognitionLike {
   onend: (() => void) | null;
 }
 
+type HistoryMode = "active" | "archived";
+
 const auth = useAuthStore();
 const schoolStore = useSchoolStore();
 const question = ref<string>("");
@@ -73,6 +75,8 @@ const history = ref<AssistantConversationSummary[]>([]);
 const historyLoading = ref<boolean>(false);
 const historyError = ref<string>("");
 const historyBusyId = ref<string>("");
+const historyMode = ref<HistoryMode>("active");
+const readOnlyConversation = ref<boolean>(false);
 const imageInput = ref<HTMLInputElement | null>(null);
 const pendingImages = ref<AgentAttachment[]>([]);
 const listening = ref(false);
@@ -92,6 +96,10 @@ onMounted(async () => {
   await Promise.all([schoolStore.load(), loadModels()]);
   await loadHistory();
   if (threadId.value) await openConversation(threadId.value, false);
+  if (readOnlyConversation.value) {
+    historyMode.value = "archived";
+    await loadHistory("archived");
+  }
   sessionStorage.setItem(conversationStorageKey(), conversationId.value);
   if (threadId.value) sessionStorage.setItem(threadStorageKey(), threadId.value);
   if (!messages.value.length) {
@@ -99,17 +107,27 @@ onMounted(async () => {
   }
 });
 
-async function loadHistory(): Promise<void> {
+async function loadHistory(mode: HistoryMode = historyMode.value): Promise<void> {
   historyLoading.value = true;
   historyError.value = "";
   try {
-    history.value = await api.get<AssistantConversationSummary[]>("/api/ai/qa/history");
+    const path = mode === "archived"
+      ? "/api/ai/qa/history?status=archived"
+      : "/api/ai/qa/history";
+    history.value = await api.get<AssistantConversationSummary[]>(path);
   } catch {
     history.value = [];
-    historyError.value = "历史记录暂时无法加载";
+    historyError.value = mode === "archived" ? "归档记录暂时无法加载" : "历史记录暂时无法加载";
   } finally {
     historyLoading.value = false;
   }
+}
+
+async function switchHistoryMode(mode: HistoryMode): Promise<void> {
+  if (historyBusyId.value || historyMode.value === mode) return;
+  historyMode.value = mode;
+  history.value = [];
+  await loadHistory(mode);
 }
 
 async function openConversation(selectedThreadId: string, showError = true): Promise<void> {
@@ -123,6 +141,7 @@ async function openConversation(selectedThreadId: string, showError = true): Pro
         ? { role: "user", text: item.content }
         : { role: "assistant", answer: item.content, citations: [] });
     threadId.value = detail.threadId;
+    readOnlyConversation.value = detail.status === "archived";
     conversationId.value = makeConversationId();
     await scrollToBottom();
   } catch {
@@ -133,16 +152,23 @@ async function openConversation(selectedThreadId: string, showError = true): Pro
 }
 
 function startNewConversation(): void {
+  const wasArchivedMode = historyMode.value === "archived";
   activeAbortController.value?.abort();
   recognition.value?.stop();
   window.speechSynthesis?.cancel();
   pendingImages.value = [];
   speakingIndex.value = null;
   threadId.value = "";
+  readOnlyConversation.value = false;
+  historyMode.value = "active";
   conversationId.value = makeConversationId();
   messages.value = [];
   question.value = "";
   error.value = "";
+  if (wasArchivedMode) {
+    history.value = [];
+    void loadHistory("active");
+  }
 }
 
 async function archiveConversation(selectedThreadId: string): Promise<void> {
@@ -154,6 +180,22 @@ async function archiveConversation(selectedThreadId: string): Promise<void> {
     if (threadId.value === selectedThreadId) startNewConversation();
   } catch {
     historyError.value = "归档对话失败";
+  } finally {
+    historyBusyId.value = "";
+  }
+}
+
+async function restoreConversation(selectedThreadId: string): Promise<void> {
+  if (!selectedThreadId || historyBusyId.value) return;
+  historyBusyId.value = selectedThreadId;
+  try {
+    await api.post(`/api/ai/qa/history/${selectedThreadId}/restore`);
+    history.value = history.value.filter((item) => item.threadId !== selectedThreadId);
+    if (threadId.value === selectedThreadId) readOnlyConversation.value = false;
+    historyMode.value = "active";
+    await loadHistory("active");
+  } catch {
+    historyError.value = "恢复对话失败";
   } finally {
     historyBusyId.value = "";
   }
@@ -242,10 +284,12 @@ function loadThreadId() {
 }
 
 async function explain() {
+  if (readOnlyConversation.value) return;
   await requestAssistant("请介绍本校周边可用于思政教学的资源。");
 }
 
 async function ask(text: string = question.value): Promise<void> {
+  if (readOnlyConversation.value) return;
   const clean = text.trim();
   if ((!clean && !pendingImages.value.length) || loading.value) return;
   const attachments = [...pendingImages.value];
@@ -256,6 +300,7 @@ async function ask(text: string = question.value): Promise<void> {
 }
 
 async function requestAssistant(userText: string, attachments: AgentAttachment[] = []): Promise<void> {
+  if (readOnlyConversation.value) return;
   error.value = "";
   messages.value.push({ role: "user", text: userText, attachments });
   const assistantMessage: AssistantMessage = {
@@ -570,16 +615,23 @@ async function scrollToBottom(): Promise<void> {
 }
 
 function clearChat(): void {
+  const wasArchivedMode = historyMode.value === "archived";
   recognition.value?.stop();
   window.speechSynthesis?.cancel();
   pendingImages.value = [];
   speakingIndex.value = null;
   messages.value = [];
   threadId.value = "";
+  readOnlyConversation.value = false;
+  historyMode.value = "active";
   sessionStorage.removeItem(storageKey());
   sessionStorage.removeItem(conversationStorageKey());
   conversationId.value = makeConversationId();
   sessionStorage.removeItem(threadStorageKey());
+  if (wasArchivedMode) {
+    history.value = [];
+    void loadHistory("active");
+  }
 }
 </script>
 
@@ -588,17 +640,26 @@ function clearChat(): void {
     <section class="assistant-layout page-panel">
       <aside class="assistant-side">
         <div><span class="assistant-mark"><Bot :size="22" /></span><h2>学校资源助手</h2><p>回答会结合本校周边资源与已有教学方案。</p></div>
-        <div class="history-heading"><h3><History :size="16" />历史对话</h3><button class="icon-action" type="button" title="新对话" aria-label="新对话" @click="startNewConversation"><Plus :size="17" /></button></div>
+        <div class="history-heading">
+          <h3><History :size="16" />{{ historyMode === "archived" ? "已归档对话" : "历史对话" }}</h3>
+          <div class="history-heading-actions">
+            <button class="history-mode-toggle" type="button" :title="historyMode === 'active' ? '查看已归档对话' : '返回历史对话'" @click="switchHistoryMode(historyMode === 'active' ? 'archived' : 'active')">
+              <Archive :size="14" />{{ historyMode === "active" ? "已归档" : "返回历史" }}
+            </button>
+            <button class="icon-action" type="button" title="新对话" aria-label="新对话" @click="startNewConversation"><Plus :size="17" /></button>
+          </div>
+        </div>
         <div class="history-list" aria-label="历史对话列表">
           <span v-if="historyLoading" class="history-state">正在加载...</span>
           <span v-else-if="historyError" class="history-state">{{ historyError }}</span>
-          <span v-else-if="!history.length" class="history-state">暂无历史对话</span>
-          <div v-for="item in history" v-else :key="item.threadId" class="history-row" :class="{ active: item.threadId === threadId }">
+          <span v-else-if="!history.length" class="history-state">{{ historyMode === "archived" ? "暂无归档对话" : "暂无历史对话" }}</span>
+          <div v-for="item in history" v-else :key="item.threadId" class="history-row" :class="{ active: item.threadId === threadId, archived: historyMode === 'archived' }">
             <button class="history-open" type="button" :disabled="Boolean(historyBusyId)" @click="openConversation(item.threadId)">
               <span><strong>{{ item.title }}</strong><time>{{ historyDate(item.updatedAt) }}</time></span>
               <small>{{ item.preview }}</small>
             </button>
-            <button class="history-archive" type="button" title="归档对话" :aria-label="`归档对话：${item.title}`" :disabled="Boolean(historyBusyId)" @click="archiveConversation(item.threadId)"><Archive :size="14" /></button>
+            <button v-if="historyMode === 'active'" class="history-archive" type="button" title="归档对话" :aria-label="`归档对话：${item.title}`" :disabled="Boolean(historyBusyId)" @click="archiveConversation(item.threadId)"><Archive :size="14" /></button>
+            <button v-else class="history-restore" type="button" title="恢复对话" :aria-label="`恢复对话：${item.title}`" :disabled="Boolean(historyBusyId)" @click="restoreConversation(item.threadId)"><ArchiveRestore :size="14" /></button>
           </div>
         </div>
         <label class="model-field">回答模型
@@ -607,12 +668,16 @@ function clearChat(): void {
             <option v-for="item in models" :key="item.id" :value="item.id">{{ item.displayName }} · {{ item.provider }}</option>
           </select>
         </label>
-        <button class="primary-button full-button" type="button" :disabled="loading" @click="explain"><Sparkles :size="17" />生成学校讲解</button>
-        <div class="suggestion-list"><h3>建议提问</h3><button v-for="item in suggestions" :key="item" type="button" @click="ask(item)">{{ item }}</button></div>
+        <button class="primary-button full-button" type="button" :disabled="loading || readOnlyConversation" @click="explain"><Sparkles :size="17" />生成学校讲解</button>
+        <div class="suggestion-list"><h3>建议提问</h3><button v-for="item in suggestions" :key="item" type="button" :disabled="readOnlyConversation" @click="ask(item)">{{ item }}</button></div>
         <button class="text-button clear-button" type="button" @click="clearChat"><Trash2 :size="16" />清空会话</button>
       </aside>
 
       <div class="chat-area">
+        <div v-if="readOnlyConversation" class="archived-banner" role="status">
+          <span><Archive :size="15" />这是归档对话，仅供查看。</span>
+          <button class="text-button" type="button" :disabled="Boolean(historyBusyId)" @click="restoreConversation(threadId)">恢复对话</button>
+        </div>
         <div ref="chatScroll" class="chat-scroll" aria-live="polite">
           <InlineNotice v-if="error" tone="info">{{ error }}，已显示本地参考回答。</InlineNotice>
           <article v-for="(message,index) in messages" :key="index" class="chat-message" :class="message.role">
@@ -646,7 +711,7 @@ function clearChat(): void {
               <div v-if="message.clarificationRequired" class="clarification"><strong>需要补充：</strong>{{ message.clarificationMessage || "请补充具体学校名称。" }}<span v-if="message.clarificationOptions?.length">可选：{{ message.clarificationOptions.join("、") }}</span></div>
               <p v-if="message.relatedResources?.length" class="related"><strong>关联资源：</strong>{{ message.relatedResources.join("、") }}</p>
               <div v-if="message.citations?.length" class="chat-citations"><span v-for="(citation,citationIndex) in message.citations" :key="citationIndex">{{ typeof citation === "string" ? citation : citation.title || citation.excerpt }}</span></div>
-              <div v-if="message.followUpQuestions?.length" class="follow-ups"><button v-for="item in message.followUpQuestions" :key="item" type="button" @click="ask(item)">{{ item }}</button></div>
+              <div v-if="message.followUpQuestions?.length" class="follow-ups"><button v-for="item in message.followUpQuestions" :key="item" type="button" :disabled="readOnlyConversation" @click="ask(item)">{{ item }}</button></div>
               <button v-if="message.role === 'assistant' && message.answer" class="message-audio" type="button" :title="speakingIndex === index ? '停止朗读' : '朗读回答'" :aria-label="speakingIndex === index ? '停止朗读' : '朗读回答'" @click="toggleSpeech(message, index)">
                 <VolumeX v-if="speakingIndex === index" :size="15" /><Volume2 v-else :size="15" />
               </button>
@@ -655,20 +720,20 @@ function clearChat(): void {
           <div v-if="loading" class="typing"><span></span><span></span><span></span></div>
           <div v-if="!messages.length && !loading" class="empty-state"><MessageCircleQuestion :size="42" /><span>选择建议问题或输入你想了解的内容</span></div>
         </div>
-        <form class="chat-composer" @submit.prevent="ask()">
+        <form class="chat-composer" :class="{ 'chat-composer-readonly': readOnlyConversation }" @submit.prevent="ask()">
           <div v-if="pendingImages.length" class="pending-images">
             <div v-for="(attachment,index) in pendingImages" :key="attachment.name + index">
               <img :src="attachment.dataUrl" :alt="attachment.name" />
-              <button type="button" title="移除图片" aria-label="移除图片" @click="removeImage(index)"><X :size="14" /></button>
+              <button type="button" title="移除图片" aria-label="移除图片" :disabled="readOnlyConversation" @click="removeImage(index)"><X :size="14" /></button>
             </div>
           </div>
-          <textarea v-model="question" rows="2" placeholder="输入关于学校资源或教学活动的问题" @keydown.ctrl.enter.prevent="ask()"></textarea>
+          <textarea v-model="question" rows="2" :disabled="readOnlyConversation || loading" :placeholder="readOnlyConversation ? '归档对话仅供查看，请先恢复对话' : '输入关于学校资源或教学活动的问题'" @keydown.ctrl.enter.prevent="ask()"></textarea>
           <div class="composer-actions">
             <input ref="imageInput" class="visually-hidden" type="file" accept="image/jpeg,image/png,image/webp,image/gif" multiple @change="addImages" />
-            <button class="composer-icon" type="button" title="添加图片" aria-label="添加图片" :disabled="loading || pendingImages.length >= 3" @click="chooseImages"><ImagePlus :size="19" /></button>
-            <button class="composer-icon" :class="{ active: listening }" type="button" :title="listening ? '停止语音输入' : '语音输入'" :aria-label="listening ? '停止语音输入' : '语音输入'" :disabled="loading" @click="toggleListening"><Mic :size="19" /></button>
+            <button class="composer-icon" type="button" title="添加图片" aria-label="添加图片" :disabled="readOnlyConversation || loading || pendingImages.length >= 3" @click="chooseImages"><ImagePlus :size="19" /></button>
+            <button class="composer-icon" :class="{ active: listening }" type="button" :title="listening ? '停止语音输入' : '语音输入'" :aria-label="listening ? '停止语音输入' : '语音输入'" :disabled="readOnlyConversation || loading" @click="toggleListening"><Mic :size="19" /></button>
             <button v-if="loading" class="text-button stop-button" type="button" @click="stopGeneration">停止</button>
-            <button v-else class="primary-button send-button" type="submit" :disabled="!question.trim() && !pendingImages.length" aria-label="发送问题"><Send :size="19" /></button>
+            <button v-else class="primary-button send-button" type="submit" :disabled="readOnlyConversation || (!question.trim() && !pendingImages.length)" aria-label="发送问题"><Send :size="19" /></button>
           </div>
         </form>
       </div>
@@ -685,6 +750,9 @@ function clearChat(): void {
 .model-field { display: grid; gap: 7px; color: var(--muted); font-size: 13px; }
 .history-heading { display: flex; align-items: center; justify-content: space-between; }
 .history-heading h3 { display: flex; align-items: center; gap: 7px; margin: 0; font-size: 13px; }
+.history-heading-actions { display: flex; align-items: center; gap: 5px; }
+.history-mode-toggle { display: flex; align-items: center; gap: 4px; min-height: 30px; padding: 0 7px; border: 1px solid var(--line); border-radius: 6px; background: #fff; color: var(--muted); cursor: pointer; font-size: 11px; }
+.history-mode-toggle:hover { color: var(--red); background: #f4efed; }
 .icon-action, .history-archive { display: grid; place-items: center; border: 0; background: transparent; color: var(--muted); cursor: pointer; }
 .icon-action { width: 30px; height: 30px; border: 1px solid var(--line); border-radius: 6px; background: #fff; }
 .history-list { display: grid; align-content: start; gap: 3px; min-height: 70px; max-height: 250px; overflow-y: auto; }
@@ -699,12 +767,16 @@ function clearChat(): void {
 .history-open small { margin-top: 4px; color: var(--muted); font-size: 11px; }
 .history-archive { width: 28px; height: 28px; border-radius: 5px; }
 .history-archive:hover, .icon-action:hover { color: var(--red); background: #f4efed; }
+.history-restore { display: grid; width: 28px; height: 28px; place-items: center; border: 0; border-radius: 5px; background: transparent; color: var(--green); cursor: pointer; }
+.history-restore:hover { background: var(--green-soft); }
 .suggestion-list { display: grid; gap: 7px; }
 .suggestion-list h3 { margin-bottom: 3px; color: var(--muted); font-size: 12px; }
 .suggestion-list button { padding: 10px; border: 1px solid var(--line); border-radius: 6px; background: #fff; color: #445047; font-size: 13px; line-height: 1.5; text-align: left; }
 .suggestion-list button:hover { border-color: #a9b9ad; background: var(--green-soft); }
 .clear-button { justify-content: flex-start; margin-top: auto; color: var(--muted); }
-.chat-area { min-width: 0; min-height: 0; display: grid; grid-template-rows: minmax(0,1fr) auto; overflow: hidden; }
+.chat-area { min-width: 0; min-height: 0; display: grid; grid-template-rows: auto minmax(0,1fr) auto; overflow: hidden; }
+.archived-banner { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 14px; border-bottom: 1px solid var(--line); background: #fff9e8; color: #75602a; font-size: 12px; }
+.archived-banner > span { display: flex; align-items: center; gap: 6px; }
 .chat-scroll { min-height: 0; overflow-y: auto; display: grid; align-content: start; gap: 18px; padding: 24px; overscroll-behavior: contain; }
 .chat-message { display: grid; grid-template-columns: 34px minmax(0,1fr); gap: 10px; max-width: 820px; }
 .chat-message.user { justify-self: end; grid-template-columns: minmax(0,1fr) 34px; }
@@ -751,11 +823,13 @@ function clearChat(): void {
 .follow-ups { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 11px; }
 .follow-ups button { min-height: 30px; padding: 0 9px; border: 1px solid #bdd1c3; border-radius: 4px; background: #fff; color: var(--green); font-size: 12px; }
 .chat-composer { display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 9px; padding: 14px; border-top: 1px solid var(--line); background: #fff; }
+.chat-composer-readonly { background: #f8f9f7; }
 .pending-images { grid-column: 1 / -1; display: flex; gap: 8px; overflow-x: auto; }
 .pending-images > div { position: relative; flex: none; width: 72px; height: 58px; }
 .pending-images img { width: 100%; height: 100%; object-fit: cover; border: 1px solid var(--line); border-radius: 6px; }
 .pending-images button { position: absolute; top: -5px; right: -5px; display: grid; width: 20px; height: 20px; place-items: center; padding: 0; border: 1px solid var(--line); border-radius: 50%; background: #fff; color: var(--red); cursor: pointer; }
 .chat-composer textarea { min-height: 48px; max-height: 120px; resize: none; }
+.chat-composer textarea:disabled { background: #f2f3f0; color: var(--muted); cursor: not-allowed; }
 .composer-actions { display: flex; align-items: flex-end; gap: 5px; }
 .composer-icon { display: grid; width: 36px; height: 44px; place-items: center; padding: 0; border: 0; border-radius: 6px; background: transparent; color: var(--muted); cursor: pointer; }
 .composer-icon:hover:not(:disabled), .composer-icon.active { color: var(--green); background: var(--green-soft); }
