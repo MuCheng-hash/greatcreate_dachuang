@@ -326,7 +326,9 @@ async function requestAssistant(userText: string, attachments: AgentAttachment[]
     let streamError: Error | null = null;
 
     if (typeof api.stream !== "function") {
-      applyAssistantResult(assistantMessage, await api.post<AgentQaResponse>("/api/ai/qa/ask", requestBody), userText);
+      const result = await api.post<AgentQaResponse>("/api/ai/qa/ask", requestBody);
+      applyAssistantResult(assistantMessage, result, userText);
+      await loadHistory();
     } else {
       await api.stream("/api/ai/qa/stream", requestBody, {
         signal: abortController.signal,
@@ -386,7 +388,6 @@ async function requestAssistant(userText: string, attachments: AgentAttachment[]
             if (data.response?.threadId) threadId.value = data.response.threadId;
             assistantMessage.streamStatus = "回答完成";
             updateTrace(assistantMessage, "response", { kind: "response", title: "回答生成完成", status: "completed" });
-            void loadHistory();
           } else if (eventName === "error") {
             updateTrace(assistantMessage, "error", { kind: "error", title: "处理失败", detail: data.message, status: "failed" });
             streamError = new Error(data.message || "Agent 流式服务异常");
@@ -395,6 +396,7 @@ async function requestAssistant(userText: string, attachments: AgentAttachment[]
       });
       if (streamError && !finalReceived) throw streamError;
       if (!finalReceived) throw new Error("流式服务未返回最终结果");
+      await loadHistory();
     }
   } catch (requestError) {
     const requestFailure = requestError instanceof Error ? requestError : new Error("请求失败");
@@ -414,6 +416,7 @@ async function requestAssistant(userText: string, attachments: AgentAttachment[]
         ...(selectedModelId.value ? { modelId: selectedModelId.value } : {})
       });
       applyAssistantResult(assistantMessage, result, userText);
+      await loadHistory();
       error.value = `${requestFailure.message}，已切换到兼容问答接口`;
       return;
     } catch {
@@ -787,7 +790,7 @@ function clearChat(): void {
 .history-mode-toggle:hover { color: var(--red); background: #f4efed; }
 .icon-action, .history-archive { display: grid; place-items: center; border: 0; background: transparent; color: var(--muted); cursor: pointer; }
 .icon-action { width: 30px; height: 30px; border: 1px solid var(--line); border-radius: 6px; background: #fff; }
-.history-list { display: grid; flex: 0 0 clamp(240px, 32vh, 360px); align-content: start; gap: 3px; height: clamp(240px, 32vh, 360px); min-height: 240px; max-height: 360px; overflow-y: auto; scrollbar-color: #98afa0 transparent; scrollbar-width: thin; }
+.history-list { display: grid; flex: 1 1 auto; align-content: start; gap: 3px; height: auto; min-height: 240px; max-height: none; overflow-y: auto; scrollbar-color: #98afa0 transparent; scrollbar-width: thin; }
 .history-list::-webkit-scrollbar { width: 6px; }
 .history-list::-webkit-scrollbar-track { background: transparent; }
 .history-list::-webkit-scrollbar-thumb { border: 1px solid transparent; border-radius: 999px; background: #98afa0; background-clip: padding-box; }
@@ -892,7 +895,7 @@ function clearChat(): void {
   .assistant-layout { height: calc(100svh - 154px); min-height: 520px; grid-template-columns: 1fr; }
   .assistant-side { max-height: 260px; overflow-y: auto; border-right: 0; border-bottom: 1px solid var(--line); padding: 14px; }
   .assistant-side > div:first-child, .assistant-side-actions { display: none; }
-  .history-list { flex-basis: 150px; height: 150px; min-height: 70px; max-height: 150px; }
+  .history-list { flex: 0 0 150px; height: 150px; min-height: 70px; max-height: 150px; }
   .chat-scroll { padding: 16px 12px; }
   .chat-message { max-width: 92%; }
   .chat-composer { padding: 8px 10px 10px; }

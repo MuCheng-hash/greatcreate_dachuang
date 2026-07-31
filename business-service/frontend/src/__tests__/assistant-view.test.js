@@ -104,6 +104,35 @@ describe("assistant view", () => {
     expect(wrapper.find(".chat-message").exists()).toBe(false);
   });
 
+  it("renders multiple history records before the fixed bottom actions", async () => {
+    const summaries = Array.from({ length: 8 }, (_, index) => ({
+      threadId: `history-${index + 1}`,
+      title: `历史问题 ${index + 1}`,
+      preview: "历史回答",
+      messageCount: 2,
+      scopeType: "SCHOOL",
+      scopeId: "1",
+      createdAt: "2026-07-28T00:00:00Z",
+      updatedAt: "2026-07-28T01:00:00Z",
+    }));
+
+    apiMock.get.mockImplementation(async (path) => {
+      if (path === "/api/ai/models") return [];
+      if (path === "/api/ai/qa/history") return summaries;
+      return [];
+    });
+
+    const wrapper = mount(AssistantView, {
+      global: { stubs: { AppShell: { template: "<div><slot /></div>" }, InlineNotice: true } }
+    });
+    await flushPromises();
+
+    expect(wrapper.findAll(".history-row")).toHaveLength(8);
+    expect(wrapper.get(".history-list").element.nextElementSibling).toBe(
+      wrapper.get(".assistant-side-actions").element,
+    );
+  });
+
   it("opens archived conversations as read-only and restores them without losing messages", async () => {
     const activeSummary = {
       threadId: "active-1", title: "当前历史", preview: "当前回答", messageCount: 2,
@@ -367,6 +396,72 @@ describe("assistant view", () => {
     expect(wrapper.text()).toContain("返回 2 条结果");
     expect(wrapper.text()).toContain("18 ms");
     expect(wrapper.text()).toContain("检索证据");
+  });
+
+  it("keeps a completed greeting conversation in history after starting a new conversation", async () => {
+    let historyReads = 0;
+    const summary = {
+      threadId: "greeting-thread", title: "你好，你可以做什么？", preview: "问候回答", messageCount: 2,
+      scopeType: "SCHOOL", scopeId: "1", createdAt: "2026-07-28T00:00:00Z", updatedAt: "2026-07-28T01:00:00Z"
+    };
+    apiMock.get.mockImplementation(async (path) => {
+      if (path === "/api/ai/models") return [];
+      if (path === "/api/ai/qa/history") return historyReads++ === 0 ? [] : [summary];
+      return [];
+    });
+    apiMock.stream = vi.fn(async (_path, body, options) => {
+      options.onEvent("final", {
+        response: {
+          threadId: "greeting-thread", conversationId: body.conversationId, answer: "问候回答",
+          citations: [], followUpQuestions: [], generationStatus: "degraded"
+        }
+      });
+      options.onEvent("done", {});
+    });
+
+    const wrapper = mount(AssistantView, {
+      global: { stubs: { AppShell: { template: "<div><slot /></div>" }, InlineNotice: true } }
+    });
+    await flushPromises();
+    await wrapper.get("textarea").setValue("你好，你可以做什么？");
+    await wrapper.get("form").trigger("submit.prevent");
+    await flushPromises();
+
+    expect(wrapper.find(".history-row").exists()).toBe(true);
+    expect(wrapper.text()).toContain("你好，你可以做什么？");
+    await wrapper.get(".icon-action").trigger("click");
+    expect(wrapper.find(".chat-message").exists()).toBe(false);
+    expect(wrapper.find(".history-row").exists()).toBe(true);
+    expect(wrapper.text()).toContain("问候回答");
+  });
+
+  it("refreshes history after the compatibility ask fallback succeeds", async () => {
+    let historyReads = 0;
+    apiMock.get.mockImplementation(async (path) => {
+      if (path === "/api/ai/models") return [];
+      if (path === "/api/ai/qa/history") {
+        return historyReads++ === 0 ? [] : [{
+          threadId: "thread-1", title: "兼容接口问题", preview: "兼容接口回答", messageCount: 2,
+          scopeType: "SCHOOL", scopeId: "1", createdAt: "2026-07-28T00:00:00Z", updatedAt: "2026-07-28T01:00:00Z"
+        }];
+      }
+      return [];
+    });
+    apiMock.stream = vi.fn(async () => {
+      throw new Error("stream unavailable");
+    });
+
+    const wrapper = mount(AssistantView, {
+      global: { stubs: { AppShell: { template: "<div><slot /></div>" }, InlineNotice: true } }
+    });
+    await flushPromises();
+    await wrapper.get("textarea").setValue("兼容接口问题");
+    await wrapper.get("form").trigger("submit.prevent");
+    await flushPromises();
+
+    expect(apiMock.post).toHaveBeenCalledWith("/api/ai/qa/ask", expect.objectContaining({ question: "兼容接口问题" }));
+    expect(apiMock.get.mock.calls.filter(([path]) => path === "/api/ai/qa/history")).toHaveLength(2);
+    expect(wrapper.find(".history-row").exists()).toBe(true);
   });
 
   it.each([
