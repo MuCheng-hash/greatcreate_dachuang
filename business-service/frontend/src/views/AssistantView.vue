@@ -1,6 +1,8 @@
 <script setup lang="ts">
-import { nextTick, onMounted, ref, watch } from "vue";
-import { Archive, ArchiveRestore, Bot, BrainCircuit, Check, ChevronDown, Clock3, History, ImagePlus, LoaderCircle, MessageCircleQuestion, Mic, Plus, Send, Sparkles, Trash2, UserRound, Volume2, VolumeX, Wrench, X } from "@lucide/vue";
+import { nextTick, onMounted, reactive, ref, watch } from "vue";
+import { Archive, ArchiveRestore, Bot, BrainCircuit, Check, ChevronDown, Clock3, Copy, History, ImagePlus, LoaderCircle, MessageCircleQuestion, Mic, Plus, Send, Sparkles, Trash2, UserRound, Volume2, VolumeX, Wrench, X } from "@lucide/vue";
+import DOMPurify from "dompurify";
+import { marked } from "marked";
 import AppShell from "@/components/AppShell.vue";
 import InlineNotice from "@/components/InlineNotice.vue";
 import { api } from "@/services/api";
@@ -44,6 +46,14 @@ interface AssistantMessage extends AgentQaResponse {
   traceEvents?: AssistantTraceEvent[];
   traceExpanded?: boolean;
   attachments?: AgentAttachment[];
+  isStreaming?: boolean;
+}
+
+interface StreamRenderState {
+  pending: string;
+  frameId: number | null;
+  frameType: "raf" | "timeout" | null;
+  cancelled: boolean;
 }
 
 interface SpeechRecognitionLike {
@@ -65,6 +75,7 @@ const question = ref<string>("");
 const loading = ref<boolean>(false);
 const error = ref<string>("");
 const chatScroll = ref<HTMLElement | null>(null);
+const chatAutoFollow = ref<boolean>(true);
 const messages = ref<AssistantMessage[]>(loadMessages());
 const conversationId = ref<string>(loadConversationId());
 const activeAbortController = ref<AbortController | null>(null);
@@ -81,7 +92,43 @@ const imageInput = ref<HTMLInputElement | null>(null);
 const pendingImages = ref<AgentAttachment[]>([]);
 const listening = ref(false);
 const speakingIndex = ref<number | null>(null);
+const copiedIndex = ref<number | null>(null);
 const recognition = ref<SpeechRecognitionLike | null>(null);
+const streamRenderStates = new WeakMap<object, StreamRenderState>();
+
+const markdownOptions = {
+  async: false,
+  breaks: true,
+  gfm: true,
+};
+
+function normalizeAssistantMarkdown(value: string): string {
+  return value
+    .replace(/\r\n?/g, "\n")
+    .replace(/\s+(?=\d+[.)、]\s+)/g, "\n");
+}
+
+function renderAssistantMarkdown(value: string): string {
+  const source = normalizeAssistantMarkdown(value || "");
+  if (!source.trim()) return "";
+  const html = marked.parse(source, markdownOptions) as string;
+  return DOMPurify.sanitize(html, {
+    USE_PROFILES: { html: true },
+    FORBID_TAGS: ["form", "iframe", "math", "object", "script", "style", "svg"],
+    FORBID_ATTR: ["style", "srcset"],
+    ALLOW_DATA_ATTR: false,
+  });
+}
+
+function citationLabel(citation: AgentCitation | string): string {
+  if (typeof citation === "string") return citation;
+  return citation.title || citation.excerpt || citation.citationId || "检索来源";
+}
+
+function citationDetail(citation: AgentCitation | string): string {
+  if (typeof citation === "string") return citation;
+  return citation.excerpt || citation.citationId || "已授权的检索证据";
+}
 
 onMounted(async () => {
   await Promise.all([schoolStore.load(), loadModels()]);
@@ -143,7 +190,7 @@ async function openConversation(selectedThreadId: string, showError = true): Pro
     threadId.value = detail.threadId;
     readOnlyConversation.value = detail.status === "archived";
     conversationId.value = makeConversationId();
-    await scrollToBottom();
+    await scrollToBottom(true);
   } catch {
     if (showError) historyError.value = "无法打开这条历史对话";
   } finally {
@@ -303,11 +350,14 @@ async function requestAssistant(userText: string, attachments: AgentAttachment[]
   if (readOnlyConversation.value) return;
   error.value = "";
   messages.value.push({ role: "user", text: userText, attachments });
-  const assistantMessage: AssistantMessage = {
+  const assistantMessage = reactive<AssistantMessage>({
     role: "assistant", answer: "", relatedResources: [], citations: [], followUpQuestions: [],
-    toolEvents: [], traceEvents: [], traceExpanded: true, streamStatus: "正在启动 Agent…"
-  };
+    toolEvents: [], traceEvents: [], traceExpanded: true, streamStatus: "正在启动 Agent…", isStreaming: true
+  });
   messages.value.push(assistantMessage);
+  const streamState = getStreamRenderState(assistantMessage);
+  streamState.cancelled = false;
+  chatAutoFollow.value = true;
   loading.value = true;
   const abortController = new AbortController();
   activeAbortController.value = abortController;
@@ -327,12 +377,14 @@ async function requestAssistant(userText: string, attachments: AgentAttachment[]
 
     if (typeof api.stream !== "function") {
       const result = await api.post<AgentQaResponse>("/api/ai/qa/ask", requestBody);
+      finishStreamRendering(assistantMessage);
       applyAssistantResult(assistantMessage, result, userText);
       await loadHistory();
     } else {
       await api.stream("/api/ai/qa/stream", requestBody, {
         signal: abortController.signal,
         onEvent(eventName: AgentSseEventName, data: AgentSseEventData) {
+          if (streamState.cancelled) return;
           if (data?.conversationId) conversationId.value = data.conversationId;
           if (data?.threadId) threadId.value = data.threadId;
           if (eventName === "run.started") {
@@ -375,14 +427,19 @@ async function requestAssistant(userText: string, attachments: AgentAttachment[]
             });
             assistantMessage.streamStatus = data.status === "ok" ? "工具结果已返回，正在整理回答" : "部分工具不可用，正在降级处理";
           } else if (eventName === "model.fallback") {
-            if (data.reset) assistantMessage.answer = "";
+            if (data.reset) {
+              resetStreamRendering(assistantMessage);
+              assistantMessage.answer = "";
+            }
             assistantMessage.streamStatus = `正在切换备用模型：${data.nextModel || "轻量模型"}`;
           } else if (eventName === "token") {
-            assistantMessage.answer += data.delta || "";
+            queueStreamDelta(assistantMessage, data.delta || "");
             updateTrace(assistantMessage, "response", { kind: "response", title: "生成回答", status: "running" });
             assistantMessage.streamStatus = "正在生成回答";
           } else if (eventName === "final") {
             finalReceived = true;
+            flushStreamDelta(assistantMessage);
+            finishStreamRendering(assistantMessage);
             applyAssistantResult(assistantMessage, data.response || {}, userText);
             if (data.response?.conversationId) conversationId.value = data.response.conversationId;
             if (data.response?.threadId) threadId.value = data.response.threadId;
@@ -401,10 +458,14 @@ async function requestAssistant(userText: string, attachments: AgentAttachment[]
   } catch (requestError) {
     const requestFailure = requestError instanceof Error ? requestError : new Error("请求失败");
     if (requestFailure.name === "AbortError") {
+      finishStreamRendering(assistantMessage);
+      assistantMessage.isStreaming = false;
       assistantMessage.streamStatus = "已停止生成";
       if (!assistantMessage.answer) messages.value.pop();
       return;
     }
+    resetStreamRendering(assistantMessage);
+    assistantMessage.answer = "";
     try {
       const result = await api.post<AgentQaResponse>("/api/ai/qa/ask", {
         question: userText,
@@ -420,15 +481,22 @@ async function requestAssistant(userText: string, attachments: AgentAttachment[]
       error.value = `${requestFailure.message}，已切换到兼容问答接口`;
       return;
     } catch {
-    const resourceCount = schoolStore.resources.length;
-    assistantMessage.answer = `${schoolStore.school?.schoolName || "当前学校"}现有 ${resourceCount} 个已关联周边资源。围绕“${userText}”，建议优先选择距离近、可达性高的资源，并按课堂导入、现场观察、实践反思三个阶段组织活动。`;
-    assistantMessage.citations = ["当前为本地兜底回答，智能问答服务恢复后可获得更完整的引用结果。"];
-    assistantMessage.retrievalStatus = "degraded";
-    assistantMessage.generationStatus = "degraded";
-    assistantMessage.followUpQuestions = buildFollowUpQuestions(userText);
-    error.value = requestFailure.message;
+      finishStreamRendering(assistantMessage);
+      assistantMessage.isStreaming = false;
+      const resourceCount = schoolStore.resources.length;
+      assistantMessage.answer = `${schoolStore.school?.schoolName || "当前学校"}现有 ${resourceCount} 个已关联周边资源。围绕“${userText}”，建议优先选择距离近、可达性高的资源，并按课堂导入、现场观察、实践反思三个阶段组织活动。`;
+      assistantMessage.citations = ["当前为本地兜底回答，智能问答服务恢复后可获得更完整的引用结果。"];
+      assistantMessage.retrievalStatus = "degraded";
+      assistantMessage.generationStatus = "degraded";
+      assistantMessage.followUpQuestions = buildFollowUpQuestions(userText);
+      error.value = requestFailure.message;
     }
   } finally {
+    if (assistantMessage.isStreaming) {
+      flushStreamDelta(assistantMessage);
+      finishStreamRendering(assistantMessage);
+      assistantMessage.isStreaming = false;
+    }
     loading.value = false;
     activeAbortController.value = null;
     await scrollToBottom();
@@ -453,10 +521,92 @@ function applyAssistantResult(message: AssistantMessage, result: Partial<AgentQa
     runId: result?.runId || message.runId,
     fallbackLevel: result?.fallbackLevel || null,
     effectiveModel: result?.model ? `${result.provider || "LLM"} / ${result.model}` : message.effectiveModel,
-    streamStatus: result?.generationStatus === "degraded" ? "已使用降级回答" : "回答完成"
+    streamStatus: result?.generationStatus === "degraded" ? "已使用降级回答" : "回答完成",
+    isStreaming: false
   });
   if (result?.conversationId) conversationId.value = result.conversationId;
   if (result?.threadId) threadId.value = result.threadId;
+}
+
+function getStreamRenderState(message: AssistantMessage): StreamRenderState {
+  const key = message as object;
+  const existing = streamRenderStates.get(key);
+  if (existing) return existing;
+  const state: StreamRenderState = {
+    pending: "",
+    frameId: null,
+    frameType: null,
+    cancelled: false
+  };
+  streamRenderStates.set(key, state);
+  return state;
+}
+
+function clearScheduledStreamFrame(state: StreamRenderState): void {
+  if (state.frameId === null) return;
+  if (state.frameType === "raf" && typeof window.cancelAnimationFrame === "function") {
+    window.cancelAnimationFrame(state.frameId);
+  } else {
+    window.clearTimeout(state.frameId);
+  }
+  state.frameId = null;
+  state.frameType = null;
+}
+
+function queueStreamDelta(message: AssistantMessage, delta: string): void {
+  if (!delta) return;
+  const state = getStreamRenderState(message);
+  if (state.cancelled) return;
+  state.pending += delta;
+  if (state.frameId !== null) return;
+  const flush = () => {
+    state.frameId = null;
+    state.frameType = null;
+    if (state.cancelled) {
+      state.pending = "";
+      return;
+    }
+    const pending = state.pending;
+    state.pending = "";
+    if (pending) {
+      message.answer = `${message.answer || ""}${pending}`;
+      void scrollToBottom();
+    }
+  };
+  if (typeof window.requestAnimationFrame === "function") {
+    state.frameType = "raf";
+    state.frameId = window.requestAnimationFrame(flush);
+  } else {
+    state.frameType = "timeout";
+    state.frameId = window.setTimeout(flush, 16);
+  }
+}
+
+function flushStreamDelta(message: AssistantMessage): void {
+  const state = getStreamRenderState(message);
+  clearScheduledStreamFrame(state);
+  if (state.cancelled) {
+    state.pending = "";
+    return;
+  }
+  if (state.pending) {
+    message.answer = `${message.answer || ""}${state.pending}`;
+    state.pending = "";
+  }
+}
+
+function resetStreamRendering(message: AssistantMessage): void {
+  const state = getStreamRenderState(message);
+  clearScheduledStreamFrame(state);
+  state.pending = "";
+  state.cancelled = false;
+}
+
+function finishStreamRendering(message: AssistantMessage): void {
+  const state = getStreamRenderState(message);
+  clearScheduledStreamFrame(state);
+  state.pending = "";
+  state.cancelled = true;
 }
 
 const invalidFollowUpMarkers = [
@@ -623,6 +773,22 @@ function toggleListening(): void {
   instance.start();
 }
 
+async function copyAnswer(answer: string | undefined, index: number): Promise<void> {
+  if (!answer || !navigator.clipboard?.writeText) {
+    error.value = "当前浏览器不支持复制，请手动选择回答内容";
+    return;
+  }
+  try {
+    await navigator.clipboard.writeText(answer);
+    copiedIndex.value = index;
+    window.setTimeout(() => {
+      if (copiedIndex.value === index) copiedIndex.value = null;
+    }, 1800);
+  } catch {
+    error.value = "复制失败，请手动选择回答内容";
+  }
+}
+
 function toggleSpeech(message: AssistantMessage, index: number): void {
   if (!("speechSynthesis" in window) || !message.answer) return;
   if (speakingIndex.value === index) {
@@ -641,12 +807,26 @@ function toggleSpeech(message: AssistantMessage, index: number): void {
 }
 
 function stopGeneration(): void {
+  const streamMessage = [...messages.value].reverse().find(item => item.role === "assistant" && item.isStreaming);
+  if (streamMessage) {
+    finishStreamRendering(streamMessage);
+    streamMessage.isStreaming = false;
+    streamMessage.streamStatus = "已停止生成";
+  }
   activeAbortController.value?.abort();
 }
 
-async function scrollToBottom(): Promise<void> {
+function handleChatScroll(): void {
+  const element = chatScroll.value;
+  if (!element) return;
+  chatAutoFollow.value = element.scrollHeight - element.scrollTop - element.clientHeight < 96;
+}
+
+async function scrollToBottom(force = false): Promise<void> {
   await nextTick();
-  if (chatScroll.value) chatScroll.value.scrollTop = chatScroll.value.scrollHeight;
+  if (chatScroll.value && (force || chatAutoFollow.value)) {
+    chatScroll.value.scrollTop = chatScroll.value.scrollHeight;
+  }
 }
 
 function clearChat(): void {
@@ -655,6 +835,7 @@ function clearChat(): void {
   window.speechSynthesis?.cancel();
   pendingImages.value = [];
   speakingIndex.value = null;
+  copiedIndex.value = null;
   messages.value = [];
   threadId.value = "";
   readOnlyConversation.value = false;
@@ -709,12 +890,14 @@ function clearChat(): void {
             <span><Archive :size="15" />这是归档对话，仅供查看。</span>
             <button class="text-button" type="button" :disabled="Boolean(historyBusyId)" @click="restoreConversation(threadId)">恢复对话</button>
           </div>
-          <div ref="chatScroll" class="chat-scroll" aria-live="polite">
+          <div ref="chatScroll" class="chat-scroll" aria-live="polite" @scroll="handleChatScroll">
           <InlineNotice v-if="error" tone="info">{{ error }}，已显示本地参考回答。</InlineNotice>
           <article v-for="(message,index) in messages" :key="index" class="chat-message" :class="message.role">
             <span class="chat-avatar"><UserRound v-if="message.role === 'user'" :size="17" /><Bot v-else :size="17" /></span>
             <div>
-              <p>{{ message.text || message.answer }}</p>
+              <div v-if="message.role === 'assistant'" class="assistant-answer markdown-body" v-html="renderAssistantMarkdown(message.answer || '')"></div>
+              <p v-else>{{ message.text }}</p>
+              <span v-if="message.role === 'assistant' && message.isStreaming" class="stream-cursor" aria-hidden="true"></span>
               <div v-if="message.attachments?.length" class="message-images">
                 <img v-for="attachment in message.attachments" :key="attachment.name" :src="attachment.dataUrl" :alt="attachment.name" />
               </div>
@@ -741,14 +924,24 @@ function clearChat(): void {
               <p v-if="message.generationStatus" class="generation-status" :class="generationStatusClass(message.generationStatus)">{{ generationStatusLabel(message.generationStatus) }}</p>
               <div v-if="message.clarificationRequired" class="clarification"><strong>需要补充：</strong>{{ message.clarificationMessage || "请补充具体学校名称。" }}<span v-if="message.clarificationOptions?.length">可选：{{ message.clarificationOptions.join("、") }}</span></div>
               <p v-if="message.relatedResources?.length" class="related"><strong>关联资源：</strong>{{ message.relatedResources.join("、") }}</p>
-              <div v-if="message.citations?.length" class="chat-citations"><span v-for="(citation,citationIndex) in message.citations" :key="citationIndex">{{ typeof citation === "string" ? citation : citation.title || citation.excerpt }}</span></div>
+              <div v-if="message.citations?.length" class="chat-citations" aria-label="引用来源">
+                <span class="chat-citations-label">来源</span>
+                <div class="chat-citation-list">
+                  <span v-for="(citation,citationIndex) in message.citations" :key="citationIndex" class="citation-chip" :title="citationDetail(citation)">{{ citationLabel(citation) }}</span>
+                </div>
+              </div>
               <div v-if="message.role === 'assistant' && message.followUpQuestions?.length" class="follow-ups">
                 <span class="follow-ups-label">你还可以问</span>
                 <div class="follow-up-actions"><button v-for="item in message.followUpQuestions" :key="item" type="button" :disabled="readOnlyConversation" @click="ask(item)">{{ item }}</button></div>
               </div>
-              <button v-if="message.role === 'assistant' && message.answer" class="message-audio" type="button" :title="speakingIndex === index ? '停止朗读' : '朗读回答'" :aria-label="speakingIndex === index ? '停止朗读' : '朗读回答'" @click="toggleSpeech(message, index)">
-                <VolumeX v-if="speakingIndex === index" :size="15" /><Volume2 v-else :size="15" />
-              </button>
+              <div v-if="message.role === 'assistant' && message.answer" class="message-actions">
+                <button class="message-action" :class="{ copied: copiedIndex === index }" type="button" :title="copiedIndex === index ? '已复制' : '复制回答'" :aria-label="copiedIndex === index ? '已复制' : '复制回答'" @click="copyAnswer(message.answer, index)">
+                  <Check v-if="copiedIndex === index" :size="15" /><Copy v-else :size="15" />
+                </button>
+                <button class="message-action message-audio" type="button" :title="speakingIndex === index ? '停止朗读' : '朗读回答'" :aria-label="speakingIndex === index ? '停止朗读' : '朗读回答'" @click="toggleSpeech(message, index)">
+                  <VolumeX v-if="speakingIndex === index" :size="15" /><Volume2 v-else :size="15" />
+                </button>
+              </div>
             </div>
           </article>
           <div v-if="loading" class="typing"><span></span><span></span><span></span></div>
@@ -833,10 +1026,36 @@ function clearChat(): void {
 .chat-avatar { display: grid; place-items: center; width: 34px; height: 34px; border-radius: 50%; background: var(--green); color: #fff; }
 .chat-message > div { padding: 13px 15px; border-radius: 8px; background: var(--surface-muted); }
 .chat-message p { margin: 0; line-height: 1.8; white-space: pre-wrap; }
+.assistant-answer { color: var(--text); overflow-wrap: anywhere; }
+.assistant-answer p { margin: 0 0 13px; line-height: 1.8; white-space: normal; }
+.assistant-answer p:last-child { margin-bottom: 0; }
+.assistant-answer h1, .assistant-answer h2, .assistant-answer h3, .assistant-answer h4 { margin: 18px 0 9px; color: #2c4739; line-height: 1.35; }
+.assistant-answer h1:first-child, .assistant-answer h2:first-child, .assistant-answer h3:first-child, .assistant-answer h4:first-child { margin-top: 0; }
+.assistant-answer h1 { font-size: 21px; }
+.assistant-answer h2 { font-size: 18px; }
+.assistant-answer h3 { font-size: 16px; }
+.assistant-answer h4 { font-size: 14px; }
+.assistant-answer ul, .assistant-answer ol { margin: 9px 0 14px; padding-left: 25px; }
+.assistant-answer li { padding-left: 3px; line-height: 1.75; }
+.assistant-answer li + li { margin-top: 5px; }
+.assistant-answer blockquote { margin: 12px 0; padding: 8px 12px; border-left: 3px solid #7da88c; background: #f4f8f4; color: #526158; }
+.assistant-answer blockquote p { margin-bottom: 0; }
+.assistant-answer code { padding: 2px 5px; border-radius: 4px; background: #e1e9e3; color: #315f47; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: .9em; }
+.assistant-answer pre { max-width: 100%; margin: 13px 0; padding: 12px 13px; overflow-x: auto; border: 1px solid #d7e1d9; border-radius: 7px; background: #eef3ef; }
+.assistant-answer pre code { padding: 0; background: transparent; color: #2f4437; font-size: 12px; line-height: 1.65; white-space: pre; }
+.assistant-answer a { color: #287453; text-decoration: underline; text-underline-offset: 2px; }
+.assistant-answer hr { margin: 17px 0; border: 0; border-top: 1px solid #d3dbd5; }
+.assistant-answer table { display: block; max-width: 100%; margin: 13px 0; overflow-x: auto; border-collapse: collapse; }
+.assistant-answer th, .assistant-answer td { min-width: 100px; padding: 7px 9px; border: 1px solid #cfdcd2; text-align: left; vertical-align: top; }
+.assistant-answer th { background: #e6efe8; color: #315f47; font-weight: 700; }
+.stream-cursor { display: inline-block; width: 2px; height: 1.05em; margin-left: 3px; vertical-align: -0.15em; border-radius: 1px; background: var(--green); animation: stream-cursor-blink 850ms steps(1,end) infinite; }
+@keyframes stream-cursor-blink { 50% { opacity: 0; } }
 .message-images { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
 .message-images img { width: 132px; height: 96px; object-fit: cover; border: 1px solid var(--line); border-radius: 6px; }
-.message-audio { display: grid; width: 28px; height: 28px; place-items: center; margin-top: 8px; border: 0; border-radius: 50%; background: transparent; color: var(--muted); cursor: pointer; }
-.message-audio:hover { color: var(--green); background: #fff; }
+.message-actions { display: flex; align-items: center; gap: 3px; margin-top: 9px; }
+.message-action { display: grid; width: 28px; height: 28px; place-items: center; padding: 0; border: 0; border-radius: 50%; background: transparent; color: var(--muted); cursor: pointer; }
+.message-action:hover, .message-action.copied { color: var(--green); background: #fff; }
+.message-audio { margin-top: 0; }
 .agent-stream-status { margin-top: 8px; color: var(--muted); font-size: 12px; }
 .agent-trace { margin-top: 10px; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
 .agent-trace-toggle { display: flex; width: 100%; min-height: 38px; align-items: center; justify-content: space-between; gap: 10px; padding: 0; border: 0; background: transparent; color: #526158; font-size: 12px; cursor: pointer; }
@@ -867,7 +1086,10 @@ function clearChat(): void {
 .generation-unknown { color: var(--muted); }
 .clarification { display: grid; gap: 3px; margin-top: 10px; padding: 8px 10px; border-left: 3px solid #c9a24b; background: #fff9e8; color: #75602a; font-size: 12px; line-height: 1.6; }
 .related { margin-top: 10px !important; color: var(--muted); font-size: 13px; }
-.chat-citations { display: grid; gap: 5px; margin-top: 12px; padding-top: 10px; border-top: 1px solid #d3dbd5; color: var(--muted); font-size: 12px; }
+.chat-citations { display: grid; gap: 7px; margin-top: 14px; padding-top: 11px; border-top: 1px solid #d3dbd5; color: var(--muted); font-size: 12px; }
+.chat-citations-label { color: #526158; font-size: 12px; font-weight: 650; }
+.chat-citation-list { display: flex; flex-wrap: wrap; gap: 6px; }
+.citation-chip { max-width: 100%; padding: 5px 9px; overflow: hidden; border: 1px solid #c7d7cb; border-radius: 999px; background: #f8fbf8; color: #397257; text-overflow: ellipsis; white-space: nowrap; }
 .follow-ups { display: grid; gap: 7px; margin-top: 12px; }
 .follow-ups-label { color: var(--muted); font-size: 12px; }
 .follow-up-actions { display: flex; flex-wrap: wrap; gap: 6px; }

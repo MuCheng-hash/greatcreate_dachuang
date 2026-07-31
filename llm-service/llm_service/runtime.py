@@ -477,7 +477,7 @@ class AgentRuntime:
         result = self._degraded_answer(
             request, request.context, thread.thread_id, compacted, executions, status="degraded"
         )
-        self._emit_answer_chunks(result.answer, emit)
+        await self._emit_answer_chunks(result.answer, emit)
         return result
 
     async def _prefetch_planned_tools(
@@ -622,7 +622,7 @@ class AgentRuntime:
         if request.task_type != "TEACHING_PLAN":
             readable_text = structured_task_stream_text(request, result)
             if readable_text:
-                self._emit_answer_chunks(readable_text, emit)
+                await self._emit_answer_chunks(readable_text, emit)
         elapsed = round((asyncio.get_running_loop().time() - started) * 1000)
         self._finish_structured_prompt(prompt_run_id, status, elapsed, result, error_message)
         return self._structured_response(request, thread.thread_id, compacted, result, metadata, status)
@@ -865,9 +865,9 @@ class AgentRuntime:
                     content = message_text(message.content)
                     if not content:
                         continue
-                    model_buffer += content
+                    model_buffer, delta = self._merge_stream_text(model_buffer, content)
                     partial_answer = self._partial_answer(model_buffer)
-                    if partial_answer and len(partial_answer) > emitted_answer_length:
+                    if delta and partial_answer and len(partial_answer) > emitted_answer_length:
                         emit("token", {"delta": partial_answer[emitted_answer_length:]})
                         emitted_answer_length = len(partial_answer)
         else:
@@ -887,7 +887,7 @@ class AgentRuntime:
             request.grade, request.theme,
         )
         if emitted_answer_length < len(response.answer):
-            self._emit_answer_chunks(response.answer[emitted_answer_length:], emit)
+            await self._emit_answer_chunks(response.answer[emitted_answer_length:], emit)
         return response
 
     def _build_messages(
@@ -1077,8 +1077,14 @@ class AgentRuntime:
             data = chunk.get("data")
             if isinstance(data, tuple) and data:
                 return [data[0]]
+            if isinstance(data, list) and data:
+                return [data[-1]]
             if isinstance(data, (AIMessage, AIMessageChunk)):
                 return [data]
+            for key in ("message", "chunk"):
+                candidate = chunk.get(key)
+                if isinstance(candidate, (AIMessage, AIMessageChunk)):
+                    return [candidate]
         return []
 
     def _last_ai_message_text(self, messages: list[Any]) -> str:
@@ -1087,9 +1093,25 @@ class AgentRuntime:
                 return message_text(message.content)
         return ""
 
-    def _emit_answer_chunks(self, answer: str, emit: EventSink, size: int = 24) -> None:
+    @staticmethod
+    def _merge_stream_text(previous: str, incoming: str) -> tuple[str, str]:
+        """Accept both delta chunks and cumulative LangGraph messages."""
+        if not incoming:
+            return previous, ""
+        if not previous:
+            return incoming, incoming
+        if incoming.startswith(previous):
+            return incoming, incoming[len(previous):]
+        if incoming == previous or previous.endswith(incoming):
+            return previous, ""
+        return previous + incoming, incoming
+
+    async def _emit_answer_chunks(self, answer: str, emit: EventSink, size: int = 24) -> None:
         for index in range(0, len(answer), size):
             emit("token", {"delta": answer[index:index + size]})
+            # Let the SSE consumer flush each queued chunk instead of making
+            # the fallback answer appear as one large response.
+            await asyncio.sleep(0)
 
     def _load_prompt(self) -> str:
         if self.prompts is not None:
@@ -1117,9 +1139,21 @@ class AgentRuntime:
                 names.append(str(name))
         scope_name = (trusted.school or {}).get("schoolName") or (trusted.region or {}).get("name") or "当前范围"
         if names:
-            answer = f"当前模型不可用，先基于{scope_name}已审核的资源给出参考：{ '、'.join(names) }。围绕“{request.message}”，建议优先核对资源开放状态、适用年级和安全条件。"
+            resource_list = "\n".join(f"- {name}" for name in names)
+            answer = (
+                f"**当前模型不可用**，先基于 **{scope_name}** 已审核的资源给出参考。\n\n"
+                f"**可优先关注的资源：**\n{resource_list}\n\n"
+                f"围绕“{request.message}”，建议优先核对：\n\n"
+                "1. 资源开放状态。\n"
+                "2. 适用年级与教学目标。\n"
+                "3. 现场活动的安全条件。"
+            )
         else:
-            answer = f"当前模型不可用，且{scope_name}没有足够的已审核证据回答“{request.message}”。请补充资源或稍后重试。"
+            answer = (
+                f"**当前模型不可用。**\n\n"
+                f"{scope_name}没有足够的已审核证据回答“{request.message}”。\n\n"
+                "请补充具体资源、学校范围或年级信息后重试。"
+            )
         citations = [self._citation_by_id(trusted, item) for item in self._allowed_citations(trusted)]
         return AgentMessageResponse(
             threadId=thread_id, answer=answer, status=status,

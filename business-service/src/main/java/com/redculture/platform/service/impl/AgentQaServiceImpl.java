@@ -45,6 +45,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.locks.LockSupport;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -186,6 +187,7 @@ public class AgentQaServiceImpl implements AgentQaService {
 
         Thread thread = new Thread(() -> {
             boolean[] upstreamDone = {false};
+            boolean[] upstreamFinal = {false};
             try {
                 sendEvent(emitter, "phase.started", Map.of(
                         "phase", "retrieval",
@@ -202,6 +204,7 @@ public class AgentQaServiceImpl implements AgentQaService {
                     }
                     Map<String, Object> data = event.safeData();
                     if ("final".equals(event.event())) {
+                        upstreamFinal[0] = true;
                         data = normalizeStatefulFinalEvent(data, request, context);
                     }
                     sendEvent(emitter, event.event(), data);
@@ -215,7 +218,23 @@ public class AgentQaServiceImpl implements AgentQaService {
                 if (isClientDisconnected(exception)) {
                     return;
                 }
+                if (upstreamFinal[0]) {
+                    sendEvent(emitter, "error", Map.of(
+                            "errorType", "agent_stream_incomplete",
+                            "message", "Agent 已返回回答，但流式连接未正常结束"
+                    ));
+                    sendEvent(emitter, "done", Collections.emptyMap());
+                    emitter.complete();
+                    return;
+                }
                 // Stateful FastAPI 不可用时退回本地 Java 生成链路，仍然保持流式协议。
+                sendEvent(emitter, "model.failed", Map.of(
+                        "errorType", "stateful_agent_unavailable"
+                ));
+                sendEvent(emitter, "model.fallback", Map.of(
+                        "reset", true,
+                        "reason", "stateful_agent_unavailable"
+                ));
                 startLocalFallbackStream(emitter, request, currentUser);
                 return;
             } finally {
@@ -262,6 +281,7 @@ public class AgentQaServiceImpl implements AgentQaService {
                             "runId", runId,
                             "delta", answer.substring(index, Math.min(answer.length(), index + 8))
                     ));
+                    LockSupport.parkNanos(1_000_000L);
                 }
                 sendEvent(emitter, "phase.completed", Map.of(
                         "runId", runId,
