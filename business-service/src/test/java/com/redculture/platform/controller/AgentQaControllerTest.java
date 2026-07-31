@@ -10,6 +10,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
+import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
@@ -17,6 +18,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 class AgentQaControllerTest {
@@ -45,6 +47,25 @@ class AgentQaControllerTest {
                 .andExpect(jsonPath("$.data.answer").value("已找到相关资源。"))
                 .andExpect(jsonPath("$.data.intent").value("NEARBY_RESOURCE"))
                 .andExpect(jsonPath("$.data.retrievalStatus").value("ok"));
+    }
+
+    @Test
+    void disablesProxyBufferingForAgentStream() throws Exception {
+        AgentQaService agentQaService = mock(AgentQaService.class);
+        AuthCurrentUserVO user = new AuthCurrentUserVO();
+        user.setRoleCode("school_admin");
+        user.setSchoolId(1L);
+        when(agentQaService.stream(any(), eq(user))).thenReturn(new SseEmitter());
+
+        MockMvc mockMvc = MockMvcBuilders.standaloneSetup(new AgentQaController(agentQaService)).build();
+
+        mockMvc.perform(post("/api/ai/qa/stream")
+                        .requestAttr(AuthContext.CURRENT_USER_ATTRIBUTE, user)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"question\":\"附近有哪些红色资源？\"}"))
+                .andExpect(status().isOk())
+                .andExpect(header().string("Cache-Control", "no-cache, no-transform"))
+                .andExpect(header().string("X-Accel-Buffering", "no"));
     }
 
 }

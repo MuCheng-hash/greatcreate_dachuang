@@ -7,6 +7,7 @@ import com.redculture.platform.vo.AgentQaResponse;
 import com.redculture.platform.vo.AuthCurrentUserVO;
 import com.redculture.platform.vo.request.AgentQaRequest;
 import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -41,7 +42,11 @@ public class AgentQaController {
     }
 
     @PostMapping(value = "/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
-    public SseEmitter stream(@RequestBody AgentQaRequest request, HttpServletRequest servletRequest) {
+    public SseEmitter stream(@RequestBody AgentQaRequest request,
+                             HttpServletRequest servletRequest,
+                             HttpServletResponse servletResponse) {
+        servletResponse.setHeader("Cache-Control", "no-cache, no-transform");
+        servletResponse.setHeader("X-Accel-Buffering", "no");
         AuthCurrentUserVO currentUser = AuthContext.currentUser(servletRequest);
         if (currentUser == null) {
             return errorEmitter("AUTH_REQUIRED", "school account is required");

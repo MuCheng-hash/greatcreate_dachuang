@@ -191,6 +191,7 @@ public class AgentRuntimeClient {
         restClient.post()
                 .uri("/agent/messages/stream")
                 .headers(this::applyInternalServiceToken)
+                .header(HttpHeaders.CACHE_CONTROL, "no-cache")
                 .contentType(MediaType.APPLICATION_JSON)
                 .accept(MediaType.TEXT_EVENT_STREAM)
                 .body(request)
@@ -309,9 +310,14 @@ public class AgentRuntimeClient {
             String line;
             while ((line = reader.readLine()) != null) {
                 if (line.isEmpty()) {
-                    emitEvent(eventName, data.toString(), consumer);
+                    if (!"message".equals(eventName) || data.length() > 0) {
+                        emitEvent(eventName, data.toString(), consumer);
+                    }
                     eventName = "message";
                     data.setLength(0);
+                    continue;
+                }
+                if (line.startsWith(":")) {
                     continue;
                 }
                 if (line.startsWith("event:")) {
