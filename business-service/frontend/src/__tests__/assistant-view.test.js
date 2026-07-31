@@ -454,6 +454,74 @@ describe("assistant view", () => {
     expect(wrapper.text()).toContain("检索证据");
   });
 
+  it("renders answer text before final and keeps the streaming cursor visible", async () => {
+    let releaseFinal;
+    const finalGate = new Promise((resolve) => { releaseFinal = resolve; });
+    apiMock.stream = vi.fn(async (_path, body, options) => {
+      options.onEvent("run.started", { runId: "run-live", conversationId: body.conversationId });
+      options.onEvent("phase.started", { phase: "response", label: "正在生成回答" });
+      options.onEvent("token", { delta: "第一段" });
+      await finalGate;
+      options.onEvent("token", { delta: "回答" });
+      options.onEvent("final", {
+        response: {
+          answer: "第一段回答", conversationId: body.conversationId,
+          citations: [], followUpQuestions: [], generationStatus: "completed"
+        }
+      });
+      options.onEvent("done", {});
+    });
+    const wrapper = mount(AssistantView, {
+      global: { stubs: { AppShell: { template: "<div><slot /></div>" }, InlineNotice: true } }
+    });
+    await flushPromises();
+    await wrapper.get("textarea").setValue("延迟流式问题");
+    const submitPromise = wrapper.get("form").trigger("submit.prevent");
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    await wrapper.vm.$nextTick();
+
+    expect(wrapper.text()).toContain("第一段");
+    expect(wrapper.find(".stream-cursor").exists()).toBe(true);
+    expect(wrapper.text()).toContain("正在生成回答");
+
+    releaseFinal();
+    await submitPromise;
+    await flushPromises();
+    expect(wrapper.text()).toContain("第一段回答");
+    expect(wrapper.find(".stream-cursor").exists()).toBe(false);
+  });
+
+  it("stops streaming and ignores late token events", async () => {
+    let rejectStream;
+    apiMock.stream = vi.fn(async (_path, _body, options) => {
+      options.onEvent("token", { delta: "已经显示" });
+      await new Promise((_resolve, reject) => {
+        rejectStream = reject;
+        options.signal.addEventListener("abort", () => {
+          const error = new Error("aborted");
+          error.name = "AbortError";
+          reject(error);
+        }, { once: true });
+      });
+      options.onEvent("token", { delta: "不应继续显示" });
+    });
+    const wrapper = mount(AssistantView, {
+      global: { stubs: { AppShell: { template: "<div><slot /></div>" }, InlineNotice: true } }
+    });
+    await flushPromises();
+    await wrapper.get("textarea").setValue("停止流式问题");
+    const submitPromise = wrapper.get("form").trigger("submit.prevent");
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    await wrapper.get(".stop-button").trigger("click");
+    rejectStream?.(new Error("aborted"));
+    await submitPromise;
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("已经显示");
+    expect(wrapper.text()).not.toContain("不应继续显示");
+    expect(wrapper.find(".stream-cursor").exists()).toBe(false);
+  });
+
   it("keeps a completed greeting conversation in history after starting a new conversation", async () => {
     let historyReads = 0;
     const summary = {

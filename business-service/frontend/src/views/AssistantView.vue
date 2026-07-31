@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { nextTick, onMounted, ref, watch } from "vue";
+import { nextTick, onMounted, reactive, ref, watch } from "vue";
 import { Archive, ArchiveRestore, Bot, BrainCircuit, Check, ChevronDown, Clock3, History, ImagePlus, LoaderCircle, MessageCircleQuestion, Mic, Plus, Send, Sparkles, Trash2, UserRound, Volume2, VolumeX, Wrench, X } from "@lucide/vue";
 import AppShell from "@/components/AppShell.vue";
 import InlineNotice from "@/components/InlineNotice.vue";
@@ -44,6 +44,14 @@ interface AssistantMessage extends AgentQaResponse {
   traceEvents?: AssistantTraceEvent[];
   traceExpanded?: boolean;
   attachments?: AgentAttachment[];
+  isStreaming?: boolean;
+}
+
+interface StreamRenderState {
+  pending: string;
+  frameId: number | null;
+  frameType: "raf" | "timeout" | null;
+  cancelled: boolean;
 }
 
 interface SpeechRecognitionLike {
@@ -65,6 +73,7 @@ const question = ref<string>("");
 const loading = ref<boolean>(false);
 const error = ref<string>("");
 const chatScroll = ref<HTMLElement | null>(null);
+const chatAutoFollow = ref<boolean>(true);
 const messages = ref<AssistantMessage[]>(loadMessages());
 const conversationId = ref<string>(loadConversationId());
 const activeAbortController = ref<AbortController | null>(null);
@@ -82,6 +91,7 @@ const pendingImages = ref<AgentAttachment[]>([]);
 const listening = ref(false);
 const speakingIndex = ref<number | null>(null);
 const recognition = ref<SpeechRecognitionLike | null>(null);
+const streamRenderStates = new WeakMap<object, StreamRenderState>();
 
 onMounted(async () => {
   await Promise.all([schoolStore.load(), loadModels()]);
@@ -143,7 +153,7 @@ async function openConversation(selectedThreadId: string, showError = true): Pro
     threadId.value = detail.threadId;
     readOnlyConversation.value = detail.status === "archived";
     conversationId.value = makeConversationId();
-    await scrollToBottom();
+    await scrollToBottom(true);
   } catch {
     if (showError) historyError.value = "无法打开这条历史对话";
   } finally {
@@ -303,11 +313,14 @@ async function requestAssistant(userText: string, attachments: AgentAttachment[]
   if (readOnlyConversation.value) return;
   error.value = "";
   messages.value.push({ role: "user", text: userText, attachments });
-  const assistantMessage: AssistantMessage = {
+  const assistantMessage = reactive<AssistantMessage>({
     role: "assistant", answer: "", relatedResources: [], citations: [], followUpQuestions: [],
-    toolEvents: [], traceEvents: [], traceExpanded: true, streamStatus: "正在启动 Agent…"
-  };
+    toolEvents: [], traceEvents: [], traceExpanded: true, streamStatus: "正在启动 Agent…", isStreaming: true
+  });
   messages.value.push(assistantMessage);
+  const streamState = getStreamRenderState(assistantMessage);
+  streamState.cancelled = false;
+  chatAutoFollow.value = true;
   loading.value = true;
   const abortController = new AbortController();
   activeAbortController.value = abortController;
@@ -327,12 +340,14 @@ async function requestAssistant(userText: string, attachments: AgentAttachment[]
 
     if (typeof api.stream !== "function") {
       const result = await api.post<AgentQaResponse>("/api/ai/qa/ask", requestBody);
+      finishStreamRendering(assistantMessage);
       applyAssistantResult(assistantMessage, result, userText);
       await loadHistory();
     } else {
       await api.stream("/api/ai/qa/stream", requestBody, {
         signal: abortController.signal,
         onEvent(eventName: AgentSseEventName, data: AgentSseEventData) {
+          if (streamState.cancelled) return;
           if (data?.conversationId) conversationId.value = data.conversationId;
           if (data?.threadId) threadId.value = data.threadId;
           if (eventName === "run.started") {
@@ -375,14 +390,19 @@ async function requestAssistant(userText: string, attachments: AgentAttachment[]
             });
             assistantMessage.streamStatus = data.status === "ok" ? "工具结果已返回，正在整理回答" : "部分工具不可用，正在降级处理";
           } else if (eventName === "model.fallback") {
-            if (data.reset) assistantMessage.answer = "";
+            if (data.reset) {
+              resetStreamRendering(assistantMessage);
+              assistantMessage.answer = "";
+            }
             assistantMessage.streamStatus = `正在切换备用模型：${data.nextModel || "轻量模型"}`;
           } else if (eventName === "token") {
-            assistantMessage.answer += data.delta || "";
+            queueStreamDelta(assistantMessage, data.delta || "");
             updateTrace(assistantMessage, "response", { kind: "response", title: "生成回答", status: "running" });
             assistantMessage.streamStatus = "正在生成回答";
           } else if (eventName === "final") {
             finalReceived = true;
+            flushStreamDelta(assistantMessage);
+            finishStreamRendering(assistantMessage);
             applyAssistantResult(assistantMessage, data.response || {}, userText);
             if (data.response?.conversationId) conversationId.value = data.response.conversationId;
             if (data.response?.threadId) threadId.value = data.response.threadId;
@@ -401,10 +421,14 @@ async function requestAssistant(userText: string, attachments: AgentAttachment[]
   } catch (requestError) {
     const requestFailure = requestError instanceof Error ? requestError : new Error("请求失败");
     if (requestFailure.name === "AbortError") {
+      finishStreamRendering(assistantMessage);
+      assistantMessage.isStreaming = false;
       assistantMessage.streamStatus = "已停止生成";
       if (!assistantMessage.answer) messages.value.pop();
       return;
     }
+    resetStreamRendering(assistantMessage);
+    assistantMessage.answer = "";
     try {
       const result = await api.post<AgentQaResponse>("/api/ai/qa/ask", {
         question: userText,
@@ -420,15 +444,22 @@ async function requestAssistant(userText: string, attachments: AgentAttachment[]
       error.value = `${requestFailure.message}，已切换到兼容问答接口`;
       return;
     } catch {
-    const resourceCount = schoolStore.resources.length;
-    assistantMessage.answer = `${schoolStore.school?.schoolName || "当前学校"}现有 ${resourceCount} 个已关联周边资源。围绕“${userText}”，建议优先选择距离近、可达性高的资源，并按课堂导入、现场观察、实践反思三个阶段组织活动。`;
-    assistantMessage.citations = ["当前为本地兜底回答，智能问答服务恢复后可获得更完整的引用结果。"];
-    assistantMessage.retrievalStatus = "degraded";
-    assistantMessage.generationStatus = "degraded";
-    assistantMessage.followUpQuestions = buildFollowUpQuestions(userText);
-    error.value = requestFailure.message;
+      finishStreamRendering(assistantMessage);
+      assistantMessage.isStreaming = false;
+      const resourceCount = schoolStore.resources.length;
+      assistantMessage.answer = `${schoolStore.school?.schoolName || "当前学校"}现有 ${resourceCount} 个已关联周边资源。围绕“${userText}”，建议优先选择距离近、可达性高的资源，并按课堂导入、现场观察、实践反思三个阶段组织活动。`;
+      assistantMessage.citations = ["当前为本地兜底回答，智能问答服务恢复后可获得更完整的引用结果。"];
+      assistantMessage.retrievalStatus = "degraded";
+      assistantMessage.generationStatus = "degraded";
+      assistantMessage.followUpQuestions = buildFollowUpQuestions(userText);
+      error.value = requestFailure.message;
     }
   } finally {
+    if (assistantMessage.isStreaming) {
+      flushStreamDelta(assistantMessage);
+      finishStreamRendering(assistantMessage);
+      assistantMessage.isStreaming = false;
+    }
     loading.value = false;
     activeAbortController.value = null;
     await scrollToBottom();
@@ -453,10 +484,92 @@ function applyAssistantResult(message: AssistantMessage, result: Partial<AgentQa
     runId: result?.runId || message.runId,
     fallbackLevel: result?.fallbackLevel || null,
     effectiveModel: result?.model ? `${result.provider || "LLM"} / ${result.model}` : message.effectiveModel,
-    streamStatus: result?.generationStatus === "degraded" ? "已使用降级回答" : "回答完成"
+    streamStatus: result?.generationStatus === "degraded" ? "已使用降级回答" : "回答完成",
+    isStreaming: false
   });
   if (result?.conversationId) conversationId.value = result.conversationId;
   if (result?.threadId) threadId.value = result.threadId;
+}
+
+function getStreamRenderState(message: AssistantMessage): StreamRenderState {
+  const key = message as object;
+  const existing = streamRenderStates.get(key);
+  if (existing) return existing;
+  const state: StreamRenderState = {
+    pending: "",
+    frameId: null,
+    frameType: null,
+    cancelled: false
+  };
+  streamRenderStates.set(key, state);
+  return state;
+}
+
+function clearScheduledStreamFrame(state: StreamRenderState): void {
+  if (state.frameId === null) return;
+  if (state.frameType === "raf" && typeof window.cancelAnimationFrame === "function") {
+    window.cancelAnimationFrame(state.frameId);
+  } else {
+    window.clearTimeout(state.frameId);
+  }
+  state.frameId = null;
+  state.frameType = null;
+}
+
+function queueStreamDelta(message: AssistantMessage, delta: string): void {
+  if (!delta) return;
+  const state = getStreamRenderState(message);
+  if (state.cancelled) return;
+  state.pending += delta;
+  if (state.frameId !== null) return;
+  const flush = () => {
+    state.frameId = null;
+    state.frameType = null;
+    if (state.cancelled) {
+      state.pending = "";
+      return;
+    }
+    const pending = state.pending;
+    state.pending = "";
+    if (pending) {
+      message.answer = `${message.answer || ""}${pending}`;
+      void scrollToBottom();
+    }
+  };
+  if (typeof window.requestAnimationFrame === "function") {
+    state.frameType = "raf";
+    state.frameId = window.requestAnimationFrame(flush);
+  } else {
+    state.frameType = "timeout";
+    state.frameId = window.setTimeout(flush, 16);
+  }
+}
+
+function flushStreamDelta(message: AssistantMessage): void {
+  const state = getStreamRenderState(message);
+  clearScheduledStreamFrame(state);
+  if (state.cancelled) {
+    state.pending = "";
+    return;
+  }
+  if (state.pending) {
+    message.answer = `${message.answer || ""}${state.pending}`;
+    state.pending = "";
+  }
+}
+
+function resetStreamRendering(message: AssistantMessage): void {
+  const state = getStreamRenderState(message);
+  clearScheduledStreamFrame(state);
+  state.pending = "";
+  state.cancelled = false;
+}
+
+function finishStreamRendering(message: AssistantMessage): void {
+  const state = getStreamRenderState(message);
+  clearScheduledStreamFrame(state);
+  state.pending = "";
+  state.cancelled = true;
 }
 
 const invalidFollowUpMarkers = [
@@ -641,12 +754,26 @@ function toggleSpeech(message: AssistantMessage, index: number): void {
 }
 
 function stopGeneration(): void {
+  const streamMessage = [...messages.value].reverse().find(item => item.role === "assistant" && item.isStreaming);
+  if (streamMessage) {
+    finishStreamRendering(streamMessage);
+    streamMessage.isStreaming = false;
+    streamMessage.streamStatus = "已停止生成";
+  }
   activeAbortController.value?.abort();
 }
 
-async function scrollToBottom(): Promise<void> {
+function handleChatScroll(): void {
+  const element = chatScroll.value;
+  if (!element) return;
+  chatAutoFollow.value = element.scrollHeight - element.scrollTop - element.clientHeight < 96;
+}
+
+async function scrollToBottom(force = false): Promise<void> {
   await nextTick();
-  if (chatScroll.value) chatScroll.value.scrollTop = chatScroll.value.scrollHeight;
+  if (chatScroll.value && (force || chatAutoFollow.value)) {
+    chatScroll.value.scrollTop = chatScroll.value.scrollHeight;
+  }
 }
 
 function clearChat(): void {
@@ -709,12 +836,12 @@ function clearChat(): void {
             <span><Archive :size="15" />这是归档对话，仅供查看。</span>
             <button class="text-button" type="button" :disabled="Boolean(historyBusyId)" @click="restoreConversation(threadId)">恢复对话</button>
           </div>
-          <div ref="chatScroll" class="chat-scroll" aria-live="polite">
+          <div ref="chatScroll" class="chat-scroll" aria-live="polite" @scroll="handleChatScroll">
           <InlineNotice v-if="error" tone="info">{{ error }}，已显示本地参考回答。</InlineNotice>
           <article v-for="(message,index) in messages" :key="index" class="chat-message" :class="message.role">
             <span class="chat-avatar"><UserRound v-if="message.role === 'user'" :size="17" /><Bot v-else :size="17" /></span>
             <div>
-              <p>{{ message.text || message.answer }}</p>
+              <p>{{ message.text || message.answer }}<span v-if="message.role === 'assistant' && message.isStreaming" class="stream-cursor" aria-hidden="true"></span></p>
               <div v-if="message.attachments?.length" class="message-images">
                 <img v-for="attachment in message.attachments" :key="attachment.name" :src="attachment.dataUrl" :alt="attachment.name" />
               </div>
@@ -833,6 +960,8 @@ function clearChat(): void {
 .chat-avatar { display: grid; place-items: center; width: 34px; height: 34px; border-radius: 50%; background: var(--green); color: #fff; }
 .chat-message > div { padding: 13px 15px; border-radius: 8px; background: var(--surface-muted); }
 .chat-message p { margin: 0; line-height: 1.8; white-space: pre-wrap; }
+.stream-cursor { display: inline-block; width: 2px; height: 1.05em; margin-left: 3px; vertical-align: -0.15em; border-radius: 1px; background: var(--green); animation: stream-cursor-blink 850ms steps(1,end) infinite; }
+@keyframes stream-cursor-blink { 50% { opacity: 0; } }
 .message-images { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
 .message-images img { width: 132px; height: 96px; object-fit: cover; border: 1px solid var(--line); border-radius: 6px; }
 .message-audio { display: grid; width: 28px; height: 28px; place-items: center; margin-top: 8px; border: 0; border-radius: 50%; background: transparent; color: var(--muted); cursor: pointer; }
