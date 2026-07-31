@@ -683,8 +683,10 @@ function clearChat(): void {
             <button v-else class="history-restore" type="button" title="恢复对话" :aria-label="`恢复对话：${item.title}`" :disabled="Boolean(historyBusyId)" @click="restoreConversation(item.threadId)"><ArchiveRestore :size="14" /></button>
           </div>
         </div>
-        <button class="primary-button full-button" type="button" :disabled="loading || readOnlyConversation" @click="explain"><Sparkles :size="17" />生成学校讲解</button>
-        <button class="text-button clear-button" type="button" @click="clearChat"><Trash2 :size="16" />清空会话</button>
+        <div class="assistant-side-actions">
+          <button class="primary-button full-button" type="button" :disabled="loading || readOnlyConversation" @click="explain"><Sparkles :size="17" />生成学校讲解</button>
+          <button class="text-button clear-button" type="button" @click="clearChat"><Trash2 :size="16" />清空会话</button>
+        </div>
       </aside>
 
       <div class="chat-area">
@@ -803,7 +805,8 @@ function clearChat(): void {
 .history-archive:hover, .icon-action:hover { color: var(--red); background: #f4efed; }
 .history-restore { display: grid; width: 28px; height: 28px; place-items: center; border: 0; border-radius: 5px; background: transparent; color: var(--green); cursor: pointer; }
 .history-restore:hover { background: var(--green-soft); }
-.clear-button { justify-content: flex-start; margin-top: auto; color: var(--muted); }
+.assistant-side-actions { display: flex; flex: 0 0 auto; flex-direction: column; gap: 8px; margin-top: auto; }
+.clear-button { justify-content: flex-start; margin-top: 0; color: var(--muted); }
 .chat-area { min-width: 0; min-height: 0; display: grid; grid-template-rows: minmax(0,1fr) auto; overflow: hidden; }
 .chat-main { min-width: 0; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
 .archived-banner { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 14px; border-bottom: 1px solid var(--line); background: #fff9e8; color: #75602a; font-size: 12px; }
@@ -888,7 +891,7 @@ function clearChat(): void {
 @media (max-width: 900px) {
   .assistant-layout { height: calc(100svh - 154px); min-height: 520px; grid-template-columns: 1fr; }
   .assistant-side { max-height: 260px; overflow-y: auto; border-right: 0; border-bottom: 1px solid var(--line); padding: 14px; }
-  .assistant-side > div:first-child, .assistant-side > .primary-button, .assistant-side > .clear-button { display: none; }
+  .assistant-side > div:first-child, .assistant-side-actions { display: none; }
   .history-list { flex-basis: 150px; height: 150px; min-height: 70px; max-height: 150px; }
   .chat-scroll { padding: 16px 12px; }
   .chat-message { max-width: 92%; }

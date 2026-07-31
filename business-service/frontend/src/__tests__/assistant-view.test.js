@@ -88,6 +88,22 @@ describe("assistant view", () => {
     expect(wrapper.find(".history-row").exists()).toBe(false);
   });
 
+  it("groups school explanation and clear actions at the bottom of the sidebar", async () => {
+    const wrapper = mount(AssistantView, {
+      global: { stubs: { AppShell: { template: "<div><slot /></div>" }, InlineNotice: true } }
+    });
+    await flushPromises();
+
+    const actions = wrapper.get(".assistant-side-actions");
+    expect(actions.find(".primary-button").text()).toContain("生成学校讲解");
+    expect(actions.find(".clear-button").text()).toContain("清空会话");
+    expect(actions.element.children[0]).toBe(actions.find(".primary-button").element);
+    expect(actions.element.children[1]).toBe(actions.find(".clear-button").element);
+
+    await actions.get(".clear-button").trigger("click");
+    expect(wrapper.find(".chat-message").exists()).toBe(false);
+  });
+
   it("opens archived conversations as read-only and restores them without losing messages", async () => {
     const activeSummary = {
       threadId: "active-1", title: "当前历史", preview: "当前回答", messageCount: 2,
@@ -142,6 +158,7 @@ describe("assistant view", () => {
     expect(wrapper.get(".follow-ups button").text()).toBe("归档追问");
     expect(wrapper.get(".follow-ups button").attributes("disabled")).toBeDefined();
     expect(wrapper.find(".chat-area > .chat-composer").exists()).toBe(true);
+    expect(wrapper.get(".assistant-side-actions .primary-button").attributes("disabled")).toBeDefined();
     expect(wrapper.get("textarea").attributes("disabled")).toBeDefined();
     expect(wrapper.get("textarea").attributes("placeholder")).toContain("请先恢复对话");
 
