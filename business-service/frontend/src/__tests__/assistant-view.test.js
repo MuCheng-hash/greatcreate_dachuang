@@ -290,7 +290,63 @@ describe("assistant view", () => {
     await wrapper.get("form").trigger("submit.prevent");
     await flushPromises();
 
-    expect(wrapper.find(".follow-ups").text()).toContain("怎样利用常安镇敬老院开展一节实践课？");
+    expect(wrapper.find(".follow-ups").text()).toContain("请设计一节利用“常安镇敬老院”开展的实践课。");
+  });
+
+  it("filters meta follow-ups and sends an actionable teacher task", async () => {
+    apiMock.post.mockResolvedValueOnce({
+      threadId: "thread-1", answer: "回答", relatedResources: ["常安镇敬老院"], citations: [],
+      followUpQuestions: ["您需要查询哪些本土思政教育资源？", "您是否需要特定年级的思政教学建议？"],
+      generationStatus: "completed"
+    });
+    const wrapper = mount(AssistantView, {
+      global: { stubs: { AppShell: { template: "<div><slot /></div>" }, InlineNotice: true } }
+    });
+    await flushPromises();
+    await wrapper.get("textarea").setValue("请介绍本校周边资源");
+    await wrapper.get("form").trigger("submit.prevent");
+    await flushPromises();
+
+    const buttons = wrapper.findAll(".follow-ups button");
+    const suggestion = buttons[0].text();
+    expect(suggestion).toBe("请说明“常安镇敬老院”适合哪些年级。");
+    expect(wrapper.text()).not.toContain("您需要查询哪些本土思政教育资源？");
+
+    await buttons[0].trigger("click");
+    await flushPromises();
+    expect(apiMock.post).toHaveBeenLastCalledWith("/api/ai/qa/ask", expect.objectContaining({ question: suggestion }));
+    expect(wrapper.findAll(".chat-message.user").at(-1)?.text()).toContain(suggestion);
+  });
+
+  it("replaces invalid follow-ups restored from historical metadata", async () => {
+    apiMock.get.mockImplementation(async (path) => {
+      if (path === "/api/ai/models") return [];
+      if (path === "/api/ai/qa/history") return [{
+        threadId: "history-invalid-follow-up", title: "历史问题", preview: "历史回答", messageCount: 2,
+        scopeType: "SCHOOL", scopeId: "1", createdAt: "2026-07-28T00:00:00Z", updatedAt: "2026-07-28T01:00:00Z"
+      }];
+      if (path === "/api/ai/qa/history/history-invalid-follow-up") return {
+        threadId: "history-invalid-follow-up", scopeType: "SCHOOL", scopeId: "1", status: "active",
+        createdAt: "2026-07-28T00:00:00Z", updatedAt: "2026-07-28T01:00:00Z",
+        messages: [
+          { id: 1, role: "user", content: "请介绍本校周边资源", createdAt: "2026-07-28T00:00:00Z" },
+          {
+            id: 2, role: "assistant", content: "历史回答", createdAt: "2026-07-28T00:01:00Z",
+            metadata: { followUpQuestions: ["您需要查询哪些本土思政教育资源？"] }
+          }
+        ]
+      };
+      return [];
+    });
+    const wrapper = mount(AssistantView, {
+      global: { stubs: { AppShell: { template: "<div><slot /></div>" }, InlineNotice: true } }
+    });
+    await flushPromises();
+    await wrapper.get(".history-open").trigger("click");
+    await flushPromises();
+
+    expect(wrapper.get(".follow-ups button").text()).toBe("请介绍适合当前年级的本土思政教育资源。");
+    expect(wrapper.text()).not.toContain("您需要查询哪些本土思政教育资源？");
   });
 
   it("previews and forwards an image attachment", async () => {

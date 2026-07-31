@@ -130,7 +130,7 @@ async function openConversation(selectedThreadId: string, showError = true): Pro
     messages.value = storedMessages.map((item, index) => {
       if (item.role === "user") return { role: "user", text: item.content };
       const previousUser = [...storedMessages.slice(0, index)].reverse().find((candidate) => candidate.role === "user");
-      const storedFollowUps = normalizeFollowUpQuestions(item.metadata?.followUpQuestions);
+      const storedFollowUps = normalizeFollowUpQuestions(item.metadata?.followUpQuestions, 4, previousUser?.content || "");
       return {
         role: "assistant",
         answer: item.content,
@@ -437,7 +437,7 @@ async function requestAssistant(userText: string, attachments: AgentAttachment[]
 
 function applyAssistantResult(message: AssistantMessage, result: Partial<AgentQaResponse>, userText = ""): void {
   const relatedResources = normalizeFollowUpQuestions(result?.relatedResources, 8);
-  const serverFollowUps = normalizeFollowUpQuestions(result?.followUpQuestions);
+  const serverFollowUps = normalizeFollowUpQuestions(result?.followUpQuestions, 4, userText);
   Object.assign(message, {
     answer: result?.answer || "服务未返回回答。",
     relatedResources,
@@ -459,22 +459,33 @@ function applyAssistantResult(message: AssistantMessage, result: Partial<AgentQa
   if (result?.threadId) threadId.value = result.threadId;
 }
 
-function normalizeFollowUpQuestions(value: unknown, limit = 4): string[] {
+const invalidFollowUpMarkers = [
+  "您需要", "你需要", "您是否需要", "你是否需要", "您想", "你想",
+  "请问您", "请问你", "你可以告诉我", "您可以告诉我", "需要查询哪些"
+];
+
+function isActionableFollowUp(value: string, currentQuestion = ""): boolean {
+  const normalized = value.trim();
+  if (!normalized || normalized.length > 120 || normalized === currentQuestion.trim()) return false;
+  return !invalidFollowUpMarkers.some((marker) => normalized.includes(marker));
+}
+
+function normalizeFollowUpQuestions(value: unknown, limit = 4, currentQuestion = ""): string[] {
   if (!Array.isArray(value)) return [];
   return [...new Set(value
     .filter((item): item is string => typeof item === "string")
     .map((item) => item.trim())
-    .filter(Boolean))].slice(0, limit);
+    .filter((item) => isActionableFollowUp(item, currentQuestion)))].slice(0, limit);
 }
 
 function buildFollowUpQuestions(userText = "", relatedResources: string[] = []): string[] {
   const resourceName = relatedResources[0] || schoolStore.resources[0]?.resource?.resourceName;
   return normalizeFollowUpQuestions([
-    resourceName ? "这个资源适合哪些年级？" : "哪些资源更适合当前年级的思政教育？",
-    resourceName ? `怎样利用${resourceName}开展一节实践课？` : "怎样利用学校周边资源开展一节实践课？",
-    "请给出一次校外实践活动的安全注意事项。",
-    userText ? `如何将“${userText}”转化为课堂活动？` : "如何将这个问题转化为课堂活动？"
-  ]);
+    resourceName ? `请说明“${resourceName}”适合哪些年级。` : "请介绍适合当前年级的本土思政教育资源。",
+    resourceName ? `请设计一节利用“${resourceName}”开展的实践课。` : "请结合学校周边资源设计一节思政实践课。",
+    "请列出一次校外实践活动的安全注意事项。",
+    userText ? `请说明如何将“${userText}”转化为课堂活动。` : "请说明如何将当前问题转化为课堂活动。"
+  ], 4, userText);
 }
 
 function phaseLabel(phase?: string): string {
