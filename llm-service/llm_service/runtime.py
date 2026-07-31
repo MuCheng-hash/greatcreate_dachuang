@@ -1139,9 +1139,21 @@ class AgentRuntime:
                 names.append(str(name))
         scope_name = (trusted.school or {}).get("schoolName") or (trusted.region or {}).get("name") or "当前范围"
         if names:
-            answer = f"当前模型不可用，先基于{scope_name}已审核的资源给出参考：{ '、'.join(names) }。围绕“{request.message}”，建议优先核对资源开放状态、适用年级和安全条件。"
+            resource_list = "\n".join(f"- {name}" for name in names)
+            answer = (
+                f"**当前模型不可用**，先基于 **{scope_name}** 已审核的资源给出参考。\n\n"
+                f"**可优先关注的资源：**\n{resource_list}\n\n"
+                f"围绕“{request.message}”，建议优先核对：\n\n"
+                "1. 资源开放状态。\n"
+                "2. 适用年级与教学目标。\n"
+                "3. 现场活动的安全条件。"
+            )
         else:
-            answer = f"当前模型不可用，且{scope_name}没有足够的已审核证据回答“{request.message}”。请补充资源或稍后重试。"
+            answer = (
+                f"**当前模型不可用。**\n\n"
+                f"{scope_name}没有足够的已审核证据回答“{request.message}”。\n\n"
+                "请补充具体资源、学校范围或年级信息后重试。"
+            )
         citations = [self._citation_by_id(trusted, item) for item in self._allowed_citations(trusted)]
         return AgentMessageResponse(
             threadId=thread_id, answer=answer, status=status,

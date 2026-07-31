@@ -853,6 +853,48 @@ def test_model_output_filters_invented_citations(tmp_path: Path):
     assert [item.citation_id for item in response.citations] == ["chunk:1"]
 
 
+def test_agent_prompt_allows_markdown_answer_without_changing_json_contract(tmp_path: Path):
+    prompt = (Path(__file__).parent / "prompts" / "agent" / "v1" / "system.md").read_text(encoding="utf-8")
+    assert "answer 字段允许使用 Markdown" in prompt
+    assert "不要使用 HTML" in prompt
+
+    runtime = create_app(settings_for(tmp_path)).state.runtime
+    markdown_answer = "### 资源建议\n\n**重点：** 先确认开放状态。\n\n1. 课堂导入。\n2. 现场观察。"
+
+    class FakeAgent:
+        async def ainvoke(self, _input, config=None):
+            return {"messages": [AIMessage(content=json.dumps({
+                "answer": markdown_answer,
+                "citationIds": [],
+                "relatedResources": [],
+                "followUpQuestions": [],
+            }, ensure_ascii=False))]}
+
+    runtime._agent = FakeAgent()
+    response = asyncio.run(runtime.handle(AgentMessageRequest.model_validate(message_payload())))
+
+    assert response.status == "completed"
+    assert response.answer == markdown_answer
+
+
+def test_degraded_answer_uses_markdown_sections_and_lists(tmp_path: Path):
+    runtime = create_app(settings_for(tmp_path)).state.runtime
+    request = AgentMessageRequest.model_validate(message_payload(message="请介绍周边资源"))
+    trusted = TrustedContext(
+        school={"schoolName": "里庄小学"},
+        resources=[
+            {"resource": {"resourceName": "甲纪念馆"}},
+            {"resource": {"resourceName": "乙文化站"}},
+        ],
+    )
+
+    response = runtime._degraded_answer(request, trusted, "thread-1", False)
+
+    assert response.answer.startswith("**当前模型不可用**")
+    assert "\n- 甲纪念馆" in response.answer
+    assert "\n1. 资源开放状态。" in response.answer
+
+
 def test_stream_prefetches_graph_tool_for_trusted_scope(tmp_path: Path):
     settings = settings_for(tmp_path)
     application = create_app(settings)
