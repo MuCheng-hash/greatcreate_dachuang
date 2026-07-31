@@ -407,6 +407,44 @@ describe("assistant view", () => {
     expect(wrapper.text()).toContain("已由答案生成服务整理");
   });
 
+  it("renders assistant Markdown safely with source chips and copy action", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+    apiMock.post.mockResolvedValueOnce({
+      answer: "### 资源建议\n\n**重点：** 先确认开放状态。\n\n1. 课堂导入\n2. 现场观察\n\n- 注意安全\n- 做好记录\n\n<script>alert('xss')</script>\n\n[危险链接](javascript:alert('xss'))",
+      citations: [{ citationId: "chunk:1", title: "资源说明", excerpt: "已授权证据" }],
+      followUpQuestions: [],
+      retrievalStatus: "ok",
+      generationStatus: "completed",
+    });
+    const wrapper = mount(AssistantView, {
+      global: { stubs: { AppShell: { template: "<div><slot /></div>" }, InlineNotice: true } }
+    });
+    await flushPromises();
+
+    await wrapper.get("textarea").setValue("**用户问题**");
+    await wrapper.get("form").trigger("submit.prevent");
+    await flushPromises();
+
+    const answer = wrapper.findAll(".assistant-answer").at(-1);
+    expect(answer.find("h3").text()).toBe("资源建议");
+    expect(answer.find("strong").text()).toContain("重点：");
+    expect(answer.findAll("ol li")).toHaveLength(2);
+    expect(answer.findAll("ul li")).toHaveLength(2);
+    expect(answer.find("script").exists()).toBe(false);
+    expect(answer.html()).not.toContain("javascript:");
+    expect(wrapper.find(".chat-message.user strong").exists()).toBe(false);
+    expect(wrapper.get(".chat-citations-label").text()).toBe("来源");
+    expect(wrapper.get(".citation-chip").text()).toBe("资源说明");
+
+    await wrapper.findAll(".chat-message.assistant").at(-1).get('button[aria-label="复制回答"]').trigger("click");
+    expect(writeText).toHaveBeenCalledWith(expect.stringContaining("### 资源建议"));
+    expect(wrapper.get('button[aria-label="已复制"]').exists()).toBe(true);
+  });
+
   it("streams tool progress and token deltas through one conversation", async () => {
     apiMock.stream = vi.fn(async (path, body, options) => {
       expect(path).toBe("/api/ai/qa/stream");
