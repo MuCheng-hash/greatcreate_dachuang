@@ -6,7 +6,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 from fastapi.testclient import TestClient
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, AIMessageChunk
 import pytest
 
 from llm_service import legacy_api
@@ -17,6 +17,7 @@ from llm_service.repository import ConversationRepository
 from llm_service.prompt_manager import PromptManager
 from llm_service.planner import AgentPlan
 from llm_service.runtime import AgentRuntime
+from llm_service.model_gateway import ModelGateway
 from llm_service.schemas import AgentMessageRequest, TrustedContext
 from llm_service.settings import Settings
 from llm_service.structured_tasks import (
@@ -664,6 +665,55 @@ def test_stateful_stream_reports_primary_failure_and_fallback_success(tmp_path: 
     final_data = json.loads(final_block.split("data: ", 1)[1])
     assert final_data["response"]["provider"] == "ollama"
     assert final_data["response"]["fallbackLevel"] == 1
+
+
+def test_stateful_stream_deduplicates_cumulative_langgraph_messages_before_final(tmp_path: Path):
+    settings = settings_for(
+        tmp_path,
+        primary_provider="test",
+        primary_model="stream-model",
+        primary_base_url="http://test.invalid/v1",
+        primary_api_key="stream-key",
+    )
+    app = create_app(settings)
+    runtime = app.state.runtime
+
+    class StreamingAgent:
+        async def astream(self, _input, config=None, stream_mode=None, version=None):
+            for content in (
+                '{"answer":"第一',
+                '{"answer":"第一段',
+                '{"answer":"第一段回答","citationIds":[]}',
+            ):
+                yield {"data": (AIMessageChunk(content=content), {"langgraph_node": "agent"})}
+
+    runtime._create_agent_for = lambda _config: StreamingAgent()
+
+    async def collect_events():
+        return [event async for event in runtime.stream_events(
+            AgentMessageRequest.model_validate(message_payload(message="测试累计分片"))
+        )]
+
+    events = asyncio.run(collect_events())
+    token_values = [
+        json.loads(event.split("data: ", 1)[1])["delta"]
+        for event in events if event.startswith("event: token")
+    ]
+    final_event = next(event for event in events if event.startswith("event: final"))
+    final_data = json.loads(final_event.split("data: ", 1)[1])
+
+    assert token_values == ["第一", "段", "回答"]
+    assert "event: final" in events[-2]
+    assert final_data["response"]["answer"] == "第一段回答"
+
+
+def test_stream_merge_helpers_accept_delta_and_cumulative_provider_shapes():
+    previous, delta = ModelGateway._merge_stream_text("", "你好")
+    assert (previous, delta) == ("你好", "你好")
+    previous, delta = ModelGateway._merge_stream_text(previous, "你好，老师")
+    assert (previous, delta) == ("你好，老师", "，老师")
+    previous, delta = AgentRuntime._merge_stream_text(previous, "继续说明")
+    assert (previous, delta) == ("你好，老师继续说明", "继续说明")
 
 
 def test_stateful_stream_rejects_cross_owner_and_cross_scope_thread(tmp_path: Path):

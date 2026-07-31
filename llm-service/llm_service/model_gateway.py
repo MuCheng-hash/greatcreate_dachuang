@@ -186,7 +186,7 @@ class ModelGateway:
         for index, (target, model) in enumerate(attempts_chain):
             attempt_context = self._attempt_context(context, target)
             yield "attempt", self._target_data(target)
-            parts: list[str] = []
+            stream_buffer = ""
             error_type = "invalid_response"
             try:
                 async for chunk in model.astream(
@@ -195,9 +195,10 @@ class ModelGateway:
                 ):
                     text = message_text(chunk.content)
                     if text:
-                        parts.append(text)
-                        yield "token", {"delta": text, **self._target_data(target)}
-                parsed = self.parse_json("".join(parts))
+                        stream_buffer, delta = self._merge_stream_text(stream_buffer, text)
+                        if delta:
+                            yield "token", {"delta": delta, **self._target_data(target)}
+                parsed = self.parse_json(stream_buffer)
                 if parsed is not None and (validator is None or validator(parsed)):
                     yield "complete", {"result": parsed, **self._target_data(target)}
                     return
@@ -219,6 +220,25 @@ class ModelGateway:
                 }
         self.alerts.exhausted(context, attempts or [{"status": "not_configured"}])
         yield "exhausted", {"attempts": attempts}
+
+    @staticmethod
+    def _merge_stream_text(previous: str, incoming: str) -> tuple[str, str]:
+        """Normalize providers that emit either deltas or cumulative content.
+
+        OpenAI-compatible providers normally emit deltas, while some gateway
+        adapters forward the full content seen so far.  The public stream
+        contract is always a delta, so cumulative snapshots must not be sent
+        twice to the browser.
+        """
+        if not incoming:
+            return previous, ""
+        if not previous:
+            return incoming, incoming
+        if incoming.startswith(previous):
+            return incoming, incoming[len(previous):]
+        if incoming == previous or previous.endswith(incoming):
+            return previous, ""
+        return previous + incoming, incoming
 
     def _trace_config(
         self,
