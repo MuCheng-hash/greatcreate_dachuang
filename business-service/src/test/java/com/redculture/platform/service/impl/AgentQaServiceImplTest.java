@@ -116,6 +116,25 @@ class AgentQaServiceImplTest {
     }
 
     @Test
+    void routesUnknownQuestionThroughStatefulRuntimeWhenAvailable() {
+        KnowledgeRetriever retriever = mock(KnowledgeRetriever.class);
+        when(retriever.retrieve(any(KnowledgeRetrieveRequest.class))).thenReturn(KnowledgeRetrieveResult.empty());
+        AgentRuntimeClient runtime = mock(AgentRuntimeClient.class);
+        when(runtime.generate(any(), any(), any())).thenReturn(new AgentRuntimeResult(
+                new GeneratedAnswer("问候回答", List.of(), List.of("你还可以问什么？")),
+                "thread-greeting", "degraded", List.of()
+        ));
+        AgentQaServiceImpl service = newRuntimeService(retriever, runtime);
+
+        AgentQaResponse response = service.ask(request("你好，你可以做什么？"), schoolUser());
+
+        assertEquals(AgentIntent.UNKNOWN, response.getIntent());
+        assertEquals("thread-greeting", response.getThreadId());
+        assertEquals("问候回答", response.getAnswer());
+        verify(runtime).generate(any(), any(), any());
+    }
+
+    @Test
     void preservesEmptyRetrievalStatus() {
         KnowledgeRetriever retriever = mock(KnowledgeRetriever.class);
         when(retriever.retrieve(any())).thenReturn(KnowledgeRetrieveResult.empty());

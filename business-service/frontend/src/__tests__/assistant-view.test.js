@@ -49,7 +49,13 @@ describe("assistant view", () => {
         createdAt: "2026-07-28T00:00:00Z", updatedAt: "2026-07-28T01:00:00Z",
         messages: [
           { id: 1, role: "user", content: "历史问题", createdAt: "2026-07-28T00:00:00Z" },
-          { id: 2, role: "assistant", content: "历史回答", createdAt: "2026-07-28T00:01:00Z" }
+          {
+            id: 2,
+            role: "assistant",
+            content: "历史回答",
+            createdAt: "2026-07-28T00:01:00Z",
+            metadata: { followUpQuestions: ["历史追问"] }
+          }
         ]
       };
       return [];
@@ -59,10 +65,15 @@ describe("assistant view", () => {
     });
     await flushPromises();
 
+    expect(wrapper.find(".chat-main .chat-scroll").exists()).toBe(true);
+    expect(wrapper.find(".chat-area > .chat-composer").exists()).toBe(true);
+    expect(wrapper.find(".chat-composer .composer-model-select").exists()).toBe(true);
+    expect(wrapper.find(".assistant-side .composer-model-select").exists()).toBe(false);
     expect(wrapper.text()).toContain("历史问题");
     await wrapper.get(".history-open").trigger("click");
     await flushPromises();
     expect(wrapper.text()).toContain("历史回答");
+    expect(wrapper.get(".follow-ups button").text()).toBe("历史追问");
 
     await wrapper.get("textarea").setValue("继续追问");
     await wrapper.get("form").trigger("submit.prevent");
@@ -75,6 +86,51 @@ describe("assistant view", () => {
     await flushPromises();
     expect(apiMock.delete).toHaveBeenCalledWith("/api/ai/qa/history/history-1");
     expect(wrapper.find(".history-row").exists()).toBe(false);
+  });
+
+  it("groups school explanation and clear actions at the bottom of the sidebar", async () => {
+    const wrapper = mount(AssistantView, {
+      global: { stubs: { AppShell: { template: "<div><slot /></div>" }, InlineNotice: true } }
+    });
+    await flushPromises();
+
+    const actions = wrapper.get(".assistant-side-actions");
+    expect(actions.find(".primary-button").text()).toContain("生成学校讲解");
+    expect(actions.find(".clear-button").text()).toContain("清空会话");
+    expect(actions.element.children[0]).toBe(actions.find(".primary-button").element);
+    expect(actions.element.children[1]).toBe(actions.find(".clear-button").element);
+
+    await actions.get(".clear-button").trigger("click");
+    expect(wrapper.find(".chat-message").exists()).toBe(false);
+  });
+
+  it("renders multiple history records before the fixed bottom actions", async () => {
+    const summaries = Array.from({ length: 8 }, (_, index) => ({
+      threadId: `history-${index + 1}`,
+      title: `历史问题 ${index + 1}`,
+      preview: "历史回答",
+      messageCount: 2,
+      scopeType: "SCHOOL",
+      scopeId: "1",
+      createdAt: "2026-07-28T00:00:00Z",
+      updatedAt: "2026-07-28T01:00:00Z",
+    }));
+
+    apiMock.get.mockImplementation(async (path) => {
+      if (path === "/api/ai/models") return [];
+      if (path === "/api/ai/qa/history") return summaries;
+      return [];
+    });
+
+    const wrapper = mount(AssistantView, {
+      global: { stubs: { AppShell: { template: "<div><slot /></div>" }, InlineNotice: true } }
+    });
+    await flushPromises();
+
+    expect(wrapper.findAll(".history-row")).toHaveLength(8);
+    expect(wrapper.get(".history-list").element.nextElementSibling).toBe(
+      wrapper.get(".assistant-side-actions").element,
+    );
   });
 
   it("opens archived conversations as read-only and restores them without losing messages", async () => {
@@ -95,7 +151,13 @@ describe("assistant view", () => {
         status: "archived",
         messages: [
           { id: 1, role: "user", content: "已归档问题", createdAt: "2026-07-28T00:00:00Z" },
-          { id: 2, role: "assistant", content: "已归档回答", createdAt: "2026-07-28T00:01:00Z" }
+          {
+            id: 2,
+            role: "assistant",
+            content: "已归档回答",
+            createdAt: "2026-07-28T00:01:00Z",
+            metadata: { followUpQuestions: ["归档追问"] }
+          }
         ]
       };
       return [];
@@ -122,6 +184,10 @@ describe("assistant view", () => {
 
     expect(wrapper.text()).toContain("这是归档对话，仅供查看。");
     expect(wrapper.text()).toContain("已归档回答");
+    expect(wrapper.get(".follow-ups button").text()).toBe("归档追问");
+    expect(wrapper.get(".follow-ups button").attributes("disabled")).toBeDefined();
+    expect(wrapper.find(".chat-area > .chat-composer").exists()).toBe(true);
+    expect(wrapper.get(".assistant-side-actions .primary-button").attributes("disabled")).toBeDefined();
     expect(wrapper.get("textarea").attributes("disabled")).toBeDefined();
     expect(wrapper.get("textarea").attributes("placeholder")).toContain("请先恢复对话");
 
@@ -164,12 +230,123 @@ describe("assistant view", () => {
       global: { stubs: { AppShell: { template: "<div><slot /></div>" }, InlineNotice: true } }
     });
     await flushPromises();
-    await wrapper.get("select").setValue("deepseek");
+    expect(wrapper.find(".chat-composer .composer-model-select").exists()).toBe(true);
+    expect(wrapper.find(".assistant-side .composer-model-select").exists()).toBe(false);
+    await wrapper.get(".composer-model-select").setValue("deepseek");
     await wrapper.get("textarea").setValue("测试模型切换");
     await wrapper.get("form").trigger("submit.prevent");
     await flushPromises();
 
     expect(wrapper.text()).toContain("deepseek / deepseek-chat");
+  });
+
+  it("renders answer-specific follow-ups and removes the sidebar suggestions", async () => {
+    const responses = [
+      {
+        threadId: "thread-1", answer: "第一回答", relatedResources: [], citations: [],
+        followUpQuestions: ["第一追问", "重复追问", "第一追问"], generationStatus: "completed"
+      },
+      {
+        threadId: "thread-1", answer: "第二回答", relatedResources: [], citations: [],
+        followUpQuestions: ["第二追问"], generationStatus: "completed"
+      },
+      {
+        threadId: "thread-1", answer: "第三回答", relatedResources: [], citations: [],
+        followUpQuestions: ["第三追问"], generationStatus: "completed"
+      }
+    ];
+    apiMock.post.mockImplementation(async () => responses.shift());
+    const wrapper = mount(AssistantView, {
+      global: { stubs: { AppShell: { template: "<div><slot /></div>" }, InlineNotice: true } }
+    });
+    await flushPromises();
+
+    await wrapper.get("textarea").setValue("第一问题");
+    await wrapper.get("form").trigger("submit.prevent");
+    await flushPromises();
+    expect(wrapper.find(".suggestion-list").exists()).toBe(false);
+    expect(wrapper.findAll(".follow-ups button").map((button) => button.text())).toEqual(["第一追问", "重复追问"]);
+
+    await wrapper.get("textarea").setValue("第二问题");
+    await wrapper.get("form").trigger("submit.prevent");
+    await flushPromises();
+    expect(wrapper.findAll(".follow-ups").map((item) => item.text())).toEqual(["你还可以问第一追问重复追问", "你还可以问第二追问"]);
+
+    await wrapper.findAll(".follow-ups button")[0].trigger("click");
+    await flushPromises();
+    expect(apiMock.post).toHaveBeenLastCalledWith("/api/ai/qa/ask", expect.objectContaining({ question: "第一追问" }));
+  });
+
+  it("uses a resource-aware fallback when the server returns no follow-ups", async () => {
+    apiMock.post.mockResolvedValueOnce({
+      threadId: "thread-1", answer: "回答", relatedResources: ["常安镇敬老院"], citations: [],
+      followUpQuestions: [], generationStatus: "completed"
+    });
+    const wrapper = mount(AssistantView, {
+      global: { stubs: { AppShell: { template: "<div><slot /></div>" }, InlineNotice: true } }
+    });
+    await flushPromises();
+    await wrapper.get("textarea").setValue("请介绍资源");
+    await wrapper.get("form").trigger("submit.prevent");
+    await flushPromises();
+
+    expect(wrapper.find(".follow-ups").text()).toContain("请设计一节利用“常安镇敬老院”开展的实践课。");
+  });
+
+  it("filters meta follow-ups and sends an actionable teacher task", async () => {
+    apiMock.post.mockResolvedValueOnce({
+      threadId: "thread-1", answer: "回答", relatedResources: ["常安镇敬老院"], citations: [],
+      followUpQuestions: ["您需要查询哪些本土思政教育资源？", "您是否需要特定年级的思政教学建议？"],
+      generationStatus: "completed"
+    });
+    const wrapper = mount(AssistantView, {
+      global: { stubs: { AppShell: { template: "<div><slot /></div>" }, InlineNotice: true } }
+    });
+    await flushPromises();
+    await wrapper.get("textarea").setValue("请介绍本校周边资源");
+    await wrapper.get("form").trigger("submit.prevent");
+    await flushPromises();
+
+    const buttons = wrapper.findAll(".follow-ups button");
+    const suggestion = buttons[0].text();
+    expect(suggestion).toBe("请说明“常安镇敬老院”适合哪些年级。");
+    expect(wrapper.text()).not.toContain("您需要查询哪些本土思政教育资源？");
+
+    await buttons[0].trigger("click");
+    await flushPromises();
+    expect(apiMock.post).toHaveBeenLastCalledWith("/api/ai/qa/ask", expect.objectContaining({ question: suggestion }));
+    expect(wrapper.findAll(".chat-message.user").at(-1)?.text()).toContain(suggestion);
+  });
+
+  it("replaces invalid follow-ups restored from historical metadata", async () => {
+    apiMock.get.mockImplementation(async (path) => {
+      if (path === "/api/ai/models") return [];
+      if (path === "/api/ai/qa/history") return [{
+        threadId: "history-invalid-follow-up", title: "历史问题", preview: "历史回答", messageCount: 2,
+        scopeType: "SCHOOL", scopeId: "1", createdAt: "2026-07-28T00:00:00Z", updatedAt: "2026-07-28T01:00:00Z"
+      }];
+      if (path === "/api/ai/qa/history/history-invalid-follow-up") return {
+        threadId: "history-invalid-follow-up", scopeType: "SCHOOL", scopeId: "1", status: "active",
+        createdAt: "2026-07-28T00:00:00Z", updatedAt: "2026-07-28T01:00:00Z",
+        messages: [
+          { id: 1, role: "user", content: "请介绍本校周边资源", createdAt: "2026-07-28T00:00:00Z" },
+          {
+            id: 2, role: "assistant", content: "历史回答", createdAt: "2026-07-28T00:01:00Z",
+            metadata: { followUpQuestions: ["您需要查询哪些本土思政教育资源？"] }
+          }
+        ]
+      };
+      return [];
+    });
+    const wrapper = mount(AssistantView, {
+      global: { stubs: { AppShell: { template: "<div><slot /></div>" }, InlineNotice: true } }
+    });
+    await flushPromises();
+    await wrapper.get(".history-open").trigger("click");
+    await flushPromises();
+
+    expect(wrapper.get(".follow-ups button").text()).toBe("请介绍适合当前年级的本土思政教育资源。");
+    expect(wrapper.text()).not.toContain("您需要查询哪些本土思政教育资源？");
   });
 
   it("previews and forwards an image attachment", async () => {
@@ -275,6 +452,72 @@ describe("assistant view", () => {
     expect(wrapper.text()).toContain("返回 2 条结果");
     expect(wrapper.text()).toContain("18 ms");
     expect(wrapper.text()).toContain("检索证据");
+  });
+
+  it("keeps a completed greeting conversation in history after starting a new conversation", async () => {
+    let historyReads = 0;
+    const summary = {
+      threadId: "greeting-thread", title: "你好，你可以做什么？", preview: "问候回答", messageCount: 2,
+      scopeType: "SCHOOL", scopeId: "1", createdAt: "2026-07-28T00:00:00Z", updatedAt: "2026-07-28T01:00:00Z"
+    };
+    apiMock.get.mockImplementation(async (path) => {
+      if (path === "/api/ai/models") return [];
+      if (path === "/api/ai/qa/history") return historyReads++ === 0 ? [] : [summary];
+      return [];
+    });
+    apiMock.stream = vi.fn(async (_path, body, options) => {
+      options.onEvent("final", {
+        response: {
+          threadId: "greeting-thread", conversationId: body.conversationId, answer: "问候回答",
+          citations: [], followUpQuestions: [], generationStatus: "degraded"
+        }
+      });
+      options.onEvent("done", {});
+    });
+
+    const wrapper = mount(AssistantView, {
+      global: { stubs: { AppShell: { template: "<div><slot /></div>" }, InlineNotice: true } }
+    });
+    await flushPromises();
+    await wrapper.get("textarea").setValue("你好，你可以做什么？");
+    await wrapper.get("form").trigger("submit.prevent");
+    await flushPromises();
+
+    expect(wrapper.find(".history-row").exists()).toBe(true);
+    expect(wrapper.text()).toContain("你好，你可以做什么？");
+    await wrapper.get(".icon-action").trigger("click");
+    expect(wrapper.find(".chat-message").exists()).toBe(false);
+    expect(wrapper.find(".history-row").exists()).toBe(true);
+    expect(wrapper.text()).toContain("问候回答");
+  });
+
+  it("refreshes history after the compatibility ask fallback succeeds", async () => {
+    let historyReads = 0;
+    apiMock.get.mockImplementation(async (path) => {
+      if (path === "/api/ai/models") return [];
+      if (path === "/api/ai/qa/history") {
+        return historyReads++ === 0 ? [] : [{
+          threadId: "thread-1", title: "兼容接口问题", preview: "兼容接口回答", messageCount: 2,
+          scopeType: "SCHOOL", scopeId: "1", createdAt: "2026-07-28T00:00:00Z", updatedAt: "2026-07-28T01:00:00Z"
+        }];
+      }
+      return [];
+    });
+    apiMock.stream = vi.fn(async () => {
+      throw new Error("stream unavailable");
+    });
+
+    const wrapper = mount(AssistantView, {
+      global: { stubs: { AppShell: { template: "<div><slot /></div>" }, InlineNotice: true } }
+    });
+    await flushPromises();
+    await wrapper.get("textarea").setValue("兼容接口问题");
+    await wrapper.get("form").trigger("submit.prevent");
+    await flushPromises();
+
+    expect(apiMock.post).toHaveBeenCalledWith("/api/ai/qa/ask", expect.objectContaining({ question: "兼容接口问题" }));
+    expect(apiMock.get.mock.calls.filter(([path]) => path === "/api/ai/qa/history")).toHaveLength(2);
+    expect(wrapper.find(".history-row").exists()).toBe(true);
   });
 
   it.each([

@@ -687,7 +687,10 @@ class AgentRuntime:
             fallbackLevel=metadata.get("fallbackLevel"),
             citations=self._task_citations(result, request.context),
             relatedResources=result.get("relatedResources") or [],
-            followUpQuestions=(result.get("followUpSuggestions") or [])[:4],
+            followUpQuestions=self._follow_up_questions(
+                result.get("followUpSuggestions"), result.get("relatedResources"), request.message,
+                request.grade, request.theme,
+            ),
             contextCompacted=compacted,
         )
         if status == "degraded":
@@ -720,8 +723,66 @@ class AgentRuntime:
                 "toolExecutions": [item.model_dump(by_alias=True) for item in result.tool_executions],
                 "teachingPlan": result.teaching_plan,
                 "resourceDiscovery": result.resource_discovery,
+                "followUpQuestions": result.follow_up_questions,
             },
         )
+
+    @staticmethod
+    def _follow_up_questions(
+        questions: list[str] | None,
+        related_resources: list[str] | None = None,
+        question: str = "",
+        grade: str | None = None,
+        theme: str | None = None,
+    ) -> list[str]:
+        normalized = []
+        current_question = question.strip()
+        for item in questions or []:
+            if not isinstance(item, str):
+                continue
+            value = item.strip()
+            if value and AgentRuntime._is_actionable_follow_up(value, current_question) and value not in normalized:
+                normalized.append(value)
+
+        resource_name = next(
+            (item.strip() for item in (related_resources or []) if isinstance(item, str) and item.strip()),
+            "",
+        )
+        grade_name = grade.strip() if isinstance(grade, str) and grade.strip() else "当前年级"
+        theme_name = theme.strip() if isinstance(theme, str) and theme.strip() else "思政"
+        fallback = [
+            f"请说明“{resource_name}”适合哪些年级。" if resource_name
+            else f"请介绍适合{grade_name}的本土思政教育资源。",
+            f"请设计一节利用“{resource_name}”开展的实践课。" if resource_name
+            else f"请结合学校周边资源设计一节{theme_name}实践课。",
+            "请列出一次校外实践活动的安全注意事项。",
+            f"请说明如何将“{current_question}”转化为课堂活动。"
+            if current_question else "请说明如何将当前问题转化为课堂活动。",
+        ]
+        for item in fallback:
+            if item not in normalized:
+                normalized.append(item)
+        return normalized[:4]
+
+    @staticmethod
+    def _is_actionable_follow_up(value: str, current_question: str = "") -> bool:
+        normalized = value.strip()
+        if not normalized or len(normalized) > 120 or normalized == current_question:
+            return False
+        invalid_markers = (
+            "您需要",
+            "你需要",
+            "您是否需要",
+            "你是否需要",
+            "您想",
+            "你想",
+            "请问您",
+            "请问你",
+            "你可以告诉我",
+            "您可以告诉我",
+            "需要查询哪些",
+        )
+        return not any(marker in normalized for marker in invalid_markers)
 
     async def _invoke_agent(
         self,
@@ -762,6 +823,9 @@ class AgentRuntime:
             compacted,
             runtime.executions,
             runtime.degraded_reasons,
+            request.message,
+            request.grade,
+            request.theme,
         )
 
     async def _invoke_agent_stream(
@@ -819,7 +883,8 @@ class AgentRuntime:
         parse_messages = [AIMessage(content=model_buffer)] if model_buffer else model_messages
         response = self._response_from_model_result(
             {"messages": parse_messages}, trusted, thread.thread_id, compacted,
-            runtime.executions, runtime.degraded_reasons
+            runtime.executions, runtime.degraded_reasons, request.message,
+            request.grade, request.theme,
         )
         if emitted_answer_length < len(response.answer):
             self._emit_answer_chunks(response.answer[emitted_answer_length:], emit)
@@ -885,6 +950,9 @@ class AgentRuntime:
         compacted: bool,
         executions: list[ToolExecution],
         degraded_reasons: list[str] | None = None,
+        question: str = "",
+        grade: str | None = None,
+        theme: str | None = None,
     ) -> AgentMessageResponse:
         parsed = self._parse_model_output(result)
         allowed = self._allowed_citations(trusted)
@@ -910,7 +978,10 @@ class AgentRuntime:
             degradedReason=";".join(normalized_reasons) if normalized_reasons else None,
             citations=citations,
             relatedResources=parsed.related_resources[:8],
-            followUpQuestions=parsed.follow_up_questions[:4],
+            followUpQuestions=self._follow_up_questions(
+                parsed.follow_up_questions, parsed.related_resources, question,
+                grade, theme,
+            ),
             toolExecutions=executions,
             contextCompacted=compacted,
         )
@@ -1058,7 +1129,17 @@ class AgentRuntime:
             model="local",
             fallbackLevel="local",
             citations=[item for item in citations[:5] if item is not None], relatedResources=names,
-            followUpQuestions=["请介绍一个具体资源的教育价值。", "这些资源适合哪个年级？"],
+            followUpQuestions=self._follow_up_questions(
+                [
+                    "请介绍一个具体资源的教育价值。",
+                    "请说明这些资源适合哪个年级。",
+                    f"请设计一个围绕“{request.message}”的实践活动。",
+                ],
+                names,
+                request.message,
+                request.grade,
+                request.theme,
+            ),
             toolExecutions=executions or [], contextCompacted=compacted,
         )
 

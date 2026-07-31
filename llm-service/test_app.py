@@ -339,6 +339,49 @@ def test_new_thread_and_multiturn_persistence(tmp_path: Path):
             params={"ownerId": "school-user:1", "scopeType": "SCHOOL", "scopeId": 1},
         ).json()
         assert [item["role"] for item in stored["messages"]] == ["user", "assistant", "user", "assistant"]
+        assert data["followUpQuestions"]
+        assert stored["messages"][1]["metadata"]["followUpQuestions"] == data["followUpQuestions"]
+
+
+def test_unknown_greeting_creates_and_persists_thread(tmp_path: Path):
+    question = "你好，你可以做什么？"
+    with build_client(settings_for(tmp_path)) as client:
+        response = client.post("/agent/messages", json=message_payload(message=question))
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["threadId"]
+        assert data["status"] == "degraded"
+
+        detail = client.get(
+            f"/agent/threads/{data['threadId']}",
+            params={"ownerId": "school-user:1", "scopeType": "SCHOOL", "scopeId": 1},
+        )
+
+    assert detail.status_code == 200
+    assert [item["role"] for item in detail.json()["messages"]] == ["user", "assistant"]
+    assert detail.json()["messages"][0]["content"] == question
+    assert detail.json()["messages"][1]["metadata"]["followUpQuestions"] == data["followUpQuestions"]
+
+
+def test_follow_up_questions_filter_meta_prompts_and_fill_teacher_tasks():
+    follow_ups = AgentRuntime._follow_up_questions(
+        [
+            "您需要查询哪些本土思政教育资源？",
+            "请介绍适合小学生的本土思政教育资源。",
+            "您是否需要特定年级的思政教学建议？",
+        ],
+        ["常安镇敬老院"],
+        "请介绍本校周边资源。",
+        "小学生",
+        "思政教育",
+    )
+
+    assert "您需要查询哪些本土思政教育资源？" not in follow_ups
+    assert "您是否需要特定年级的思政教学建议？" not in follow_ups
+    assert follow_ups[0] == "请介绍适合小学生的本土思政教育资源。"
+    assert "请说明“常安镇敬老院”适合哪些年级。" in follow_ups
+    assert len(follow_ups) == 4
 
 
 def test_stateful_stream_emits_events_and_persists_final_response(tmp_path: Path):
@@ -366,6 +409,8 @@ def test_stateful_stream_emits_events_and_persists_final_response(tmp_path: Path
         ).json()
         assert [item["role"] for item in stored["messages"]] == ["user", "assistant"]
         assert stored["messages"][-1]["content"] == final_data["response"]["answer"]
+        assert final_data["response"]["followUpQuestions"]
+        assert stored["messages"][-1]["metadata"]["followUpQuestions"] == final_data["response"]["followUpQuestions"]
 
 
 def test_teaching_plan_and_resource_discovery_streams_use_unified_protocol(tmp_path: Path):
