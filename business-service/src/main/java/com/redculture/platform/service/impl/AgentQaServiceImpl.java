@@ -168,10 +168,6 @@ public class AgentQaServiceImpl implements AgentQaService {
         String question = request.getQuestion().trim();
         AgentIntent intent = hasImageAttachments(request)
                 ? AgentIntent.RESOURCE_EXPLANATION : intentRecognizer.recognize(question);
-        if (intent == AgentIntent.UNKNOWN) {
-            startLocalFallbackStream(emitter, request, currentUser);
-            return emitter;
-        }
         Scope scope = new Scope(scopeResolution.type(), scopeResolution.id());
         AtomicBoolean finished = new AtomicBoolean(false);
         AtomicReference<Thread> workerRef = new AtomicReference<>();
@@ -435,7 +431,7 @@ public class AgentQaServiceImpl implements AgentQaService {
         AgentIntent intent = hasImageAttachments(request)
                 ? AgentIntent.RESOURCE_EXPLANATION : intentRecognizer.recognize(question);
 
-        if (intent == AgentIntent.UNKNOWN) {
+        if (intent == AgentIntent.UNKNOWN && (agentRuntimeClient == null || !allowRemoteAgent)) {
             return skippedResponse(intent,
                     "我目前支持查询周边资源、解释教育资源、设计教学活动，以及查询人物、学校和资源之间的关系。请补充学校、资源或区域名称。", null);
         }

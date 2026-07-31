@@ -343,6 +343,27 @@ def test_new_thread_and_multiturn_persistence(tmp_path: Path):
         assert stored["messages"][1]["metadata"]["followUpQuestions"] == data["followUpQuestions"]
 
 
+def test_unknown_greeting_creates_and_persists_thread(tmp_path: Path):
+    question = "你好，你可以做什么？"
+    with build_client(settings_for(tmp_path)) as client:
+        response = client.post("/agent/messages", json=message_payload(message=question))
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["threadId"]
+        assert data["status"] == "degraded"
+
+        detail = client.get(
+            f"/agent/threads/{data['threadId']}",
+            params={"ownerId": "school-user:1", "scopeType": "SCHOOL", "scopeId": 1},
+        )
+
+    assert detail.status_code == 200
+    assert [item["role"] for item in detail.json()["messages"]] == ["user", "assistant"]
+    assert detail.json()["messages"][0]["content"] == question
+    assert detail.json()["messages"][1]["metadata"]["followUpQuestions"] == data["followUpQuestions"]
+
+
 def test_stateful_stream_emits_events_and_persists_final_response(tmp_path: Path):
     with build_client(settings_for(tmp_path)) as client:
         response = client.post("/agent/messages/stream", json=message_payload())
