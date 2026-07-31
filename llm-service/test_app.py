@@ -364,6 +364,26 @@ def test_unknown_greeting_creates_and_persists_thread(tmp_path: Path):
     assert detail.json()["messages"][1]["metadata"]["followUpQuestions"] == data["followUpQuestions"]
 
 
+def test_follow_up_questions_filter_meta_prompts_and_fill_teacher_tasks():
+    follow_ups = AgentRuntime._follow_up_questions(
+        [
+            "您需要查询哪些本土思政教育资源？",
+            "请介绍适合小学生的本土思政教育资源。",
+            "您是否需要特定年级的思政教学建议？",
+        ],
+        ["常安镇敬老院"],
+        "请介绍本校周边资源。",
+        "小学生",
+        "思政教育",
+    )
+
+    assert "您需要查询哪些本土思政教育资源？" not in follow_ups
+    assert "您是否需要特定年级的思政教学建议？" not in follow_ups
+    assert follow_ups[0] == "请介绍适合小学生的本土思政教育资源。"
+    assert "请说明“常安镇敬老院”适合哪些年级。" in follow_ups
+    assert len(follow_ups) == 4
+
+
 def test_stateful_stream_emits_events_and_persists_final_response(tmp_path: Path):
     with build_client(settings_for(tmp_path)) as client:
         response = client.post("/agent/messages/stream", json=message_payload())
