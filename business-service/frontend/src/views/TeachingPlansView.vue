@@ -24,6 +24,7 @@ const threadId = ref("");
 const models = ref([]);
 const selectedModelId = ref("");
 const effectiveModel = ref("");
+const modelStatusVisible = ref(false);
 
 const visiblePlan = computed(() => loading.value ? draftPlan.value : generated.value);
 const sections = computed(() => visiblePlan.value ? [
@@ -78,6 +79,7 @@ async function generate() {
   generated.value = null;
   draftPlan.value = null;
   effectiveModel.value = "";
+  modelStatusVisible.value = false;
   streamStage.value = "正在准备教学依据";
   const abortController = new AbortController();
   activeAbortController.value = abortController;
@@ -103,6 +105,7 @@ async function generate() {
           streamStage.value = "正在切换备用生成方式";
         } else if (eventName === "model.completed") {
           effectiveModel.value = data.model ? `${data.provider || "LLM"} / ${data.model}` : "";
+          modelStatusVisible.value = Boolean(effectiveModel.value);
         } else if (eventName === "run.started" || eventName === "model.started") {
           streamStage.value = "正在生成教学方案";
         } else if (eventName === "final") {
@@ -114,7 +117,9 @@ async function generate() {
             sessionStorage.setItem(threadStorageKey(), threadId.value);
           }
           finalReceived = true;
+          modelStatusVisible.value = false;
         } else if (eventName === "error") {
+          modelStatusVisible.value = false;
           throw new Error("教学方案流式生成失败");
         }
       }
@@ -125,17 +130,20 @@ async function generate() {
     notice.tone = completed ? "success" : "info";
     notice.text = completed ? "教学方案已生成。" : "已生成基础教学方案，部分内容可能需要人工补充";
   } catch (error) {
+    modelStatusVisible.value = false;
     if (error?.name === "AbortError") {
       notice.tone = "info"; notice.text = "已停止生成。"; return;
     }
     notice.tone = "error"; notice.text = error.message || "教学方案生成失败。";
   } finally {
+    modelStatusVisible.value = false;
     loading.value = false;
     activeAbortController.value = null;
   }
 }
 
 function stopGeneration() {
+  modelStatusVisible.value = false;
   activeAbortController.value?.abort();
 }
 
@@ -188,7 +196,7 @@ function statusLabel(status) {
           <InlineNotice v-if="notice.text" :tone="notice.tone">{{ notice.text }}</InlineNotice>
           <div v-if="loading || generated" :class="{ 'streaming-plan': loading }" aria-live="polite">
             <div v-if="loading" class="streaming-status"><span class="streaming-dot"></span>{{ streamStage }}</div>
-            <div v-if="effectiveModel" class="streaming-status">实际模型：{{ effectiveModel }}</div>
+            <div v-if="modelStatusVisible && effectiveModel" class="streaming-status">实际模型：{{ effectiveModel }}</div>
             <div v-if="visiblePlan" class="generated-plan">
               <header><div><span class="badge badge-red">{{ visiblePlan.grade }}</span><span class="badge">{{ visiblePlan.durationMinutes }} 分钟</span></div><h2>{{ visiblePlan.theme }}</h2></header>
               <section v-for="([title, items]) in sections" :key="title"><h3>{{ title }}</h3><ul><li v-for="item in items" :key="item">{{ item }}</li></ul></section>

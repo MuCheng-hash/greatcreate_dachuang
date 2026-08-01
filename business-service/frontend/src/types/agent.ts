@@ -98,6 +98,23 @@ export interface AgentToolExecution {
   durationMs?: number;
 }
 
+export interface AssistantResponseSnapshot {
+  schemaVersion?: number;
+  status?: string | null;
+  generationStatus?: AgentGenerationStatus | null;
+  retrievalStatus?: AgentRetrievalStatus | null;
+  retrievalMethods?: string[];
+  citations?: AgentCitation[];
+  relatedResources?: string[];
+  followUpQuestions?: string[];
+  provider?: string | null;
+  model?: string | null;
+  fallbackLevel?: number | string | null;
+  toolExecutions?: AgentToolExecution[];
+  contextCompacted?: boolean;
+  memoryApplied?: AgentMemoryApplied | null;
+}
+
 export interface TeachingPlanResponse {
   threadId?: string | null;
   generationStatus?: AgentGenerationStatus | null;
@@ -131,6 +148,7 @@ export interface AgentQaResponse {
   answer?: string;
   intent?: string | null;
   retrievalStatus?: AgentRetrievalStatus | null;
+  retrievalMethods?: string[];
   generationStatus?: AgentGenerationStatus | null;
   relatedResources?: string[];
   citations?: Array<AgentCitation | string>;
@@ -149,6 +167,7 @@ export interface AgentQaResponse {
   teachingPlan?: TeachingPlanResponse | null;
   memoryCandidates?: AgentMemoryItem[] | null;
   memoryApplied?: AgentMemoryApplied | null;
+  contextCompacted?: boolean;
 }
 
 export interface AgentThreadMessage {
