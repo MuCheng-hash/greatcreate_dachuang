@@ -1,5 +1,5 @@
 import { flushPromises, mount } from "@vue/test-utils";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const apiMock = vi.hoisted(() => ({
   get: vi.fn(),
@@ -12,6 +12,14 @@ const apiMock = vi.hoisted(() => ({
 vi.mock("@/services/api", () => ({ api: apiMock }));
 
 import MemoryCenter from "@/components/MemoryCenter.vue";
+
+function dialogControl(action) {
+  const element = document.body.querySelector(`[data-confirm-dialog-${action}]`);
+  if (!(element instanceof HTMLButtonElement)) {
+    throw new Error(`未找到确认弹窗按钮：${action}`);
+  }
+  return element;
+}
 
 function memory(overrides = {}) {
   return {
@@ -30,7 +38,9 @@ function memory(overrides = {}) {
 describe("memory center", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    vi.spyOn(window, "confirm").mockReturnValue(true);
+    vi.spyOn(window, "confirm").mockImplementation(() => {
+      throw new Error("记忆中心不应调用浏览器原生确认框");
+    });
     apiMock.get.mockImplementation(async (path) => {
       if (path === "/api/ai/memory-settings") {
         return { available: true, enabled: false, effectiveEnabled: false };
@@ -67,6 +77,11 @@ describe("memory center", () => {
       ...body,
     }));
     apiMock.delete.mockResolvedValue(undefined);
+  });
+
+  afterEach(() => {
+    document.body.innerHTML = "";
+    vi.restoreAllMocks();
   });
 
   it("shows availability, first-use guidance, five core fields, and saves settings and memories", async () => {
@@ -119,7 +134,7 @@ describe("memory center", () => {
   });
 
   it("confirms, ignores, edits, recycles, restores, permanently deletes, and clears memories", async () => {
-    const wrapper = mount(MemoryCenter);
+    const wrapper = mount(MemoryCenter, { attachTo: document.body });
     await flushPromises();
 
     await wrapper.get('[data-memory-status="pending"]').trigger("click");
@@ -140,7 +155,18 @@ describe("memory center", () => {
       content: "下周完成红色研学活动",
     });
 
-    await wrapper.get('[data-memory-id="custom-active"] [data-action="delete"]').trigger("click");
+    const recycleButton = wrapper.get('[data-memory-id="custom-active"] [data-action="delete"]');
+    recycleButton.element.focus();
+    await recycleButton.trigger("click");
+    expect(document.body.querySelector('[role="alertdialog"]')?.textContent).toContain("移入回收站");
+    expect(apiMock.delete).not.toHaveBeenCalledWith("/api/ai/memories/custom-active");
+    await dialogControl("cancel").click();
+    await flushPromises();
+    expect(document.activeElement).toBe(recycleButton.element);
+    expect(apiMock.delete).not.toHaveBeenCalledWith("/api/ai/memories/custom-active");
+
+    await recycleButton.trigger("click");
+    await dialogControl("confirm").click();
     await flushPromises();
     expect(apiMock.delete).toHaveBeenCalledWith("/api/ai/memories/custom-active");
 
@@ -150,11 +176,81 @@ describe("memory center", () => {
     expect(apiMock.post).toHaveBeenCalledWith("/api/ai/memories/deleted-1/restore");
 
     await wrapper.get('[data-memory-id="deleted-2"] [data-action="permanent"]').trigger("click");
+    expect(document.body.querySelector('[role="alertdialog"]')?.textContent).toContain("永久删除");
+    await dialogControl("confirm").click();
     await flushPromises();
     expect(apiMock.delete).toHaveBeenCalledWith("/api/ai/memories/deleted-2/permanent");
 
     await wrapper.get("[data-action='clear']").trigger("click");
+    expect(document.body.querySelector('[role="alertdialog"]')?.textContent).toContain("清空回收站");
+    await dialogControl("confirm").click();
     await flushPromises();
-    expect(window.confirm).toHaveBeenCalled();
+    expect(apiMock.delete).toHaveBeenCalledWith("/api/ai/memories/custom-active/permanent");
+    expect(apiMock.delete).toHaveBeenCalledWith("/api/ai/memories/pending-2/permanent");
+    expect(window.confirm).not.toHaveBeenCalled();
+  });
+
+  it("keeps a destructive dialog open and prevents duplicate submission while its request is pending", async () => {
+    let resolveRecycle;
+    apiMock.delete.mockImplementation((path) => {
+      if (path === "/api/ai/memories/custom-active") {
+        return new Promise((resolve) => {
+          resolveRecycle = resolve;
+        });
+      }
+      return Promise.resolve(undefined);
+    });
+    const wrapper = mount(MemoryCenter, { attachTo: document.body });
+    await flushPromises();
+
+    await wrapper.get('[data-memory-id="custom-active"] [data-action="delete"]').trigger("click");
+    await dialogControl("confirm").click();
+    await flushPromises();
+
+    const dialog = document.body.querySelector('[role="alertdialog"]');
+    expect(dialog).not.toBeNull();
+    expect(dialogControl("cancel").disabled).toBe(true);
+    expect(dialogControl("confirm").disabled).toBe(true);
+    dialog.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    await dialogControl("confirm").click();
+    expect(apiMock.delete).toHaveBeenCalledTimes(1);
+
+    resolveRecycle();
+    await flushPromises();
+    expect(document.body.querySelector('[role="alertdialog"]')).toBeNull();
+    expect(window.confirm).not.toHaveBeenCalled();
+  });
+
+  it("keeps the dialog open and presents the request error when destructive confirmation fails", async () => {
+    apiMock.delete.mockRejectedValueOnce(new Error("回收站服务暂不可用"));
+    const wrapper = mount(MemoryCenter, { attachTo: document.body });
+    await flushPromises();
+
+    await wrapper.get('[data-memory-id="custom-active"] [data-action="delete"]').trigger("click");
+    await dialogControl("confirm").click();
+    await flushPromises();
+
+    const dialog = document.body.querySelector('[role="alertdialog"]');
+    expect(dialog).not.toBeNull();
+    expect(dialog?.textContent).toContain("回收站服务暂不可用");
+    expect(dialogControl("confirm").disabled).toBe(false);
+    expect(window.confirm).not.toHaveBeenCalled();
+  });
+
+  it("freezes the bulk target list while waiting for confirmation", async () => {
+    const wrapper = mount(MemoryCenter, { attachTo: document.body });
+    await flushPromises();
+
+    await wrapper.get("[data-action='clear']").trigger("click");
+    expect(document.body.querySelector('[role="alertdialog"]')?.textContent).toContain("3 条记忆");
+    expect(wrapper.get('[data-memory-status="deleted"]').attributes("disabled")).toBeDefined();
+    await dialogControl("confirm").click();
+    await flushPromises();
+
+    expect(apiMock.delete).toHaveBeenCalledWith("/api/ai/memories/grade");
+    expect(apiMock.delete).toHaveBeenCalledWith("/api/ai/memories/style");
+    expect(apiMock.delete).toHaveBeenCalledWith("/api/ai/memories/custom-active");
+    expect(apiMock.delete).toHaveBeenCalledTimes(3);
+    expect(window.confirm).not.toHaveBeenCalled();
   });
 });

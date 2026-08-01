@@ -13,6 +13,7 @@ import {
   X,
 } from "@lucide/vue";
 import InlineNotice from "@/components/InlineNotice.vue";
+import ConfirmDialog from "@/components/ConfirmDialog.vue";
 import { memoryApi } from "@/services/memory";
 import type {
   AgentMemoryItem,
@@ -32,6 +33,18 @@ interface CoreFieldDefinition {
   key: CoreFieldKey;
   label: string;
   placeholder: string;
+}
+
+type MemoryConfirmationKind = "recycle" | "permanent" | "clear";
+
+interface MemoryConfirmation {
+  kind: MemoryConfirmationKind;
+  title: string;
+  description: string;
+  confirmLabel: string;
+  item?: AgentMemoryItem;
+  sourceStatus?: MemoryStatus;
+  targets?: AgentMemoryItem[];
 }
 
 const coreFields: CoreFieldDefinition[] = [
@@ -54,6 +67,9 @@ const settingSaving = ref(false);
 const profileSaving = ref(false);
 const customSaving = ref(false);
 const busyId = ref("");
+const confirmation = ref<MemoryConfirmation | null>(null);
+const confirmationPending = ref(false);
+const confirmationError = ref("");
 const activeStatus = ref<MemoryStatus>("active");
 const editingId = ref("");
 const editingContent = ref("");
@@ -80,6 +96,7 @@ const items = reactive<Record<MemoryStatus, AgentMemoryItem[]>>({
 
 const currentItems = computed(() => items[activeStatus.value]);
 const currentTab = computed(() => statusTabs.find((item) => item.status === activeStatus.value)!);
+const isInteractionLocked = computed(() => Boolean(busyId.value) || Boolean(confirmation.value));
 
 onMounted(loadMemoryCenter);
 
@@ -211,17 +228,22 @@ async function confirmMemory(item: AgentMemoryItem): Promise<void> {
   });
 }
 
-async function recycleMemory(item: AgentMemoryItem, confirmFirst: boolean): Promise<void> {
-  if (confirmFirst && !window.confirm("删除后该记忆会立即失效，并进入 30 天回收站。确定继续吗？")) {
-    return;
-  }
-  await runItemAction(item.id, async () => {
+async function recycleMemoryItem(item: AgentMemoryItem, successText: string): Promise<void> {
+  await executeItemAction(item.id, async () => {
     const recycled = await memoryApi.recycle(item.id);
     replaceMemory(recycled || { ...item, status: "deleted" });
     syncCoreFields();
     notice.tone = "success";
-    notice.text = confirmFirst ? "记忆已移入回收站。" : "候选记忆已忽略，可在回收站中恢复。";
+    notice.text = successText;
   });
+}
+
+async function ignoreMemory(item: AgentMemoryItem): Promise<void> {
+  try {
+    await recycleMemoryItem(item, "候选记忆已忽略，可在回收站中恢复。");
+  } catch (error) {
+    showActionError(error);
+  }
 }
 
 async function restoreMemory(item: AgentMemoryItem): Promise<void> {
@@ -233,9 +255,8 @@ async function restoreMemory(item: AgentMemoryItem): Promise<void> {
   });
 }
 
-async function permanentlyDelete(item: AgentMemoryItem): Promise<void> {
-  if (!window.confirm("永久删除后无法恢复。确定彻底删除这条记忆吗？")) return;
-  await runItemAction(item.id, async () => {
+async function permanentlyDeleteMemory(item: AgentMemoryItem): Promise<void> {
+  await executeItemAction(item.id, async () => {
     await memoryApi.permanentlyDelete(item.id);
     removeMemory(item.id);
     notice.tone = "success";
@@ -269,46 +290,122 @@ async function saveEdit(item: AgentMemoryItem): Promise<void> {
   });
 }
 
-async function clearCurrentStatus(): Promise<void> {
-  const targets = [...currentItems.value];
+async function clearMemoryStatus(sourceStatus: MemoryStatus, targets: AgentMemoryItem[]): Promise<void> {
   if (!targets.length || busyId.value) return;
-  const action = activeStatus.value === "deleted" ? "永久删除" : "移入回收站";
-  if (!window.confirm(`将当前列表中的 ${targets.length} 条记忆全部${action}，确定继续吗？`)) return;
   busyId.value = "clear";
   notice.text = "";
   try {
-    if (activeStatus.value === "deleted") {
+    if (sourceStatus === "deleted") {
       await Promise.all(targets.map((item) => memoryApi.permanentlyDelete(item.id)));
-      items.deleted = [];
+      const targetIds = new Set(targets.map((item) => item.id));
+      items.deleted = items.deleted.filter((item) => !targetIds.has(item.id));
     } else {
       const recycled = await Promise.all(targets.map((item) => memoryApi.recycle(item.id)));
-      items[activeStatus.value] = [];
+      const targetIds = new Set(targets.map((item) => item.id));
+      items[sourceStatus] = items[sourceStatus].filter((item) => !targetIds.has(item.id));
       for (let index = 0; index < targets.length; index += 1) {
         replaceMemory(recycled[index] || { ...targets[index], status: "deleted" });
       }
     }
     syncCoreFields();
     notice.tone = "success";
-    notice.text = activeStatus.value === "deleted" ? "回收站已清空。" : "当前记忆已全部移入回收站。";
-  } catch (error) {
-    notice.tone = "error";
-    notice.text = errorMessage(error);
+    notice.text = sourceStatus === "deleted" ? "回收站已清空。" : "当前记忆已全部移入回收站。";
   } finally {
     busyId.value = "";
   }
 }
 
-async function runItemAction(id: string, action: () => Promise<void>): Promise<void> {
-  if (busyId.value) return;
+function openConfirmation(nextConfirmation: MemoryConfirmation): void {
+  if (isInteractionLocked.value) return;
+  confirmationError.value = "";
+  confirmation.value = nextConfirmation;
+}
+
+function requestRecycleMemory(item: AgentMemoryItem): void {
+  openConfirmation({
+    kind: "recycle",
+    item,
+    title: "移入回收站",
+    description: "删除后该记忆会立即失效，并进入 30 天回收站；到期前可以恢复。",
+    confirmLabel: "移入回收站",
+  });
+}
+
+function requestPermanentDeletion(item: AgentMemoryItem): void {
+  openConfirmation({
+    kind: "permanent",
+    item,
+    title: "永久删除记忆",
+    description: "永久删除后无法恢复，该记忆将从回收站彻底清除。",
+    confirmLabel: "永久删除",
+  });
+}
+
+function requestClearCurrentStatus(): void {
+  const sourceStatus = activeStatus.value;
+  const targets = [...currentItems.value];
+  if (!targets.length) return;
+  const isRecycle = sourceStatus !== "deleted";
+  openConfirmation({
+    kind: "clear",
+    sourceStatus,
+    targets,
+    title: isRecycle ? "清空当前列表" : "清空回收站",
+    description: isRecycle
+      ? `将当前列表中的 ${targets.length} 条记忆全部移入回收站；它们会立即失效，并可在 30 天内恢复。`
+      : `将永久删除回收站中的 ${targets.length} 条记忆，此操作不可恢复。`,
+    confirmLabel: isRecycle ? "移入回收站" : "永久删除",
+  });
+}
+
+function closeConfirmation(): void {
+  if (confirmationPending.value) return;
+  confirmationError.value = "";
+  confirmation.value = null;
+}
+
+async function confirmDestructiveAction(): Promise<void> {
+  const action = confirmation.value;
+  if (!action || confirmationPending.value) return;
+  confirmationPending.value = true;
+  confirmationError.value = "";
+  try {
+    if (action.kind === "recycle" && action.item) {
+      await recycleMemoryItem(action.item, "记忆已移入回收站。");
+    } else if (action.kind === "permanent" && action.item) {
+      await permanentlyDeleteMemory(action.item);
+    } else if (action.kind === "clear" && action.sourceStatus && action.targets) {
+      await clearMemoryStatus(action.sourceStatus, action.targets);
+    }
+    confirmation.value = null;
+  } catch (error) {
+    confirmationError.value = errorMessage(error);
+  } finally {
+    confirmationPending.value = false;
+  }
+}
+
+async function executeItemAction(id: string, action: () => Promise<void>): Promise<void> {
+  if (busyId.value) throw new Error("当前已有记忆操作正在进行");
   busyId.value = id;
   notice.text = "";
   try {
     await action();
-  } catch (error) {
-    notice.tone = "error";
-    notice.text = errorMessage(error);
   } finally {
     busyId.value = "";
+  }
+}
+
+function showActionError(error: unknown): void {
+  notice.tone = "error";
+  notice.text = errorMessage(error);
+}
+
+async function runItemAction(id: string, action: () => Promise<void>): Promise<void> {
+  try {
+    await executeItemAction(id, action);
+  } catch (error) {
+    showActionError(error);
   }
 }
 
@@ -447,10 +544,11 @@ function errorMessage(error: unknown): string {
               :key="tab.status"
               type="button"
               role="tab"
-              :aria-selected="activeStatus === tab.status"
-              :class="{ active: activeStatus === tab.status }"
-              :data-memory-status="tab.status"
-              @click="activeStatus = tab.status"
+               :aria-selected="activeStatus === tab.status"
+               :class="{ active: activeStatus === tab.status }"
+               :data-memory-status="tab.status"
+               :disabled="isInteractionLocked"
+               @click="activeStatus = tab.status"
             >
               {{ tab.label }} <span>{{ items[tab.status].length }}</span>
             </button>
@@ -462,8 +560,8 @@ function errorMessage(error: unknown): string {
               class="text-button memory-clear"
               data-action="clear"
               type="button"
-              :disabled="!currentItems.length || Boolean(busyId)"
-              @click="clearCurrentStatus"
+              :disabled="!currentItems.length || isInteractionLocked"
+              @click="requestClearCurrentStatus"
             >
               <Trash2 :size="14" />{{ activeStatus === "deleted" ? "清空回收站" : "清空当前列表" }}
             </button>
@@ -492,32 +590,32 @@ function errorMessage(error: unknown): string {
 
             <div class="memory-item-actions">
               <template v-if="editingId === item.id">
-                <button data-action="save" type="button" :disabled="busyId === item.id" @click="saveEdit(item)">
+                <button data-action="save" type="button" :disabled="isInteractionLocked" @click="saveEdit(item)">
                   <Check :size="14" />保存
                 </button>
-                <button data-action="cancel" type="button" @click="cancelEdit"><X :size="14" />取消</button>
+                <button data-action="cancel" type="button" :disabled="isInteractionLocked" @click="cancelEdit"><X :size="14" />取消</button>
               </template>
               <template v-else-if="item.status === 'pending'">
-                <button data-action="confirm" type="button" :disabled="Boolean(busyId)" @click="confirmMemory(item)">
+                <button data-action="confirm" type="button" :disabled="isInteractionLocked" @click="confirmMemory(item)">
                   <Check :size="14" />确认
                 </button>
-                <button data-action="ignore" type="button" :disabled="Boolean(busyId)" @click="recycleMemory(item, false)">
+                <button data-action="ignore" type="button" :disabled="isInteractionLocked" @click="ignoreMemory(item)">
                   <X :size="14" />忽略
                 </button>
               </template>
               <template v-else-if="item.status === 'active'">
-                <button data-action="edit" type="button" :disabled="Boolean(busyId)" @click="startEdit(item)">
+                <button data-action="edit" type="button" :disabled="isInteractionLocked" @click="startEdit(item)">
                   <Pencil :size="14" />编辑
                 </button>
-                <button data-action="delete" type="button" :disabled="Boolean(busyId)" @click="recycleMemory(item, true)">
+                <button data-action="delete" type="button" :disabled="isInteractionLocked" @click="requestRecycleMemory(item)">
                   <Trash2 :size="14" />删除
                 </button>
               </template>
               <template v-else>
-                <button data-action="restore" type="button" :disabled="Boolean(busyId)" @click="restoreMemory(item)">
+                <button data-action="restore" type="button" :disabled="isInteractionLocked" @click="restoreMemory(item)">
                   <RotateCcw :size="14" />恢复
                 </button>
-                <button class="danger" data-action="permanent" type="button" :disabled="Boolean(busyId)" @click="permanentlyDelete(item)">
+                <button class="danger" data-action="permanent" type="button" :disabled="isInteractionLocked" @click="requestPermanentDeletion(item)">
                   <Trash2 :size="14" />永久删除
                 </button>
               </template>
@@ -526,6 +624,16 @@ function errorMessage(error: unknown): string {
         </section>
       </template>
     </div>
+    <ConfirmDialog
+      :open="Boolean(confirmation)"
+      :title="confirmation?.title || ''"
+      :description="confirmation?.description || ''"
+      :confirm-label="confirmation?.confirmLabel || ''"
+      :busy="confirmationPending"
+      :error-message="confirmationError"
+      @cancel="closeConfirmation"
+      @confirm="confirmDestructiveAction"
+    />
   </section>
 </template>
 
