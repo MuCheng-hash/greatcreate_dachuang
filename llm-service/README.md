@@ -253,6 +253,7 @@ Agent 运行时通用配置：
 - `AGENT_MAX_ITERATIONS`：Agent 最大工具循环次数，默认 4
 - `AGENT_MAX_HISTORY_MESSAGES`：单会话保留的最大消息数，默认 20
 - `AGENT_PROMPT_VERSION`：提示词版本，默认 `v1`，文件位于 `prompts/agent/<version>/system.md`
+- `AGENT_MEMORY_ENABLED`：开启跨会话长期记忆和用户画像；默认 `false`，本地开发可设为 `true`
 
 兼容模型服务配置：
 

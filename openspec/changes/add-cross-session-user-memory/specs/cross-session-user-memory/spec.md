@@ -65,8 +65,12 @@
 - **THEN** 系统不生成推断候选，但仍处理并保存通过安全校验的明确记忆指令
 
 #### Scenario: Confirm or ignore candidate
-- **WHEN** 用户确认一条待确认候选
+- **WHEN** 用户确认一条待确认候选且不存在同字段冲突
 - **THEN** 系统将其变为已生效记忆并按类型设置生命周期
+
+#### Scenario: Conflicting candidate requires an explicit decision
+- **WHEN** 用户确认的候选与同一账号、学校范围和字段键下的已生效核心画像内容不同
+- **THEN** 系统先返回可解释的冲突信息，只有用户明确选择替换时才将旧项移入回收站并激活候选；取消时候选保持待确认
 
 ### Requirement: Sensitive content is rejected
 系统 MUST 拒绝保存或生成包含密码、访问令牌、密钥、身份证号、电话号码、精确住址及同等级敏感凭据或个人信息的记忆。安全校验 MUST 应用于聊天明确指令、模型候选、记忆中心新建和编辑。
