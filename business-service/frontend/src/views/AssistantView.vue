@@ -6,6 +6,7 @@ import { marked } from "marked";
 import AppShell from "@/components/AppShell.vue";
 import InlineNotice from "@/components/InlineNotice.vue";
 import { api } from "@/services/api";
+import { memoryApi } from "@/services/memory";
 import { useSchoolStore } from "@/stores/school";
 import { useAuthStore, type AuthCurrentUser } from "@/stores/auth";
 import type {
@@ -15,6 +16,8 @@ import type {
   AgentQaResponse,
   AgentSseEventData,
   AgentSseEventName,
+  AgentMemoryApplied,
+  AgentMemoryItem,
   LlmModelOption,
   AssistantConversationDetail,
   AssistantConversationSummary,
@@ -47,6 +50,7 @@ interface AssistantMessage extends AgentQaResponse {
   traceExpanded?: boolean;
   attachments?: AgentAttachment[];
   isStreaming?: boolean;
+  memoryNotice?: string;
 }
 
 interface StreamRenderState {
@@ -93,6 +97,7 @@ const pendingImages = ref<AgentAttachment[]>([]);
 const listening = ref(false);
 const speakingIndex = ref<number | null>(null);
 const copiedIndex = ref<number | null>(null);
+const memoryBusyId = ref<string>("");
 const recognition = ref<SpeechRecognitionLike | null>(null);
 const streamRenderStates = new WeakMap<object, StreamRenderState>();
 
@@ -182,6 +187,7 @@ async function openConversation(selectedThreadId: string, showError = true): Pro
         role: "assistant",
         answer: item.content,
         citations: [],
+        memoryApplied: normalizeMemoryApplied(item.metadata?.memoryApplied),
         followUpQuestions: storedFollowUps.length
           ? storedFollowUps
           : previousUser ? buildFollowUpQuestions(previousUser.content) : []
@@ -520,12 +526,66 @@ function applyAssistantResult(message: AssistantMessage, result: Partial<AgentQa
     threadId: result?.threadId || message.threadId,
     runId: result?.runId || message.runId,
     fallbackLevel: result?.fallbackLevel || null,
+    memoryCandidates: Array.isArray(result?.memoryCandidates) ? result.memoryCandidates : [],
+    memoryApplied: result?.memoryApplied || null,
     effectiveModel: result?.model ? `${result.provider || "LLM"} / ${result.model}` : message.effectiveModel,
     streamStatus: result?.generationStatus === "degraded" ? "已使用降级回答" : "回答完成",
     isStreaming: false
   });
   if (result?.conversationId) conversationId.value = result.conversationId;
   if (result?.threadId) threadId.value = result.threadId;
+}
+
+function normalizeMemoryApplied(value: unknown): AgentMemoryApplied | null {
+  if (!value || typeof value !== "object") return null;
+  const candidate = value as { count?: unknown; memoryIds?: unknown };
+  const count = typeof candidate.count === "number" ? candidate.count : 0;
+  const memoryIds = Array.isArray(candidate.memoryIds)
+    ? candidate.memoryIds.filter((item): item is string => typeof item === "string")
+    : [];
+  return count > 0 ? { count, memoryIds } : null;
+}
+
+async function confirmMemoryCandidate(
+  message: AssistantMessage,
+  candidate: AgentMemoryItem,
+): Promise<void> {
+  if (memoryBusyId.value) return;
+  memoryBusyId.value = candidate.id;
+  message.memoryNotice = "";
+  try {
+    await memoryApi.confirm(candidate.id);
+    removeMemoryCandidate(message, candidate.id);
+    message.memoryNotice = "已确认并保存这条记忆。";
+  } catch (candidateError) {
+    message.memoryNotice = candidateError instanceof Error
+      ? candidateError.message : "确认记忆失败，请稍后重试。";
+  } finally {
+    memoryBusyId.value = "";
+  }
+}
+
+async function ignoreMemoryCandidate(
+  message: AssistantMessage,
+  candidate: AgentMemoryItem,
+): Promise<void> {
+  if (memoryBusyId.value) return;
+  memoryBusyId.value = candidate.id;
+  message.memoryNotice = "";
+  try {
+    await memoryApi.recycle(candidate.id);
+    removeMemoryCandidate(message, candidate.id);
+    message.memoryNotice = "已忽略这条候选记忆，可在个人中心回收站恢复。";
+  } catch (candidateError) {
+    message.memoryNotice = candidateError instanceof Error
+      ? candidateError.message : "忽略记忆失败，请稍后重试。";
+  } finally {
+    memoryBusyId.value = "";
+  }
+}
+
+function removeMemoryCandidate(message: AssistantMessage, id: string): void {
+  message.memoryCandidates = (message.memoryCandidates || []).filter((item) => item.id !== id);
 }
 
 function getStreamRenderState(message: AssistantMessage): StreamRenderState {
@@ -920,6 +980,35 @@ function clearChat(): void {
               </section>
               <div v-else-if="message.streamStatus" class="agent-stream-status">{{ message.streamStatus }}</div>
               <div v-if="message.effectiveModel" class="agent-stream-status">实际模型：{{ message.effectiveModel }}</div>
+              <p v-if="message.memoryApplied?.count" class="memory-applied">
+                <BrainCircuit :size="14" />本次参考 {{ message.memoryApplied.count }} 条记忆
+              </p>
+              <section v-if="message.role === 'assistant' && message.memoryCandidates?.length" class="memory-candidates" aria-label="待确认记忆">
+                <div class="memory-candidate-heading">
+                  <BrainCircuit :size="15" />
+                  <span>系统推测以下内容可能值得跨会话记住，请你确认</span>
+                </div>
+                <article
+                  v-for="candidate in message.memoryCandidates"
+                  :key="candidate.id"
+                  class="memory-candidate-card"
+                  :data-memory-id="candidate.id"
+                >
+                  <div>
+                    <strong>{{ candidate.memoryType === "PROFILE" ? "用户画像" : "阶段任务" }}</strong>
+                    <p>{{ candidate.content }}</p>
+                  </div>
+                  <div class="memory-candidate-actions">
+                    <button data-action="confirm" type="button" :disabled="Boolean(memoryBusyId)" @click="confirmMemoryCandidate(message, candidate)">
+                      <Check :size="13" />确认
+                    </button>
+                    <button data-action="ignore" type="button" :disabled="Boolean(memoryBusyId)" @click="ignoreMemoryCandidate(message, candidate)">
+                      <X :size="13" />忽略
+                    </button>
+                  </div>
+                </article>
+              </section>
+              <p v-if="message.memoryNotice" class="memory-notice">{{ message.memoryNotice }}</p>
               <p v-if="message.retrievalStatus" class="retrieval-status" :class="retrievalStatusClass(message.retrievalStatus)">{{ retrievalStatusLabel(message.retrievalStatus) }}</p>
               <p v-if="message.generationStatus" class="generation-status" :class="generationStatusClass(message.generationStatus)">{{ generationStatusLabel(message.generationStatus) }}</p>
               <div v-if="message.clarificationRequired" class="clarification"><strong>需要补充：</strong>{{ message.clarificationMessage || "请补充具体学校名称。" }}<span v-if="message.clarificationOptions?.length">可选：{{ message.clarificationOptions.join("、") }}</span></div>
@@ -1057,6 +1146,17 @@ function clearChat(): void {
 .message-action:hover, .message-action.copied { color: var(--green); background: #fff; }
 .message-audio { margin-top: 0; }
 .agent-stream-status { margin-top: 8px; color: var(--muted); font-size: 12px; }
+.memory-applied { display: flex; align-items: center; gap: 5px; margin-top: 9px !important; color: var(--green); font-size: 12px; font-weight: 650; }
+.memory-candidates { display: grid; gap: 8px; margin-top: 12px; padding: 11px; border: 1px solid #d4dfd6; border-radius: 8px; background: #f8fbf8; }
+.memory-candidate-heading { display: flex; align-items: center; gap: 6px; color: #526158; font-size: 12px; font-weight: 650; }
+.memory-candidate-card { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 9px 10px; border: 1px solid #dce5de; border-radius: 7px; background: #fff; }
+.memory-candidate-card strong { color: var(--green); font-size: 11px; }
+.memory-candidate-card p { margin-top: 3px !important; color: var(--text); font-size: 13px; line-height: 1.55; }
+.memory-candidate-actions { display: flex; flex: none; gap: 5px; }
+.memory-candidate-actions button { display: inline-flex; min-height: 29px; align-items: center; gap: 4px; padding: 0 8px; border: 1px solid #bdd1c3; border-radius: 5px; background: #fff; color: var(--green); cursor: pointer; font-size: 11px; }
+.memory-candidate-actions button:last-child { border-color: var(--line); color: var(--muted); }
+.memory-candidate-actions button:disabled { cursor: not-allowed; opacity: .5; }
+.memory-notice { margin-top: 7px !important; color: var(--muted); font-size: 11px; }
 .agent-trace { margin-top: 10px; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
 .agent-trace-toggle { display: flex; width: 100%; min-height: 38px; align-items: center; justify-content: space-between; gap: 10px; padding: 0; border: 0; background: transparent; color: #526158; font-size: 12px; cursor: pointer; }
 .agent-trace-toggle > span { display: flex; min-width: 0; align-items: center; gap: 7px; overflow-wrap: anywhere; }
@@ -1138,5 +1238,6 @@ function clearChat(): void {
   .composer-icon { width: 32px; height: 36px; }
   .send-button { width: 40px; min-height: 40px; }
   .message-images img { width: 108px; height: 80px; }
+  .memory-candidate-card { align-items: flex-start; flex-direction: column; }
 }
 </style>

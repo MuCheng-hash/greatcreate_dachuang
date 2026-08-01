@@ -700,4 +700,59 @@ describe("assistant view", () => {
       threadId: "thread-1"
     });
   });
+
+  it("shows applied-memory metadata and lets the user confirm or ignore inferred candidates", async () => {
+    apiMock.post.mockImplementation(async (path) => {
+      if (path === "/api/ai/qa/ask") {
+        return {
+          threadId: "thread-memory",
+          answer: "我会按项目式教学来组织回答。",
+          citations: [],
+          retrievalStatus: "ok",
+          generationStatus: "completed",
+          memoryApplied: { count: 2, memoryIds: ["profile-1", "task-1"] },
+          memoryCandidates: [
+            {
+              id: "candidate-1",
+              memoryType: "PROFILE",
+              fieldKey: "response_format",
+              content: "偏好表格回答",
+              status: "pending",
+              source: "inferred_chat",
+            },
+            {
+              id: "candidate-2",
+              memoryType: "TASK",
+              fieldKey: null,
+              content: "正在准备红色研学活动",
+              status: "pending",
+              source: "inferred_chat",
+            },
+          ],
+        };
+      }
+      return { id: "candidate-1", status: "active" };
+    });
+
+    const wrapper = mount(AssistantView, {
+      global: { stubs: { AppShell: { template: "<div><slot /></div>" }, InlineNotice: true } },
+    });
+    await flushPromises();
+    await wrapper.get("textarea").setValue("帮我设计一个活动");
+    await wrapper.get("form").trigger("submit.prevent");
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("本次参考 2 条记忆");
+    expect(wrapper.text()).toContain("偏好表格回答");
+    expect(wrapper.findAll(".memory-candidate-card")).toHaveLength(2);
+
+    await wrapper.get('[data-memory-id="candidate-1"] [data-action="confirm"]').trigger("click");
+    await flushPromises();
+    expect(apiMock.post).toHaveBeenCalledWith("/api/ai/memories/candidate-1/confirm");
+
+    await wrapper.get('[data-memory-id="candidate-2"] [data-action="ignore"]').trigger("click");
+    await flushPromises();
+    expect(apiMock.delete).toHaveBeenCalledWith("/api/ai/memories/candidate-2");
+    expect(wrapper.find(".memory-candidate-card").exists()).toBe(false);
+  });
 });

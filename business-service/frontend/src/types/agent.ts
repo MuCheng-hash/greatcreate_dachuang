@@ -1,6 +1,50 @@
 export type AgentGenerationStatus = "completed" | "degraded" | "skipped" | "incomplete" | string;
 export type AgentRetrievalStatus = "ok" | "empty" | "degraded" | string;
 export type AgentTaskType = "CHAT" | "TEACHING_PLAN";
+export type MemoryType = "PROFILE" | "TASK";
+export type MemoryStatus = "pending" | "active" | "deleted";
+export type MemorySource = "explicit_chat" | "inferred_chat" | "profile_ui" | "teaching_plan";
+
+export interface AgentMemorySetting {
+  available: boolean;
+  enabled: boolean;
+  effectiveEnabled: boolean;
+  createdAt?: string | null;
+  updatedAt?: string | null;
+}
+
+export interface AgentMemoryItem {
+  id: string;
+  memoryType: MemoryType;
+  fieldKey?: string | null;
+  content: string;
+  status: MemoryStatus;
+  source: MemorySource;
+  sourceThreadId?: string | null;
+  confidence?: number | null;
+  expiresAt?: string | null;
+  deletedAt?: string | null;
+  purgeAfter?: string | null;
+  createdAt?: string | null;
+  updatedAt?: string | null;
+}
+
+export interface AgentMemoryApplied {
+  count: number;
+  memoryIds: string[];
+}
+
+export interface AgentMemoryCreatePayload {
+  memoryType: MemoryType;
+  fieldKey?: string | null;
+  content: string;
+}
+
+export interface AgentMemoryUpdatePayload {
+  memoryType?: MemoryType;
+  fieldKey?: string | null;
+  content?: string;
+}
 
 export interface LlmModelOption {
   id: string;
@@ -103,6 +147,8 @@ export interface AgentQaResponse {
   provider?: string | null;
   model?: string | null;
   teachingPlan?: TeachingPlanResponse | null;
+  memoryCandidates?: AgentMemoryItem[] | null;
+  memoryApplied?: AgentMemoryApplied | null;
 }
 
 export interface AgentThreadMessage {
