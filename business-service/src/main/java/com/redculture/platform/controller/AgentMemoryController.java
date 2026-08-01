@@ -2,16 +2,22 @@ package com.redculture.platform.controller;
 
 import com.redculture.platform.common.ApiResponse;
 import com.redculture.platform.config.AuthContext;
+import com.redculture.platform.service.agent.AgentMemoryConflictException;
 import com.redculture.platform.service.agent.AgentRuntimeClient;
 import com.redculture.platform.vo.AuthCurrentUserVO;
+import com.redculture.platform.vo.ai.AgentMemoryConflictPreview;
 import com.redculture.platform.vo.ai.AgentMemoryItem;
 import com.redculture.platform.vo.ai.AgentMemorySetting;
 import com.redculture.platform.vo.request.AgentMemoryCreateRequest;
+import com.redculture.platform.vo.request.AgentMemoryResolutionRequest;
 import com.redculture.platform.vo.request.AgentMemorySettingUpdateRequest;
 import com.redculture.platform.vo.request.AgentMemoryUpdateRequest;
 import jakarta.servlet.http.HttpServletRequest;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
 import org.springframework.util.StringUtils;
 import org.springframework.web.bind.annotation.DeleteMapping;
+import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PatchMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -83,8 +89,9 @@ public class AgentMemoryController {
         AuthCurrentUserVO user = requireSchoolUser(servletRequest);
         AgentMemoryCreateRequest normalized = new AgentMemoryCreateRequest(
                 normalizeMemoryType(request.getMemoryType(), true),
-                normalizeOptionalText(request.getFieldKey()),
-                requireContent(request.getContent()));
+                normalizeFieldKey(request.getFieldKey()),
+                requireContent(request.getContent()),
+                request.getReplaceConflicts());
         return ApiResponse.success(agentRuntimeClient.createMemory(
                 ownerId(user), SCHOOL_SCOPE, user.getSchoolId(), normalized));
     }
@@ -106,19 +113,34 @@ public class AgentMemoryController {
                 request.getMemoryType() == null
                         ? null : normalizeMemoryType(request.getMemoryType(), true),
                 request.getFieldKey() == null
-                        ? null : normalizeOptionalText(request.getFieldKey()),
+                        ? null : normalizeFieldKey(request.getFieldKey()),
                 request.getContent() == null
-                        ? null : requireContent(request.getContent()));
+                        ? null : requireContent(request.getContent()),
+                request.getReplaceConflicts());
         return ApiResponse.success(agentRuntimeClient.updateMemory(
                 id.trim(), ownerId(user), SCHOOL_SCOPE, user.getSchoolId(), normalized));
     }
 
-    @PostMapping("/memories/{id}/confirm")
-    public ApiResponse<AgentMemoryItem> confirm(
+    @GetMapping("/memories/{id}/confirmation-preview")
+    public ApiResponse<AgentMemoryConflictPreview> confirmationPreview(
             @PathVariable String id, HttpServletRequest request) {
         AuthCurrentUserVO user = requireSchoolUser(request);
-        return ApiResponse.success(agentRuntimeClient.confirmMemory(
+        return ApiResponse.success(agentRuntimeClient.getMemoryConfirmationPreview(
                 requireMemoryId(id), ownerId(user), SCHOOL_SCOPE, user.getSchoolId()));
+    }
+
+    @PostMapping("/memories/{id}/confirm")
+    public ApiResponse<AgentMemoryItem> confirm(
+            @PathVariable String id,
+            @RequestBody(required = false) AgentMemoryResolutionRequest resolution,
+            HttpServletRequest request) {
+        AuthCurrentUserVO user = requireSchoolUser(request);
+        return ApiResponse.success(agentRuntimeClient.confirmMemory(
+                requireMemoryId(id),
+                ownerId(user),
+                SCHOOL_SCOPE,
+                user.getSchoolId(),
+                resolution != null && Boolean.TRUE.equals(resolution.getReplaceConflicts())));
     }
 
     @DeleteMapping("/memories/{id}")
@@ -131,10 +153,16 @@ public class AgentMemoryController {
 
     @PostMapping("/memories/{id}/restore")
     public ApiResponse<AgentMemoryItem> restore(
-            @PathVariable String id, HttpServletRequest request) {
+            @PathVariable String id,
+            @RequestBody(required = false) AgentMemoryResolutionRequest resolution,
+            HttpServletRequest request) {
         AuthCurrentUserVO user = requireSchoolUser(request);
         return ApiResponse.success(agentRuntimeClient.restoreMemory(
-                requireMemoryId(id), ownerId(user), SCHOOL_SCOPE, user.getSchoolId()));
+                requireMemoryId(id),
+                ownerId(user),
+                SCHOOL_SCOPE,
+                user.getSchoolId(),
+                resolution != null && Boolean.TRUE.equals(resolution.getReplaceConflicts())));
     }
 
     @DeleteMapping("/memories/{id}/permanent")
@@ -194,10 +222,22 @@ public class AgentMemoryController {
         return StringUtils.hasText(value) ? value.trim() : null;
     }
 
+    private String normalizeFieldKey(String value) {
+        String normalized = normalizeOptionalText(value);
+        return "response_format".equals(normalized) ? "answer_format" : normalized;
+    }
+
     private String requireMemoryId(String id) {
         if (!StringUtils.hasText(id)) {
             throw new IllegalArgumentException("memory id is required");
         }
         return id.trim();
+    }
+
+    @ExceptionHandler(AgentMemoryConflictException.class)
+    public ResponseEntity<ApiResponse<AgentMemoryConflictPreview>> handleMemoryConflict(
+            AgentMemoryConflictException exception) {
+        return ResponseEntity.status(HttpStatus.CONFLICT).body(
+                new ApiResponse<>(HttpStatus.CONFLICT.value(), exception.getMessage(), exception.getPreview()));
     }
 }

@@ -20,6 +20,7 @@ MEMORY_SOURCES = frozenset(
 CORE_PROFILE_FIELDS = frozenset(
     {"grade", "subject", "teaching_style", "answer_format", "lesson_duration"}
 )
+FIELD_KEY_ALIASES = {"response_format": "answer_format"}
 _UNSET = object()
 
 
@@ -27,12 +28,12 @@ class MemoryNotFoundError(LookupError):
     """记忆不存在，或不属于当前账号与学校范围。"""
 
 
-class MemoryStateError(RuntimeError):
-    """记忆状态不允许当前操作。"""
-
-
 class MemoryValidationError(ValueError):
     """记忆内容或枚举值不符合持久化约束。"""
+
+
+class MemoryStateError(RuntimeError):
+    """记忆状态不允许当前操作。"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,6 +64,26 @@ class MemoryRecord:
     purge_after: str | None
     created_at: str
     updated_at: str
+
+
+@dataclass(frozen=True, slots=True)
+class MemoryConflictPreview:
+    """一次激活操作在当前作用域内看到的同字段状态。"""
+
+    candidate: MemoryRecord
+    conflicts: tuple[MemoryRecord, ...]
+    duplicate: bool
+
+
+class MemoryConflictError(RuntimeError):
+    """激活会覆盖现有同字段记忆，必须由用户明确决定。"""
+
+    def __init__(self, preview: MemoryConflictPreview):
+        self.preview = preview
+        message = "该字段已有已生效记忆，请先确认是否替换"
+        if preview.duplicate:
+            message = "该记忆已存在"
+        super().__init__(message)
 
 
 @dataclass(frozen=True, slots=True)
@@ -360,6 +381,7 @@ class MemoryRepository:
         status: str = "active",
         source_thread_id: str | None = None,
         confidence: float | None = None,
+        replace_conflicts: bool = False,
     ) -> MemoryRecord:
         owner, scope, scope_value = self._normalize_scope(owner_id, scope_type, scope_id)
         normalized_type = self._normalize_memory_type(memory_type)
@@ -376,41 +398,50 @@ class MemoryRepository:
         )
 
         with self._lock, self._connect() as connection:
-            duplicate = connection.execute(
-                """
-                SELECT * FROM agent_memory
-                WHERE owner_id = ? AND scope_type = ? AND scope_id = ?
-                  AND memory_type = ? AND status = ? AND content = ?
-                  AND ((field_key IS NULL AND ? IS NULL) OR field_key = ?)
-                ORDER BY created_at DESC
-                LIMIT 1
-                """,
-                (
-                    owner,
-                    scope,
-                    scope_value,
-                    normalized_type,
-                    normalized_status,
-                    normalized_content,
-                    normalized_field,
-                    normalized_field,
-                ),
-            ).fetchone()
+            duplicate = self._find_exact_duplicate(
+                connection,
+                owner,
+                scope,
+                scope_value,
+                normalized_type,
+                normalized_status,
+                normalized_content,
+                normalized_field,
+            )
             if duplicate is not None:
                 return self._memory_from_row(duplicate)
 
             memory_id = str(uuid.uuid4())
             if normalized_status == "active" and normalized_field:
-                self._delete_field_conflicts(
-                    connection,
-                    owner,
-                    scope,
-                    scope_value,
-                    normalized_field,
-                    exclude_id=memory_id,
-                    replacement_id=memory_id,
-                    now_dt=now_dt,
+                candidate = MemoryRecord(
+                    id=memory_id,
+                    owner_id=owner,
+                    scope_type=scope,
+                    scope_id=scope_value,
+                    memory_type=normalized_type,
+                    field_key=normalized_field,
+                    content=normalized_content,
+                    status=normalized_status,
+                    source=normalized_source,
+                    source_thread_id=normalized_thread,
+                    confidence=normalized_confidence,
+                    expires_at=expires_at,
+                    deleted_at=deleted_at,
+                    purge_after=purge_after,
+                    created_at=now,
+                    updated_at=now,
                 )
+                preview = self._activation_preview(connection, candidate)
+                if preview.conflicts:
+                    if not replace_conflicts:
+                        raise MemoryConflictError(preview)
+                    self._recycle_field_conflicts(
+                        connection,
+                        preview.conflicts,
+                        normalized_field,
+                        replacement_id=memory_id,
+                        now_dt=now_dt,
+                    )
 
             connection.execute(
                 """
@@ -507,6 +538,20 @@ class MemoryRepository:
             raise MemoryNotFoundError("memory not found")
         return self._memory_from_row(row)
 
+    def confirmation_preview(
+        self,
+        owner_id: str,
+        scope_type: str,
+        scope_id: str | int,
+        memory_id: str,
+    ) -> MemoryConflictPreview:
+        """返回确认或恢复前的只读冲突预检，不改变任何状态。"""
+        owner, scope, scope_value = self._normalize_scope(owner_id, scope_type, scope_id)
+        normalized_id = self._normalize_id(memory_id)
+        with self._connect() as connection:
+            row = self._require_memory(connection, owner, scope, scope_value, normalized_id)
+            return self._activation_preview(connection, self._memory_from_row(row))
+
     def recall(
         self,
         owner_id: str,
@@ -573,6 +618,7 @@ class MemoryRepository:
         content: str | None = None,
         memory_type: str | None = None,
         field_key: str | None | object = _UNSET,
+        replace_conflicts: bool = False,
     ) -> MemoryRecord:
         owner, scope, scope_value = self._normalize_scope(owner_id, scope_type, scope_id)
         normalized_id = self._normalize_id(memory_id)
@@ -601,16 +647,35 @@ class MemoryRepository:
             )
             expires_at, _, _ = self._lifecycle(next_type, current.status, now_dt)
             if current.status == "active" and next_field:
-                self._delete_field_conflicts(
-                    connection,
-                    owner,
-                    scope,
-                    scope_value,
-                    next_field,
-                    exclude_id=current.id,
-                    replacement_id=current.id,
-                    now_dt=now_dt,
+                candidate = MemoryRecord(
+                    id=current.id,
+                    owner_id=current.owner_id,
+                    scope_type=current.scope_type,
+                    scope_id=current.scope_id,
+                    memory_type=next_type,
+                    field_key=next_field,
+                    content=next_content,
+                    status=current.status,
+                    source=current.source,
+                    source_thread_id=current.source_thread_id,
+                    confidence=current.confidence,
+                    expires_at=expires_at,
+                    deleted_at=current.deleted_at,
+                    purge_after=current.purge_after,
+                    created_at=current.created_at,
+                    updated_at=now,
                 )
+                preview = self._activation_preview(connection, candidate)
+                if preview.conflicts:
+                    if preview.duplicate or not replace_conflicts:
+                        raise MemoryConflictError(preview)
+                    self._recycle_field_conflicts(
+                        connection,
+                        preview.conflicts,
+                        next_field,
+                        replacement_id=current.id,
+                        now_dt=now_dt,
+                    )
             connection.execute(
                 """
                 UPDATE agent_memory
@@ -644,9 +709,17 @@ class MemoryRepository:
         scope_type: str,
         scope_id: str | int,
         memory_id: str,
+        *,
+        replace_conflicts: bool = False,
     ) -> MemoryRecord:
         return self._activate_memory(
-            owner_id, scope_type, scope_id, memory_id, "confirmed", require_deleted=False
+            owner_id,
+            scope_type,
+            scope_id,
+            memory_id,
+            "confirmed",
+            require_deleted=False,
+            replace_conflicts=replace_conflicts,
         )
 
     def delete_memory(
@@ -696,9 +769,17 @@ class MemoryRepository:
         scope_type: str,
         scope_id: str | int,
         memory_id: str,
+        *,
+        replace_conflicts: bool = False,
     ) -> MemoryRecord:
         return self._activate_memory(
-            owner_id, scope_type, scope_id, memory_id, "restored", require_deleted=True
+            owner_id,
+            scope_type,
+            scope_id,
+            memory_id,
+            "restored",
+            require_deleted=True,
+            replace_conflicts=replace_conflicts,
         )
 
     def permanent_delete(
@@ -826,6 +907,7 @@ class MemoryRepository:
         event_type: str,
         *,
         require_deleted: bool,
+        replace_conflicts: bool,
     ) -> MemoryRecord:
         owner, scope, scope_value = self._normalize_scope(owner_id, scope_type, scope_id)
         normalized_id = self._normalize_id(memory_id)
@@ -854,16 +936,26 @@ class MemoryRepository:
                 raise MemoryNotFoundError("memory not found")
             expires_at, _, _ = self._lifecycle(current.memory_type, "active", now_dt)
             if current.field_key:
-                self._delete_field_conflicts(
-                    connection,
-                    owner,
-                    scope,
-                    scope_value,
-                    current.field_key,
-                    exclude_id=current.id,
-                    replacement_id=current.id,
-                    now_dt=now_dt,
-                )
+                preview = self._activation_preview(connection, current)
+                if preview.duplicate:
+                    return self._recycle_duplicate_candidate(
+                        connection,
+                        current,
+                        owner,
+                        scope,
+                        scope_value,
+                        now_dt,
+                    )
+                if preview.conflicts:
+                    if not replace_conflicts:
+                        raise MemoryConflictError(preview)
+                    self._recycle_field_conflicts(
+                        connection,
+                        preview.conflicts,
+                        current.field_key,
+                        replacement_id=current.id,
+                        now_dt=now_dt,
+                    )
             connection.execute(
                 """
                 UPDATE agent_memory
@@ -888,7 +980,27 @@ class MemoryRepository:
             ).fetchone()
         return self._memory_from_row(active)
 
-    def _delete_field_conflicts(
+    def _activation_preview(
+        self,
+        connection: sqlite3.Connection,
+        candidate: MemoryRecord,
+    ) -> MemoryConflictPreview:
+        if not candidate.field_key:
+            return MemoryConflictPreview(candidate, (), False)
+        conflicts = self._find_active_field_conflicts(
+            connection,
+            candidate.owner_id,
+            candidate.scope_type,
+            candidate.scope_id,
+            candidate.field_key,
+            exclude_id=candidate.id,
+        )
+        duplicate = any(
+            self._same_memory_content(item.content, candidate.content) for item in conflicts
+        )
+        return MemoryConflictPreview(candidate, conflicts, duplicate)
+
+    def _find_active_field_conflicts(
         self,
         connection: sqlite3.Connection,
         owner_id: str,
@@ -897,23 +1009,77 @@ class MemoryRepository:
         field_key: str,
         *,
         exclude_id: str,
+    ) -> tuple[MemoryRecord, ...]:
+        variants = self._field_key_variants(field_key)
+        placeholders = ", ".join("?" for _ in variants)
+        rows = connection.execute(
+            f"""
+            SELECT * FROM agent_memory
+            WHERE owner_id = ? AND scope_type = ? AND scope_id = ?
+              AND field_key IN ({placeholders}) AND status = 'active' AND id <> ?
+            ORDER BY updated_at ASC, created_at ASC, id ASC
+            """,
+            (owner_id, scope_type, scope_id, *variants, exclude_id),
+        ).fetchall()
+        return tuple(self._memory_from_row(row) for row in rows)
+
+    def _find_exact_duplicate(
+        self,
+        connection: sqlite3.Connection,
+        owner_id: str,
+        scope_type: str,
+        scope_id: str,
+        memory_type: str,
+        status: str,
+        content: str,
+        field_key: str | None,
+    ) -> sqlite3.Row | None:
+        clauses = [
+            "owner_id = ?",
+            "scope_type = ?",
+            "scope_id = ?",
+            "memory_type = ?",
+            "status = ?",
+            "content = ?",
+        ]
+        parameters: list[Any] = [
+            owner_id,
+            scope_type,
+            scope_id,
+            memory_type,
+            status,
+            content,
+        ]
+        if field_key is None:
+            clauses.append("field_key IS NULL")
+        else:
+            variants = self._field_key_variants(field_key)
+            clauses.append(f"field_key IN ({', '.join('?' for _ in variants)})")
+            parameters.extend(variants)
+        return connection.execute(
+            f"""
+            SELECT * FROM agent_memory
+            WHERE {' AND '.join(clauses)}
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            parameters,
+        ).fetchone()
+
+    def _recycle_field_conflicts(
+        self,
+        connection: sqlite3.Connection,
+        conflicts: tuple[MemoryRecord, ...],
+        field_key: str,
+        *,
         replacement_id: str,
         now_dt: datetime,
     ) -> None:
-        rows = connection.execute(
-            """
-            SELECT * FROM agent_memory
-            WHERE owner_id = ? AND scope_type = ? AND scope_id = ?
-              AND field_key = ? AND status = 'active' AND id <> ?
-            """,
-            (owner_id, scope_type, scope_id, field_key, exclude_id),
-        ).fetchall()
-        if not rows:
+        if not conflicts:
             return
         now = self._iso(now_dt)
         purge_after = self._iso(now_dt + timedelta(days=self.recycle_bin_days))
-        for row in rows:
-            current = self._memory_from_row(row)
+        for current in conflicts:
             connection.execute(
                 """
                 UPDATE agent_memory
@@ -926,9 +1092,9 @@ class MemoryRepository:
             self._write_audit(
                 connection,
                 current.id,
-                owner_id,
-                scope_type,
-                scope_id,
+                current.owner_id,
+                current.scope_type,
+                current.scope_id,
                 "replaced",
                 {
                     "fieldKey": field_key,
@@ -937,6 +1103,53 @@ class MemoryRepository:
                 },
                 now,
             )
+
+    def _recycle_duplicate_candidate(
+        self,
+        connection: sqlite3.Connection,
+        current: MemoryRecord,
+        owner_id: str,
+        scope_type: str,
+        scope_id: str,
+        now_dt: datetime,
+    ) -> MemoryRecord:
+        now = self._iso(now_dt)
+        if current.status == "deleted":
+            self._write_audit(
+                connection,
+                current.id,
+                owner_id,
+                scope_type,
+                scope_id,
+                "duplicate_restore_skipped",
+                {"fieldKey": current.field_key, "memoryType": current.memory_type},
+                now,
+            )
+            return current
+        purge_after = self._iso(now_dt + timedelta(days=self.recycle_bin_days))
+        connection.execute(
+            """
+            UPDATE agent_memory
+            SET status = 'deleted', expires_at = NULL, deleted_at = ?,
+                purge_after = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (now, purge_after, now, current.id),
+        )
+        self._write_audit(
+            connection,
+            current.id,
+            owner_id,
+            scope_type,
+            scope_id,
+            "duplicate_recycled",
+            {"fieldKey": current.field_key, "memoryType": current.memory_type},
+            now,
+        )
+        row = connection.execute(
+            "SELECT * FROM agent_memory WHERE id = ?", (current.id,)
+        ).fetchone()
+        return self._memory_from_row(row)
 
     @staticmethod
     def _find_memory(
@@ -1092,7 +1305,28 @@ class MemoryRepository:
             return None
         if len(normalized) > 64 or not re.fullmatch(r"[a-z][a-z0-9_.-]*", normalized):
             raise MemoryValidationError("fieldKey 格式不正确")
-        return normalized
+        return MemoryRepository._canonical_field_key(normalized)
+
+    @staticmethod
+    def _canonical_field_key(value: str | None | object) -> str | None:
+        if value is None:
+            return None
+        normalized = str(value).strip().lower()
+        if not normalized:
+            return None
+        return FIELD_KEY_ALIASES.get(normalized, normalized)
+
+    @staticmethod
+    def _field_key_variants(field_key: str) -> tuple[str, ...]:
+        canonical = MemoryRepository._canonical_field_key(field_key)
+        if canonical == "answer_format":
+            return ("answer_format", "response_format")
+        return (canonical or "",)
+
+    @staticmethod
+    def _same_memory_content(left: str, right: str) -> bool:
+        normalize = lambda value: re.sub(r"\s+", " ", str(value or "")).strip()
+        return normalize(left) == normalize(right)
 
     @staticmethod
     def _normalize_confidence(value: float | None) -> float | None:
@@ -1138,7 +1372,7 @@ class MemoryRepository:
             scope_type=row["scope_type"],
             scope_id=row["scope_id"],
             memory_type=row["memory_type"],
-            field_key=row["field_key"],
+            field_key=MemoryRepository._canonical_field_key(row["field_key"]),
             content=row["content"],
             status=row["status"],
             source=row["source"],

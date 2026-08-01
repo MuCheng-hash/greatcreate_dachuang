@@ -16,4 +16,10 @@ public class AgentMemoryCreateRequest {
     private String fieldKey;
 
     private String content;
+
+    private Boolean replaceConflicts;
+
+    public AgentMemoryCreateRequest(String memoryType, String fieldKey, String content) {
+        this(memoryType, fieldKey, content, null);
+    }
 }

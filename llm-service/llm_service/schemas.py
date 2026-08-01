@@ -131,6 +131,7 @@ class MemoryCreateRequest(ApiModel):
         default=None, alias="sourceThreadId", max_length=128
     )
     confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    replace_conflicts: bool = Field(default=False, alias="replaceConflicts")
 
     @field_validator("scope_type")
     @classmethod
@@ -145,12 +146,17 @@ class MemoryUpdateRequest(ApiModel):
     memory_type: MemoryType | None = Field(default=None, alias="memoryType")
     field_key: str | None = Field(default=None, alias="fieldKey", max_length=64)
     content: str | None = Field(default=None, min_length=2, max_length=1000)
+    replace_conflicts: bool = Field(default=False, alias="replaceConflicts")
 
     @model_validator(mode="after")
     def require_update(self) -> "MemoryUpdateRequest":
         if not ({"memory_type", "field_key", "content"} & self.model_fields_set):
             raise ValueError("at least one memory field is required")
         return self
+
+
+class MemoryResolutionRequest(ApiModel):
+    replace_conflicts: bool = Field(default=False, alias="replaceConflicts")
 
 
 class MemoryItem(ApiModel):
@@ -167,6 +173,12 @@ class MemoryItem(ApiModel):
     purge_after: datetime | None = Field(default=None, alias="purgeAfter")
     created_at: datetime = Field(alias="createdAt")
     updated_at: datetime = Field(alias="updatedAt")
+
+
+class MemoryConflictPreviewResponse(ApiModel):
+    candidate: MemoryItem
+    conflicts: list[MemoryItem] = Field(default_factory=list)
+    duplicate: bool = False
 
 
 class MemoryCandidateOutput(ApiModel):

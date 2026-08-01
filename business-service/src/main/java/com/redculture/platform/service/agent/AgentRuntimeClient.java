@@ -2,6 +2,7 @@ package com.redculture.platform.service.agent;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.redculture.platform.config.AgentProperties;
 import com.redculture.platform.config.AppMapProperties;
@@ -10,6 +11,7 @@ import com.redculture.platform.vo.AgentGenerationStatus;
 import com.redculture.platform.vo.ai.StatefulAgentRequest;
 import com.redculture.platform.vo.ai.StatefulAgentResponse;
 import com.redculture.platform.vo.ai.AgentMemoryItem;
+import com.redculture.platform.vo.ai.AgentMemoryConflictPreview;
 import com.redculture.platform.vo.ai.AgentMemorySetting;
 import com.redculture.platform.vo.ai.LlmModelOption;
 import com.redculture.platform.vo.ai.AssistantConversationDetail;
@@ -24,6 +26,7 @@ import org.springframework.core.ParameterizedTypeReference;
 import org.springframework.stereotype.Component;
 import org.springframework.util.StringUtils;
 import org.springframework.web.client.RestClient;
+import org.springframework.web.client.RestClientResponseException;
 import org.springframework.web.util.UriBuilder;
 import org.springframework.web.util.UriComponentsBuilder;
 
@@ -225,14 +228,39 @@ public class AgentRuntimeClient {
         body.put("content", request.getContent());
         body.put("status", "active");
         body.put("source", "profile_ui");
-        return restClient.post()
-                .uri("/agent/memories")
-                .headers(this::applyInternalServiceToken)
-                .contentType(MediaType.APPLICATION_JSON)
-                .accept(MediaType.APPLICATION_JSON)
-                .body(body)
-                .retrieve()
-                .body(AgentMemoryItem.class);
+        body.put("replaceConflicts", Boolean.TRUE.equals(request.getReplaceConflicts()));
+        try {
+            return restClient.post()
+                    .uri("/agent/memories")
+                    .headers(this::applyInternalServiceToken)
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .accept(MediaType.APPLICATION_JSON)
+                    .body(body)
+                    .retrieve()
+                    .body(AgentMemoryItem.class);
+        } catch (RestClientResponseException exception) {
+            throw translateMemoryConflict(exception);
+        }
+    }
+
+    public AgentMemoryConflictPreview getMemoryConfirmationPreview(
+            String memoryId, String ownerId, String scopeType, Long scopeId) {
+        try {
+            return restClient.get()
+                    .uri(uriBuilder -> scopedMemoryUri(
+                            uriBuilder,
+                            "/agent/memories/{memoryId}/confirmation-preview",
+                            memoryId,
+                            ownerId,
+                            scopeType,
+                            scopeId))
+                    .headers(this::applyInternalServiceToken)
+                    .accept(MediaType.APPLICATION_JSON)
+                    .retrieve()
+                    .body(AgentMemoryConflictPreview.class);
+        } catch (RestClientResponseException exception) {
+            throw translateMemoryConflict(exception);
+        }
     }
 
     public AgentMemoryItem updateMemory(
@@ -251,6 +279,7 @@ public class AgentRuntimeClient {
         if (request.getContent() != null) {
             body.put("content", request.getContent());
         }
+        body.put("replaceConflicts", Boolean.TRUE.equals(request.getReplaceConflicts()));
         return sendMemoryPatch(
                 "/agent/memories/{memoryId}",
                 memoryId,
@@ -263,9 +292,18 @@ public class AgentRuntimeClient {
 
     public AgentMemoryItem confirmMemory(
             String memoryId, String ownerId, String scopeType, Long scopeId) {
+        return confirmMemory(memoryId, ownerId, scopeType, scopeId, false);
+    }
+
+    public AgentMemoryItem confirmMemory(
+            String memoryId,
+            String ownerId,
+            String scopeType,
+            Long scopeId,
+            boolean replaceConflicts) {
         return postMemoryAction(
                 "/agent/memories/{memoryId}/confirm",
-                memoryId, ownerId, scopeType, scopeId);
+                memoryId, ownerId, scopeType, scopeId, replaceConflicts);
     }
 
     public AgentMemoryItem deleteMemory(
@@ -282,9 +320,18 @@ public class AgentRuntimeClient {
 
     public AgentMemoryItem restoreMemory(
             String memoryId, String ownerId, String scopeType, Long scopeId) {
+        return restoreMemory(memoryId, ownerId, scopeType, scopeId, false);
+    }
+
+    public AgentMemoryItem restoreMemory(
+            String memoryId,
+            String ownerId,
+            String scopeType,
+            Long scopeId,
+            boolean replaceConflicts) {
         return postMemoryAction(
                 "/agent/memories/{memoryId}/restore",
-                memoryId, ownerId, scopeType, scopeId);
+                memoryId, ownerId, scopeType, scopeId, replaceConflicts);
     }
 
     public void permanentlyDeleteMemory(
@@ -455,16 +502,21 @@ public class AgentRuntimeClient {
             String memoryId,
             String ownerId,
             String scopeType,
-            Long scopeId) {
-        return restClient.post()
-                .uri(uriBuilder -> scopedMemoryUri(
-                        uriBuilder, path, memoryId, ownerId, scopeType, scopeId))
-                .headers(this::applyInternalServiceToken)
-                .contentType(MediaType.APPLICATION_JSON)
-                .accept(MediaType.APPLICATION_JSON)
-                .body(Map.of())
-                .retrieve()
-                .body(AgentMemoryItem.class);
+            Long scopeId,
+            boolean replaceConflicts) {
+        try {
+            return restClient.post()
+                    .uri(uriBuilder -> scopedMemoryUri(
+                            uriBuilder, path, memoryId, ownerId, scopeType, scopeId))
+                    .headers(this::applyInternalServiceToken)
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .accept(MediaType.APPLICATION_JSON)
+                    .body(Map.of("replaceConflicts", replaceConflicts))
+                    .retrieve()
+                    .body(AgentMemoryItem.class);
+        } catch (RestClientResponseException exception) {
+            throw translateMemoryConflict(exception);
+        }
     }
 
     private URI scopedMemoryUri(
@@ -516,6 +568,9 @@ public class AgentRuntimeClient {
                     requestBuilder.build(),
                     HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8)
             );
+            if (response.statusCode() == 409) {
+                throw memoryConflictException(response.body());
+            }
             if (response.statusCode() < 200 || response.statusCode() >= 300) {
                 throw new IllegalStateException(
                         "agent memory PATCH HTTP " + response.statusCode()
@@ -527,6 +582,26 @@ public class AgentRuntimeClient {
             throw new IllegalStateException("agent memory PATCH interrupted", exception);
         } catch (IOException exception) {
             throw new IllegalStateException("agent memory PATCH failed", exception);
+        }
+    }
+
+    private RuntimeException translateMemoryConflict(RestClientResponseException exception) {
+        if (exception.getStatusCode().value() != 409) {
+            return exception;
+        }
+        return memoryConflictException(exception.getResponseBodyAsString());
+    }
+
+    private AgentMemoryConflictException memoryConflictException(String payload) {
+        try {
+            JsonNode detail = objectMapper.readTree(payload).path("detail");
+            String message = detail.path("message").asText("记忆字段发生冲突，请先确认是否替换");
+            AgentMemoryConflictPreview preview = detail.has("preview")
+                    ? objectMapper.treeToValue(detail.path("preview"), AgentMemoryConflictPreview.class)
+                    : null;
+            return new AgentMemoryConflictException(message, preview);
+        } catch (JsonProcessingException exception) {
+            return new AgentMemoryConflictException("记忆字段发生冲突，请先确认是否替换", null);
         }
     }
 

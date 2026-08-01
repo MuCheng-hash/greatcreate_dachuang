@@ -4,8 +4,10 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.redculture.platform.config.AgentProperties;
 import com.redculture.platform.config.AppMapProperties;
 import com.redculture.platform.config.AuthContext;
+import com.redculture.platform.service.agent.AgentMemoryConflictException;
 import com.redculture.platform.service.agent.AgentRuntimeClient;
 import com.redculture.platform.vo.AuthCurrentUserVO;
+import com.redculture.platform.vo.request.AgentMemoryResolutionRequest;
 import com.redculture.platform.vo.request.AgentMemoryCreateRequest;
 import com.redculture.platform.vo.request.AgentMemorySettingUpdateRequest;
 import com.redculture.platform.vo.request.AgentMemoryUpdateRequest;
@@ -81,12 +83,13 @@ class AgentMemoryControllerTest {
                     "memory-1",
                     new AgentMemoryUpdateRequest("PROFILE", "grade", "常教五年级"),
                     servletRequest);
-            controller.confirm("memory-1", servletRequest);
+            controller.confirmationPreview("memory-1", servletRequest);
+            controller.confirm("memory-1", new AgentMemoryResolutionRequest(true), servletRequest);
             controller.delete("memory-1", servletRequest);
-            controller.restore("memory-1", servletRequest);
+            controller.restore("memory-1", new AgentMemoryResolutionRequest(true), servletRequest);
             controller.permanentDelete("memory-1", servletRequest);
 
-            assertEquals(9, requests.size());
+            assertEquals(10, requests.size());
             assertTrue(requests.stream()
                     .filter(value -> value.contains("?"))
                     .allMatch(value -> value.contains("ownerId=account:1")));
@@ -102,12 +105,15 @@ class AgentMemoryControllerTest {
             assertFalse(allBodies.contains("account:attacker"));
             assertFalse(allBodies.contains("\"scopeId\":999"));
             assertTrue(requests.stream().anyMatch(value -> value.contains("/confirm")));
+            assertTrue(requests.stream().anyMatch(value -> value.contains("/confirmation-preview")));
             assertTrue(requests.stream().anyMatch(value -> value.contains("/restore")));
             assertTrue(requests.stream().anyMatch(value -> value.contains("/permanent")));
             assertTrue(bodyFor(requests, bodies, "PUT /agent/memory-settings")
                     .contains("\"enabled\":true"));
             assertTrue(bodyFor(requests, bodies, "PATCH /agent/memories/memory-1")
                     .contains("\"content\":\"常教五年级\""));
+            assertTrue(bodyFor(requests, bodies, "POST /agent/memories/memory-1/confirm")
+                    .contains("\"replaceConflicts\":true"));
         } finally {
             server.stop(0);
         }
@@ -127,6 +133,39 @@ class AgentMemoryControllerTest {
         assertThrows(IllegalArgumentException.class,
                 () -> controller.list("active", null, request));
         org.mockito.Mockito.verifyNoInteractions(client);
+    }
+
+    @Test
+    void forwardsConflictAsNoSideEffectWithoutRetryingReplacement() throws Exception {
+        HttpServer server = HttpServer.create(new InetSocketAddress(0), 0);
+        List<String> bodies = new ArrayList<>();
+        server.createContext("/agent/memories", exchange -> {
+            bodies.add(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+            respond(exchange, 409, "{\"detail\":{\"code\":\"memory_conflict\","
+                    + "\"message\":\"该字段已有已生效记忆，请先确认是否替换\","
+                    + "\"preview\":{\"candidate\":{\"id\":\"candidate-1\","
+                    + "\"memoryType\":\"PROFILE\",\"fieldKey\":\"grade\","
+                    + "\"content\":\"常教五年级\",\"status\":\"pending\","
+                    + "\"source\":\"inferred_chat\",\"createdAt\":\"2026-08-01T00:00:00Z\","
+                    + "\"updatedAt\":\"2026-08-01T00:00:00Z\"},\"conflicts\":[],\"duplicate\":false}}}");
+        });
+        server.start();
+        try {
+            AppMapProperties properties = new AppMapProperties();
+            properties.setLlmServiceBaseUrl("http://127.0.0.1:" + server.getAddress().getPort());
+            AgentRuntimeClient client = new AgentRuntimeClient(
+                    properties, new AgentProperties(), new ObjectMapper());
+
+            AgentMemoryConflictException conflict = assertThrows(
+                    AgentMemoryConflictException.class,
+                    () -> client.confirmMemory("candidate-1", "account:1", "SCHOOL", 7L, false));
+
+            assertEquals("candidate-1", conflict.getPreview().getCandidate().getId());
+            assertEquals(1, bodies.size());
+            assertTrue(bodies.get(0).contains("\"replaceConflicts\":false"));
+        } finally {
+            server.stop(0);
+        }
     }
 
     private MockHttpServletRequest schoolRequest() {
@@ -150,9 +189,14 @@ class AgentMemoryControllerTest {
 
     private static void respond(com.sun.net.httpserver.HttpExchange exchange, String body)
             throws java.io.IOException {
+        respond(exchange, 200, body);
+    }
+
+    private static void respond(com.sun.net.httpserver.HttpExchange exchange, int status, String body)
+            throws java.io.IOException {
         byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
         exchange.getResponseHeaders().set("Content-Type", "application/json");
-        exchange.sendResponseHeaders(200, bytes.length);
+        exchange.sendResponseHeaders(status, bytes.length);
         try (OutputStream output = exchange.getResponseBody()) {
             output.write(bytes);
         }

@@ -16,6 +16,7 @@ from llm_service.schemas import AgentMessageRequest
 from llm_service.settings import Settings
 from llm_service.user_memory import (
     MemoryContentPolicy,
+    MemoryConflictError,
     MemoryNotFoundError,
     MemoryRepository,
     MemoryStateError,
@@ -219,7 +220,7 @@ def test_content_policy_normalizes_safe_text_and_limits_length() -> None:
         policy.validate("这是一条明显超过二十个字符限制的长期记忆内容，不能保存")
 
 
-def test_core_profile_conflict_replaces_active_value_and_custom_duplicate_is_idempotent(
+def test_core_profile_conflict_requires_explicit_replacement_and_normalizes_aliases(
     tmp_path: Path,
 ) -> None:
     repository = repository_for(tmp_path)
@@ -228,25 +229,50 @@ def test_core_profile_conflict_replaces_active_value_and_custom_duplicate_is_ide
         SCOPE_TYPE,
         SCOPE_ID,
         memory_type="PROFILE",
-        field_key="lesson_duration",
-        content="常用课时 40 分钟",
+        field_key="response_format",
+        content="28岁女教师",
         source="profile_ui",
     )
-    replacement = repository.create_memory(
+    # 模拟升级前已经写入 SQLite 的历史别名，读取和比对时仍须等价于 answer_format。
+    with sqlite3.connect(tmp_path / "agent.sqlite3") as connection:
+        connection.execute(
+            "UPDATE agent_memory SET field_key = 'response_format' WHERE id = ?",
+            (original.id,),
+        )
+        connection.commit()
+
+    candidate = repository.create_memory(
         OWNER,
         SCOPE_TYPE,
         SCOPE_ID,
         memory_type="PROFILE",
-        field_key="lesson_duration",
-        content="常用课时 45 分钟",
-        source="profile_ui",
+        field_key="answer_format",
+        content="26岁男教师",
+        source="inferred_chat",
+        status="pending",
     )
 
-    assert replacement.id != original.id
+    preview = repository.confirmation_preview(OWNER, SCOPE_TYPE, SCOPE_ID, candidate.id)
+    assert preview.duplicate is False
+    assert [(item.id, item.field_key, item.content) for item in preview.conflicts] == [
+        (original.id, "answer_format", "28岁女教师")
+    ]
+
+    with pytest.raises(MemoryConflictError):
+        repository.confirm_memory(OWNER, SCOPE_TYPE, SCOPE_ID, candidate.id)
+
+    assert repository.get_memory(OWNER, SCOPE_TYPE, SCOPE_ID, original.id).status == "active"
+    assert repository.get_memory(OWNER, SCOPE_TYPE, SCOPE_ID, candidate.id).status == "pending"
+
+    replacement = repository.confirm_memory(
+        OWNER, SCOPE_TYPE, SCOPE_ID, candidate.id, replace_conflicts=True
+    )
+    assert replacement.id == candidate.id
+    assert replacement.status == "active"
     assert repository.get_memory(OWNER, SCOPE_TYPE, SCOPE_ID, original.id).status == "deleted"
     active_core = repository.list_memories(OWNER, SCOPE_TYPE, SCOPE_ID, status="active")
     assert [(item.field_key, item.content) for item in active_core] == [
-        ("lesson_duration", "常用课时 45 分钟")
+        ("answer_format", "26岁男教师")
     ]
 
     custom = repository.create_memory(
@@ -266,6 +292,102 @@ def test_core_profile_conflict_replaces_active_value_and_custom_duplicate_is_ide
         source="profile_ui",
     )
     assert duplicate.id == custom.id
+
+
+def test_duplicate_candidate_is_recycled_without_creating_another_active_memory(
+    tmp_path: Path,
+) -> None:
+    repository = repository_for(tmp_path)
+    original = repository.create_memory(
+        OWNER,
+        SCOPE_TYPE,
+        SCOPE_ID,
+        memory_type="PROFILE",
+        field_key="grade",
+        content="常教三年级",
+        source="profile_ui",
+    )
+    candidate = repository.create_memory(
+        OWNER,
+        SCOPE_TYPE,
+        SCOPE_ID,
+        memory_type="PROFILE",
+        field_key="grade",
+        content="常教三年级",
+        status="pending",
+        source="inferred_chat",
+    )
+
+    preview = repository.confirmation_preview(OWNER, SCOPE_TYPE, SCOPE_ID, candidate.id)
+    assert preview.duplicate is True
+    assert [item.id for item in preview.conflicts] == [original.id]
+
+    recycled = repository.confirm_memory(OWNER, SCOPE_TYPE, SCOPE_ID, candidate.id)
+    assert recycled.status == "deleted"
+    assert repository.get_memory(OWNER, SCOPE_TYPE, SCOPE_ID, original.id).status == "active"
+    assert [item.id for item in repository.list_memories(OWNER, SCOPE_TYPE, SCOPE_ID, status="active")] == [original.id]
+
+
+def test_create_restore_and_update_never_silently_overwrite_field_conflicts(tmp_path: Path) -> None:
+    repository = repository_for(tmp_path)
+    original = repository.create_memory(
+        OWNER,
+        SCOPE_TYPE,
+        SCOPE_ID,
+        memory_type="PROFILE",
+        field_key="grade",
+        content="常教四年级",
+        source="profile_ui",
+    )
+
+    with pytest.raises(MemoryConflictError):
+        repository.create_memory(
+            OWNER,
+            SCOPE_TYPE,
+            SCOPE_ID,
+            memory_type="PROFILE",
+            field_key="grade",
+            content="常教五年级",
+            source="profile_ui",
+        )
+    assert repository.get_memory(OWNER, SCOPE_TYPE, SCOPE_ID, original.id).status == "active"
+
+    replacement = repository.create_memory(
+        OWNER,
+        SCOPE_TYPE,
+        SCOPE_ID,
+        memory_type="PROFILE",
+        field_key="grade",
+        content="常教五年级",
+        source="profile_ui",
+        replace_conflicts=True,
+    )
+    assert replacement.status == "active"
+    assert repository.get_memory(OWNER, SCOPE_TYPE, SCOPE_ID, original.id).status == "deleted"
+
+    with pytest.raises(MemoryConflictError):
+        repository.restore_memory(OWNER, SCOPE_TYPE, SCOPE_ID, original.id)
+    assert repository.get_memory(OWNER, SCOPE_TYPE, SCOPE_ID, original.id).status == "deleted"
+
+    restored = repository.restore_memory(
+        OWNER, SCOPE_TYPE, SCOPE_ID, original.id, replace_conflicts=True
+    )
+    assert restored.status == "active"
+    assert repository.get_memory(OWNER, SCOPE_TYPE, SCOPE_ID, replacement.id).status == "deleted"
+
+    second = repository.create_memory(
+        OWNER,
+        SCOPE_TYPE,
+        SCOPE_ID,
+        memory_type="PROFILE",
+        content="主要教数学",
+        source="profile_ui",
+    )
+    with pytest.raises(MemoryConflictError):
+        repository.update_memory(
+            OWNER, SCOPE_TYPE, SCOPE_ID, second.id, field_key="grade"
+        )
+    assert repository.get_memory(OWNER, SCOPE_TYPE, SCOPE_ID, second.id).field_key is None
 
 
 def test_cleanup_applies_pending_task_and_recycle_bin_lifetimes(tmp_path: Path) -> None:
@@ -453,6 +575,61 @@ def test_memory_api_crud_confirm_recycle_restore_and_permanent_delete(
     assert confirmed.json()["status"] == "active"
     assert permanent.status_code == 204
     assert missing.status_code == 404
+
+
+def test_memory_api_preview_blocks_conflicts_until_explicit_replacement(
+    tmp_path: Path,
+) -> None:
+    settings = api_settings(tmp_path)
+    with memory_client(settings) as client:
+        original = client.post(
+            "/agent/memories",
+            json={
+                **memory_scope(),
+                "memoryType": "PROFILE",
+                "fieldKey": "teacher_gender_age",
+                "content": "28岁女教师",
+                "source": "profile_ui",
+            },
+        )
+        candidate = client.post(
+            "/agent/memories",
+            json={
+                **memory_scope(),
+                "memoryType": "PROFILE",
+                "fieldKey": "teacher_gender_age",
+                "content": "26岁男教师",
+                "status": "pending",
+                "source": "inferred_chat",
+            },
+        )
+        candidate_id = candidate.json()["id"]
+        preview = client.get(
+            f"/agent/memories/{candidate_id}/confirmation-preview",
+            params=memory_scope(),
+        )
+        blocked = client.post(
+            f"/agent/memories/{candidate_id}/confirm",
+            params=memory_scope(),
+        )
+        resolved = client.post(
+            f"/agent/memories/{candidate_id}/confirm",
+            params=memory_scope(),
+            json={"replaceConflicts": True},
+        )
+
+    assert preview.status_code == 200
+    assert preview.json()["candidate"]["id"] == candidate_id
+    assert preview.json()["duplicate"] is False
+    assert [item["content"] for item in preview.json()["conflicts"]] == ["28岁女教师"]
+    assert blocked.status_code == 409
+    assert original.status_code == 201
+    assert resolved.status_code == 200
+    assert resolved.json()["status"] == "active"
+
+    repository = MemoryRepository(settings.database_path)
+    assert repository.get_memory(OWNER, SCOPE_TYPE, SCOPE_ID, original.json()["id"]).status == "deleted"
+    assert repository.get_memory(OWNER, SCOPE_TYPE, SCOPE_ID, candidate_id).status == "active"
 
 
 def test_memory_api_enforces_owner_school_isolation_and_sensitive_validation(

@@ -9,17 +9,7 @@ import lombok.NoArgsConstructor;
 @NoArgsConstructor
 @AllArgsConstructor
 @JsonIgnoreProperties(ignoreUnknown = true)
-public class AgentMemoryUpdateRequest {
-
-    private String memoryType;
-
-    private String fieldKey;
-
-    private String content;
+public class AgentMemoryResolutionRequest {
 
     private Boolean replaceConflicts;
-
-    public AgentMemoryUpdateRequest(String memoryType, String fieldKey, String content) {
-        this(memoryType, fieldKey, content, null);
-    }
 }

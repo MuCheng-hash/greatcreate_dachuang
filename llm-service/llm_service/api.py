@@ -27,8 +27,10 @@ from .runtime import AgentRuntime
 from .schemas import (
     AgentMessageRequest,
     AgentMessageResponse,
+    MemoryConflictPreviewResponse,
     MemoryCreateRequest,
     MemoryItem,
+    MemoryResolutionRequest,
     MemorySettingResponse,
     MemorySettingUpdateRequest,
     MemoryUpdateRequest,
@@ -39,6 +41,7 @@ from .schemas import (
 )
 from .settings import Settings, get_settings
 from .user_memory import (
+    MemoryConflictError,
     MemoryNotFoundError,
     MemoryRecord,
     MemoryStateError,
@@ -82,7 +85,25 @@ def _memory_response(record: MemoryRecord) -> MemoryItem:
     )
 
 
+def _memory_conflict_preview_response(preview: Any) -> MemoryConflictPreviewResponse:
+    return MemoryConflictPreviewResponse(
+        candidate=_memory_response(preview.candidate),
+        conflicts=[_memory_response(item) for item in preview.conflicts],
+        duplicate=preview.duplicate,
+    )
+
+
 def _raise_memory_http_error(exc: Exception) -> None:
+    if isinstance(exc, MemoryConflictError):
+        preview = _memory_conflict_preview_response(exc.preview)
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "memory_conflict",
+                "message": str(exc),
+                "preview": preview.model_dump(mode="json", by_alias=True),
+            },
+        ) from exc
     if isinstance(exc, MemoryNotFoundError):
         raise HTTPException(status_code=404, detail="memory not found") from exc
     if isinstance(exc, MemoryStateError):
@@ -292,10 +313,30 @@ def create_app(
                 source=request.source,
                 source_thread_id=request.source_thread_id,
                 confidence=request.confidence,
+                replace_conflicts=request.replace_conflicts,
             )
-        except MemoryValidationError as exc:
+        except (MemoryConflictError, MemoryValidationError) as exc:
             _raise_memory_http_error(exc)
         return _memory_response(record)
+
+    @app.get(
+        "/agent/memories/{memory_id}/confirmation-preview",
+        response_model=MemoryConflictPreviewResponse,
+        dependencies=[Depends(require_internal_agent_token)],
+    )
+    async def confirmation_preview(
+        memory_id: str,
+        owner_id: str = Query(alias="ownerId"),
+        scope_type: Literal["SCHOOL", "REGION", "RESOURCE"] = Query(alias="scopeType"),
+        scope_id: str = Query(alias="scopeId"),
+    ) -> MemoryConflictPreviewResponse:
+        try:
+            preview = memory_repository.confirmation_preview(
+                owner_id, scope_type, scope_id, memory_id
+            )
+        except (MemoryNotFoundError, MemoryValidationError) as exc:
+            _raise_memory_http_error(exc)
+        return _memory_conflict_preview_response(preview)
 
     @app.patch(
         "/agent/memories/{memory_id}",
@@ -318,9 +359,14 @@ def create_app(
             updates["field_key"] = request.field_key
         try:
             record = memory_repository.update_memory(
-                owner_id, scope_type, scope_id, memory_id, **updates
+                owner_id,
+                scope_type,
+                scope_id,
+                memory_id,
+                replace_conflicts=request.replace_conflicts,
+                **updates,
             )
-        except (MemoryNotFoundError, MemoryStateError, MemoryValidationError) as exc:
+        except (MemoryConflictError, MemoryNotFoundError, MemoryStateError, MemoryValidationError) as exc:
             _raise_memory_http_error(exc)
         return _memory_response(record)
 
@@ -331,15 +377,20 @@ def create_app(
     )
     async def confirm_memory(
         memory_id: str,
+        request: MemoryResolutionRequest | None = None,
         owner_id: str = Query(alias="ownerId"),
         scope_type: Literal["SCHOOL", "REGION", "RESOURCE"] = Query(alias="scopeType"),
         scope_id: str = Query(alias="scopeId"),
     ) -> MemoryItem:
         try:
             record = memory_repository.confirm_memory(
-                owner_id, scope_type, scope_id, memory_id
+                owner_id,
+                scope_type,
+                scope_id,
+                memory_id,
+                replace_conflicts=request.replace_conflicts if request else False,
             )
-        except (MemoryNotFoundError, MemoryStateError, MemoryValidationError) as exc:
+        except (MemoryConflictError, MemoryNotFoundError, MemoryStateError, MemoryValidationError) as exc:
             _raise_memory_http_error(exc)
         return _memory_response(record)
 
@@ -369,15 +420,20 @@ def create_app(
     )
     async def restore_memory(
         memory_id: str,
+        request: MemoryResolutionRequest | None = None,
         owner_id: str = Query(alias="ownerId"),
         scope_type: Literal["SCHOOL", "REGION", "RESOURCE"] = Query(alias="scopeType"),
         scope_id: str = Query(alias="scopeId"),
     ) -> MemoryItem:
         try:
             record = memory_repository.restore_memory(
-                owner_id, scope_type, scope_id, memory_id
+                owner_id,
+                scope_type,
+                scope_id,
+                memory_id,
+                replace_conflicts=request.replace_conflicts if request else False,
             )
-        except (MemoryNotFoundError, MemoryStateError, MemoryValidationError) as exc:
+        except (MemoryConflictError, MemoryNotFoundError, MemoryStateError, MemoryValidationError) as exc:
             _raise_memory_http_error(exc)
         return _memory_response(record)
 
