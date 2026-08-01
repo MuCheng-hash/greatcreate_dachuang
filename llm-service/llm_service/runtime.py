@@ -17,8 +17,25 @@ from .observability import FallbackAlertManager, LlmObservability, LlmTraceConte
 from .planner import AgentPlan, AgentPlanner
 from .prompt_manager import PromptManager
 from .repository import ConversationRepository, ThreadRecord
-from .schemas import AgentMessageRequest, AgentMessageResponse, AgentModelOutput, Citation, ToolExecution, TrustedContext
+from .schemas import (
+    AgentMessageRequest,
+    AgentMessageResponse,
+    AgentModelOutput,
+    Citation,
+    MemoryApplied,
+    MemoryItem,
+    ToolExecution,
+    TrustedContext,
+)
 from .settings import ModelConfig, Settings
+from .user_memory import (
+    ExplicitMemoryExtractor,
+    MemoryContentPolicy,
+    MemoryContext,
+    MemoryRecord,
+    MemoryRepository,
+    MemoryValidationError,
+)
 from .structured_tasks import (
     IncrementalTeachingPlanParser,
     normalize_resource_discovery,
@@ -56,6 +73,7 @@ class AgentRuntime:
         alerts: FallbackAlertManager | None = None,
         prompts: PromptManager | None = None,
         business_tool_client: BusinessToolClient | None = None,
+        memory_repository: MemoryRepository | None = None,
     ):
         self.settings = settings
         self.repository = repository
@@ -64,6 +82,16 @@ class AgentRuntime:
         self.model = model or ModelGateway(settings, observability, self.alerts)
         self.prompts = prompts
         self.business_tool_client = business_tool_client
+        self.memory_repository = memory_repository or MemoryRepository(
+            settings.database_path,
+            content_policy=MemoryContentPolicy(
+                settings.agent_memory_content_character_limit
+            ),
+            pending_days=settings.agent_memory_pending_days,
+            task_days=settings.agent_memory_task_days,
+            recycle_bin_days=settings.agent_memory_recycle_bin_days,
+        )
+        self.explicit_memory_extractor = ExplicitMemoryExtractor()
         self.context_manager = ContextWindowManager(
             settings.agent_context_token_budget,
             settings.agent_recent_message_count,
@@ -76,8 +104,16 @@ class AgentRuntime:
         self._agents: dict[tuple[str, int], Any] = {}
 
     async def handle(self, request: AgentMessageRequest) -> AgentMessageResponse:
-        thread, window, plan = self._prepare_turn(request)
-        result = await self._run_agent_turn(request, thread, window.messages, window.summary, window.compacted, plan)
+        thread, window, plan, memory_context = self._prepare_turn(request)
+        result = await self._run_agent_turn(
+            request,
+            thread,
+            window.messages,
+            window.summary,
+            window.compacted,
+            plan,
+            memory_context,
+        )
         self._persist_response(thread, result)
         return result
 
@@ -94,14 +130,22 @@ class AgentRuntime:
         async def worker() -> None:
             try:
                 publish("phase.started", {"phase": "context", "label": "正在准备会话上下文"})
-                thread, window, plan = self._prepare_turn(request)
+                thread, window, plan, memory_context = self._prepare_turn(request)
                 publish("phase.completed", {
                     "phase": "context",
                     "label": "会话上下文已准备",
                     "compacted": window.compacted,
                 })
                 result = await self._stream_agent_turn(
-                    request, run_id, thread, window.messages, window.summary, window.compacted, plan, publish
+                    request,
+                    run_id,
+                    thread,
+                    window.messages,
+                    window.summary,
+                    window.compacted,
+                    plan,
+                    memory_context,
+                    publish,
                 )
                 self._persist_response(thread, result)
                 publish("final", {"threadId": result.thread_id, "response": result.model_dump(by_alias=True)})
@@ -130,8 +174,12 @@ class AgentRuntime:
     def create_thread(self, owner_id: str, scope_type: str, scope_id: str | int) -> ThreadRecord:
         return self.repository.create_thread(owner_id, scope_type, scope_id)
 
-    def _prepare_turn(self, request: AgentMessageRequest) -> tuple[ThreadRecord, Any, AgentPlan]:
+    def _prepare_turn(
+        self, request: AgentMessageRequest
+    ) -> tuple[ThreadRecord, Any, AgentPlan, MemoryContext]:
         thread = self._get_or_create_thread(request)
+        self._capture_explicit_memory(request, thread)
+        memory_context = self._memory_context_for(request)
         self.repository.append_message(
             thread.thread_id,
             "user",
@@ -142,7 +190,7 @@ class AgentRuntime:
         window = self.context_manager.build(stored, thread.summary)
         if window.compacted:
             self.repository.update_summary(thread.thread_id, window.summary)
-        return thread, window, self.planner.plan(request.message)
+        return thread, window, self.planner.plan(request.message), memory_context
 
     def _get_or_create_thread(self, request: AgentMessageRequest) -> ThreadRecord:
         if request.thread_id:
@@ -150,6 +198,53 @@ class AgentRuntime:
                 request.thread_id, request.owner_id, request.scope_type, request.scope_id
             )
         return self.create_thread(request.owner_id, request.scope_type, request.scope_id)
+
+    def _memory_context_for(self, request: AgentMessageRequest) -> MemoryContext:
+        if not self.settings.agent_memory_enabled:
+            return MemoryContext.empty()
+        if request.task_type == "RESOURCE_DISCOVERY":
+            return MemoryContext.empty()
+        query_parts = [request.message, request.grade or "", request.theme or ""]
+        if request.task_payload:
+            query_parts.append(
+                json.dumps(request.task_payload, ensure_ascii=False, default=str)
+            )
+        return self.memory_repository.recall(
+            request.owner_id,
+            request.scope_type,
+            request.scope_id,
+            query="\n".join(item for item in query_parts if item),
+            task_limit=self.settings.agent_memory_task_limit,
+            character_limit=self.settings.agent_memory_context_character_limit,
+        )
+
+    def _capture_explicit_memory(
+        self, request: AgentMessageRequest, thread: ThreadRecord
+    ) -> MemoryRecord | None:
+        if not self.settings.agent_memory_enabled:
+            return None
+        if request.task_type == "RESOURCE_DISCOVERY":
+            return None
+        setting = self.memory_repository.get_setting(
+            request.owner_id, request.scope_type, request.scope_id
+        )
+        if not setting.enabled:
+            return None
+        draft = self.explicit_memory_extractor.extract(request.message)
+        if draft is None:
+            return None
+        return self.memory_repository.create_memory(
+            request.owner_id,
+            request.scope_type,
+            request.scope_id,
+            memory_type=draft.memory_type,
+            field_key=draft.field_key,
+            content=draft.content,
+            status="active",
+            source="explicit_chat",
+            source_thread_id=thread.thread_id,
+            confidence=1.0,
+        )
 
     def _model_attempts(self, model_id: str | None = None) -> list[tuple[ModelConfig, Any | None]]:
         if self._agent is not None:
@@ -252,9 +347,12 @@ class AgentRuntime:
         summary: str,
         compacted: bool,
         plan: AgentPlan,
+        memory_context: MemoryContext,
     ) -> AgentMessageResponse:
         if request.task_type != "CHAT":
-            return await self._run_structured_task(request, thread, compacted)
+            return await self._run_structured_task(
+                request, thread, compacted, memory_context
+            )
         prefetched_executions, prefetched_reasons = await self._prefetch_planned_tools(
             request, thread, plan
         )
@@ -283,6 +381,7 @@ class AgentRuntime:
                     summary,
                     compacted,
                     plan,
+                    memory_context,
                     tool_runtime=runtime,
                     agent=agent,
                     model_config=config,
@@ -346,10 +445,13 @@ class AgentRuntime:
         summary: str,
         compacted: bool,
         plan: AgentPlan,
+        memory_context: MemoryContext,
         emit: EventSink,
     ) -> AgentMessageResponse:
         if request.task_type != "CHAT":
-            return await self._stream_structured_task(request, thread, compacted, emit)
+            return await self._stream_structured_task(
+                request, thread, compacted, memory_context, emit
+            )
         primary = self._primary_model_config(request.model_id)
         emit(
             "run.started",
@@ -425,6 +527,7 @@ class AgentRuntime:
                     summary,
                     compacted,
                     plan,
+                    memory_context,
                     runtime,
                     emit,
                     agent=agent,
@@ -521,9 +624,12 @@ class AgentRuntime:
         request: AgentMessageRequest,
         thread: ThreadRecord,
         compacted: bool,
+        memory_context: MemoryContext,
     ) -> AgentMessageResponse:
         prompt_key, validator = self._structured_task_config(request)
-        selection, run_id = self._start_structured_prompt(prompt_key, request, thread)
+        selection, run_id = self._start_structured_prompt(
+            prompt_key, request, thread, memory_context
+        )
         started = asyncio.get_running_loop().time()
         trace_context = LlmTraceContext(
             feature=f"stateful-{request.task_type.lower()}",
@@ -537,11 +643,20 @@ class AgentRuntime:
         generated, metadata = await self.model.generate_json_with_metadata(
             selection.content, trace_context, validator, **model_kwargs
         )
+        memory_candidates: list[MemoryItem] = []
         if generated is None:
             result = self._structured_fallback(request)
             status = "degraded"
             error_message = "model_unavailable_or_invalid_response"
         else:
+            memory_candidates = self._persist_inferred_candidates(
+                request,
+                thread.thread_id,
+                generated.get("memoryCandidates")
+                if isinstance(generated.get("memoryCandidates"), list)
+                else [],
+                source="teaching_plan",
+            )
             result = self._normalize_structured_result(generated, request)
             status = "completed"
             error_message = ""
@@ -552,17 +667,29 @@ class AgentRuntime:
             result["promptVariant"] = selection.variant
         elapsed = round((asyncio.get_running_loop().time() - started) * 1000)
         self._finish_structured_prompt(run_id, status, elapsed, result, error_message)
-        return self._structured_response(request, thread.thread_id, compacted, result, metadata, status)
+        return self._structured_response(
+            request,
+            thread.thread_id,
+            compacted,
+            result,
+            metadata,
+            status,
+            memory_context,
+            memory_candidates,
+        )
 
     async def _stream_structured_task(
         self,
         request: AgentMessageRequest,
         thread: ThreadRecord,
         compacted: bool,
+        memory_context: MemoryContext,
         emit: EventSink,
     ) -> AgentMessageResponse:
         prompt_key, validator = self._structured_task_config(request)
-        selection, prompt_run_id = self._start_structured_prompt(prompt_key, request, thread)
+        selection, prompt_run_id = self._start_structured_prompt(
+            prompt_key, request, thread, memory_context
+        )
         primary = self._primary_model_config(request.model_id)
         emit(
             "run.started",
@@ -578,6 +705,7 @@ class AgentRuntime:
             metadata={"taskType": request.task_type, "promptVersion": selection.version},
         )
         generated: dict[str, Any] | None = None
+        memory_candidates: list[MemoryItem] = []
         metadata: dict[str, Any] = {}
         error_message = ""
         teaching_plan_parser = (
@@ -612,6 +740,14 @@ class AgentRuntime:
             result = self._structured_fallback(request)
             status = "degraded"
         else:
+            memory_candidates = self._persist_inferred_candidates(
+                request,
+                thread.thread_id,
+                generated.get("memoryCandidates")
+                if isinstance(generated.get("memoryCandidates"), list)
+                else [],
+                source="teaching_plan",
+            )
             result = self._normalize_structured_result(generated, request)
             status = "completed"
         if request.task_type == "TEACHING_PLAN":
@@ -625,7 +761,16 @@ class AgentRuntime:
                 await self._emit_answer_chunks(readable_text, emit)
         elapsed = round((asyncio.get_running_loop().time() - started) * 1000)
         self._finish_structured_prompt(prompt_run_id, status, elapsed, result, error_message)
-        return self._structured_response(request, thread.thread_id, compacted, result, metadata, status)
+        return self._structured_response(
+            request,
+            thread.thread_id,
+            compacted,
+            result,
+            metadata,
+            status,
+            memory_context,
+            memory_candidates,
+        )
 
     def _structured_task_config(self, request: AgentMessageRequest):
         if request.task_type == "TEACHING_PLAN":
@@ -635,12 +780,20 @@ class AgentRuntime:
         raise ValueError(f"unsupported taskType: {request.task_type}")
 
     def _start_structured_prompt(
-        self, prompt_key: str, request: AgentMessageRequest, thread: ThreadRecord
+        self,
+        prompt_key: str,
+        request: AgentMessageRequest,
+        thread: ThreadRecord,
+        memory_context: MemoryContext,
     ):
         if self.prompts is None:
             raise RuntimeError("prompt_manager_unavailable")
         subject_key = f"{request.scope_type}:{request.scope_id}"
-        selection = self.prompts.resolve(prompt_key, subject_key, task_context(request))
+        selection = self.prompts.resolve(
+            prompt_key,
+            subject_key,
+            task_context(request, memory_context.prompt),
+        )
         run_id = self.prompts.start_run(
             selection, subject_key, self._primary_model_config(request.model_id).model, len(selection.content)
         )
@@ -674,6 +827,8 @@ class AgentRuntime:
         result: dict[str, Any],
         metadata: dict[str, Any],
         status: str,
+        memory_context: MemoryContext,
+        memory_candidates: list[MemoryItem] | None = None,
     ) -> AgentMessageResponse:
         response = AgentMessageResponse(
             threadId=thread_id,
@@ -692,6 +847,10 @@ class AgentRuntime:
                 request.grade, request.theme,
             ),
             contextCompacted=compacted,
+            memoryApplied=self._memory_applied(memory_context)
+            if status == "completed"
+            else None,
+            memoryCandidates=memory_candidates or None,
         )
         if status == "degraded":
             response.provider = "local"
@@ -724,6 +883,14 @@ class AgentRuntime:
                 "teachingPlan": result.teaching_plan,
                 "resourceDiscovery": result.resource_discovery,
                 "followUpQuestions": result.follow_up_questions,
+                "memoryApplied": (
+                    result.memory_applied.model_dump(by_alias=True)
+                    if result.memory_applied
+                    else None
+                ),
+                "memoryCandidateIds": [
+                    item.id for item in (result.memory_candidates or [])
+                ],
             },
         )
 
@@ -793,11 +960,14 @@ class AgentRuntime:
         summary: str,
         compacted: bool,
         plan: AgentPlan,
+        memory_context: MemoryContext,
         tool_runtime: ToolRuntimeContext | None = None,
         agent: Any | None = None,
         model_config: ModelConfig | None = None,
     ) -> AgentMessageResponse:
-        lc_messages = self._build_messages(messages, summary, plan, request)
+        lc_messages = self._build_messages(
+            messages, summary, plan, request, memory_context
+        )
         runtime = tool_runtime or ToolRuntimeContext(
             thread_id=thread.thread_id,
             trusted_context=trusted,
@@ -826,6 +996,8 @@ class AgentRuntime:
             request.message,
             request.grade,
             request.theme,
+            memory_context,
+            request,
         )
 
     async def _invoke_agent_stream(
@@ -837,12 +1009,15 @@ class AgentRuntime:
         summary: str,
         compacted: bool,
         plan: AgentPlan,
+        memory_context: MemoryContext,
         runtime: ToolRuntimeContext,
         emit: EventSink,
         agent: Any | None = None,
         model_config: ModelConfig | None = None,
     ) -> AgentMessageResponse:
-        lc_messages = self._build_messages(messages, summary, plan, request)
+        lc_messages = self._build_messages(
+            messages, summary, plan, request, memory_context
+        )
         model_messages: list[Any] = []
         model_buffer = ""
         emitted_answer_length = 0
@@ -884,7 +1059,7 @@ class AgentRuntime:
         response = self._response_from_model_result(
             {"messages": parse_messages}, trusted, thread.thread_id, compacted,
             runtime.executions, runtime.degraded_reasons, request.message,
-            request.grade, request.theme,
+            request.grade, request.theme, memory_context, request,
         )
         if emitted_answer_length < len(response.answer):
             await self._emit_answer_chunks(response.answer[emitted_answer_length:], emit)
@@ -893,6 +1068,7 @@ class AgentRuntime:
     def _build_messages(
         self, messages: list[dict[str, str]], summary: str, plan: AgentPlan,
         request: AgentMessageRequest | None = None,
+        memory_context: MemoryContext | None = None,
     ) -> list[Any]:
         lc_messages: list[Any] = []
         if summary:
@@ -905,6 +1081,8 @@ class AgentRuntime:
             evidence_prompt = self._prefetched_evidence_message(request.context)
             if evidence_prompt:
                 lc_messages.append(SystemMessage(content=evidence_prompt))
+        if memory_context and memory_context.prompt:
+            lc_messages.append(SystemMessage(content=memory_context.prompt))
         last_user_index = max(
             (index for index, item in enumerate(messages) if item["role"] == "user"),
             default=-1,
@@ -953,8 +1131,17 @@ class AgentRuntime:
         question: str = "",
         grade: str | None = None,
         theme: str | None = None,
+        memory_context: MemoryContext | None = None,
+        request: AgentMessageRequest | None = None,
     ) -> AgentMessageResponse:
         parsed = self._parse_model_output(result)
+        memory_candidates = (
+            self._persist_inferred_candidates(
+                request, thread_id, parsed.memory_candidates
+            )
+            if request is not None
+            else []
+        )
         allowed = self._allowed_citations(trusted)
         citations = [self._citation_by_id(trusted, item) for item in parsed.citation_ids if item in allowed]
         citations = [item for item in citations if item is not None]
@@ -984,6 +1171,87 @@ class AgentRuntime:
             ),
             toolExecutions=executions,
             contextCompacted=compacted,
+            memoryApplied=self._memory_applied(memory_context),
+            memoryCandidates=memory_candidates or None,
+        )
+
+    @staticmethod
+    def _memory_applied(
+        memory_context: MemoryContext | None,
+    ) -> MemoryApplied | None:
+        if memory_context is None or not memory_context.items:
+            return None
+        memory_ids = [item.id for item in memory_context.items]
+        return MemoryApplied(count=len(memory_ids), memoryIds=memory_ids)
+
+    def _persist_inferred_candidates(
+        self,
+        request: AgentMessageRequest,
+        thread_id: str,
+        candidates: list[Any] | None,
+        *,
+        source: str = "inferred_chat",
+    ) -> list[MemoryItem]:
+        if not candidates or not self.settings.agent_memory_enabled:
+            return []
+        if request.task_type == "RESOURCE_DISCOVERY":
+            return []
+        if self.explicit_memory_extractor.extract(request.message) is not None:
+            return []
+        setting = self.memory_repository.get_setting(
+            request.owner_id, request.scope_type, request.scope_id
+        )
+        if not setting.enabled:
+            return []
+        saved: list[MemoryItem] = []
+        seen_ids: set[str] = set()
+        for candidate in candidates:
+            payload = (
+                candidate.model_dump(by_alias=True)
+                if hasattr(candidate, "model_dump")
+                else candidate
+            )
+            if not isinstance(payload, dict):
+                continue
+            try:
+                record = self.memory_repository.create_memory(
+                    request.owner_id,
+                    request.scope_type,
+                    request.scope_id,
+                    memory_type=str(payload.get("memoryType") or ""),
+                    field_key=payload.get("fieldKey"),
+                    content=str(payload.get("content") or ""),
+                    status="pending",
+                    source=source,
+                    source_thread_id=thread_id,
+                    confidence=payload.get("confidence"),
+                )
+            except (MemoryValidationError, TypeError, ValueError):
+                continue
+            if record.id in seen_ids:
+                continue
+            saved.append(self._memory_item(record))
+            seen_ids.add(record.id)
+            if len(saved) >= 3:
+                break
+        return saved
+
+    @staticmethod
+    def _memory_item(record: MemoryRecord) -> MemoryItem:
+        return MemoryItem(
+            id=record.id,
+            memoryType=record.memory_type,
+            fieldKey=record.field_key,
+            content=record.content,
+            status=record.status,
+            source=record.source,
+            sourceThreadId=record.source_thread_id,
+            confidence=record.confidence,
+            expiresAt=record.expires_at,
+            deletedAt=record.deleted_at,
+            purgeAfter=record.purge_after,
+            createdAt=record.created_at,
+            updatedAt=record.updated_at,
         )
 
     def _parse_model_output(self, result: dict[str, Any]) -> AgentModelOutput:

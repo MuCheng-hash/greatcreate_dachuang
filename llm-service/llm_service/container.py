@@ -15,12 +15,14 @@ from .prompt_manager import PromptManager
 from .repository import ConversationRepository
 from .runtime import AgentRuntime
 from .settings import Settings
+from .user_memory import MemoryContentPolicy, MemoryRepository
 
 
 @dataclass(frozen=True, slots=True)
 class AppContainer:
     settings: Settings
     repository: ConversationRepository
+    memory_repository: MemoryRepository
     observability: LlmObservability
     alerts: FallbackAlertManager
     model_gateway: ModelGateway
@@ -37,6 +39,15 @@ def build_container(
     alerts: FallbackAlertManager | None = None,
 ) -> AppContainer:
     repository = ConversationRepository(settings.database_path)
+    memory_repository = MemoryRepository(
+        settings.database_path,
+        content_policy=MemoryContentPolicy(
+            settings.agent_memory_content_character_limit
+        ),
+        pending_days=settings.agent_memory_pending_days,
+        task_days=settings.agent_memory_task_days,
+        recycle_bin_days=settings.agent_memory_recycle_bin_days,
+    )
     observability = observability or LlmObservability(
         settings.database_path, settings.llm_model_pricing
     )
@@ -49,7 +60,14 @@ def build_container(
         settings.agent_tool_timeout_seconds,
     )
     runtime = AgentRuntime(
-        settings, repository, model_gateway, observability, alerts, prompts, business_tool_client
+        settings,
+        repository,
+        model_gateway,
+        observability,
+        alerts,
+        prompts,
+        business_tool_client,
+        memory_repository,
     )
     legacy_agent_runtime = LegacyAgentRuntime(
         AgentSettings.from_settings(settings), observability, alerts
@@ -58,6 +76,7 @@ def build_container(
     return AppContainer(
         settings=settings,
         repository=repository,
+        memory_repository=memory_repository,
         observability=observability,
         alerts=alerts,
         model_gateway=model_gateway,

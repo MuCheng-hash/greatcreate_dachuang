@@ -136,6 +136,17 @@ class Settings(BaseSettings):
     agent_tool_timeout_seconds: float = Field(
         5.0, validation_alias=AliasChoices("agent_tool_timeout_seconds", "AGENT_TOOL_TIMEOUT_SECONDS")
     )
+    agent_memory_enabled: bool = Field(
+        False,
+        validation_alias=AliasChoices("agent_memory_enabled", "AGENT_MEMORY_ENABLED"),
+    )
+    agent_memory_context_character_limit: int = 1500
+    agent_memory_task_limit: int = 5
+    agent_memory_content_character_limit: int = 500
+    agent_memory_pending_days: int = 7
+    agent_memory_task_days: int = 90
+    agent_memory_recycle_bin_days: int = 30
+    agent_memory_cleanup_interval_seconds: int = 86400
 
     @classmethod
     def settings_customise_sources(
