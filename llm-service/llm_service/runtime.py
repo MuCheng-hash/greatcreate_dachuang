@@ -8,6 +8,7 @@ import uuid
 from collections.abc import AsyncIterator, Callable
 from typing import Any
 
+from fastapi.encoders import jsonable_encoder
 from langchain.agents import create_agent
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, SystemMessage
 
@@ -148,7 +149,13 @@ class AgentRuntime:
                     publish,
                 )
                 self._persist_response(thread, result)
-                publish("final", {"threadId": result.thread_id, "response": result.model_dump(by_alias=True)})
+                publish(
+                    "final",
+                    {
+                        "threadId": result.thread_id,
+                        "response": result.model_dump(by_alias=True, mode="json"),
+                    },
+                )
                 publish("done")
             except asyncio.CancelledError:
                 raise
@@ -1499,4 +1506,5 @@ class AgentRuntime:
 
     @staticmethod
     def _format_sse(event_name: str, data: dict[str, Any]) -> str:
-        return f"event: {event_name}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+        json_safe_data = jsonable_encoder(data)
+        return f"event: {event_name}\ndata: {json.dumps(json_safe_data, ensure_ascii=False)}\n\n"

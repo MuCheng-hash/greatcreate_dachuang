@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -644,6 +645,49 @@ def test_inferred_candidates_are_filtered_capped_and_pending_until_confirmation(
         if isinstance(message, SystemMessage)
     )
     assert all(item.content not in system_text for item in pending)
+
+
+def test_stream_final_serializes_memory_candidate_datetimes(tmp_path: Path) -> None:
+    settings = api_settings(tmp_path)
+    memories = MemoryRepository(settings.database_path)
+    memories.update_setting(OWNER, SCOPE_TYPE, SCOPE_ID, True)
+    runtime = AgentRuntime(
+        settings,
+        ConversationRepository(settings.database_path),
+        memory_repository=memories,
+    )
+    runtime._agent = CapturingAgent(
+        {
+            "answer": "以后按分点方式回答。",
+            "citationIds": [],
+            "memoryCandidates": [
+                {
+                    "memoryType": "PROFILE",
+                    "fieldKey": "answer_format",
+                    "content": "回答时不要使用表格",
+                    "confidence": 0.91,
+                }
+            ],
+        }
+    )
+
+    async def collect_events() -> list[str]:
+        return [
+            event
+            async for event in runtime.stream_events(
+                agent_request("以后不要给我生成表格了")
+            )
+        ]
+
+    events = asyncio_run(collect_events())
+    final_block = next(event for event in events if event.startswith("event: final"))
+    final_data = json.loads(final_block.split("data: ", 1)[1])
+    candidate = final_data["response"]["memoryCandidates"][0]
+
+    assert candidate["status"] == "pending"
+    assert isinstance(candidate["createdAt"], str)
+    assert isinstance(candidate["updatedAt"], str)
+    assert events[-1].startswith("event: done")
 
 
 def test_recall_is_bounded_and_states_current_input_priority(tmp_path: Path) -> None:
