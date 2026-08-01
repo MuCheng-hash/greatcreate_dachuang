@@ -331,6 +331,12 @@ public class AgentQaServiceImpl implements AgentQaService {
         response.setRetrievalStatus("degraded".equalsIgnoreCase(remoteRetrievalStatus)
                 || StringUtils.hasText(response.getDegradedReason())
                 ? KnowledgeRetrievalStatus.DEGRADED : retrieval.getRetrievalStatus());
+        List<String> remoteRetrievalMethods = textList(responseMap.get("retrievalMethods"));
+        response.setRetrievalMethods(remoteRetrievalMethods.isEmpty()
+                ? retrieval.getRetrievalMethods() : remoteRetrievalMethods);
+        response.setProvider(textValue(responseMap.get("provider")));
+        response.setModel(textValue(responseMap.get("model")));
+        response.setFallbackLevel(textValue(responseMap.get("fallbackLevel")));
         AgentGenerationStatus generationStatus = "completed".equalsIgnoreCase(response.getStatus())
                 ? AgentGenerationStatus.COMPLETED : AgentGenerationStatus.DEGRADED;
         response.setGenerationStatus(generationStatus);
@@ -552,6 +558,12 @@ public class AgentQaServiceImpl implements AgentQaService {
         response.setAnswer(StringUtils.hasText(generated.getAnswer()) ? generated.getAnswer() : "暂时无法生成回答。");
         response.setIntent(intent);
         response.setRetrievalStatus(retrieval.getRetrievalStatus());
+        response.setRetrievalMethods(remote == null || remote.getRetrievalMethods() == null
+                || remote.getRetrievalMethods().isEmpty()
+                ? retrieval.getRetrievalMethods() : remote.getRetrievalMethods());
+        response.setProvider(remote == null ? null : remote.getProvider());
+        response.setModel(remote == null ? null : remote.getModel());
+        response.setFallbackLevel(remote == null ? null : remote.getFallbackLevel());
         response.setGenerationStatus(generated.getGenerationStatus() == null
                 ? AgentGenerationStatus.COMPLETED
                 : generated.getGenerationStatus());
@@ -794,6 +806,7 @@ public class AgentQaServiceImpl implements AgentQaService {
                     || !result.getCitationCandidates().isEmpty();
             result.setRetrievalStatus(hasEvidence ? KnowledgeRetrievalStatus.OK : KnowledgeRetrievalStatus.EMPTY);
         }
+        result.refreshRetrievalMethods();
         return result;
     }
 

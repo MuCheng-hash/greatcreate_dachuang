@@ -113,7 +113,12 @@ public class AgentRuntimeClient {
                     response.getDegradedReason(),
                     response.getMemoryCandidates() == null
                             ? new ArrayList<>() : response.getMemoryCandidates(),
-                    response.getMemoryApplied()
+                    response.getMemoryApplied(),
+                    response.getRetrievalMethods() == null
+                            ? new ArrayList<>() : response.getRetrievalMethods(),
+                    response.getProvider(),
+                    response.getModel(),
+                    response.getFallbackLevel()
             );
         } catch (RuntimeException ignored) {
             return null;

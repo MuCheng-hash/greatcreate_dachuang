@@ -145,6 +145,7 @@ public class AgentToolServiceImpl implements AgentToolService {
                     ? KnowledgeRetrievalStatus.EMPTY
                     : KnowledgeRetrievalStatus.OK);
         }
+        result.refreshRetrievalMethods();
         return result;
     }
 

@@ -22,6 +22,8 @@ public class StatefulAgentResponse {
 
     private String retrievalStatus;
 
+    private List<String> retrievalMethods = new ArrayList<>();
+
     private String provider;
 
     private String model;

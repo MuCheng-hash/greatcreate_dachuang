@@ -204,6 +204,7 @@ class AgentMessageResponse(ApiModel):
         default=None, alias="generationStatus"
     )
     retrieval_status: str | None = Field(default=None, alias="retrievalStatus")
+    retrieval_methods: list[str] = Field(default_factory=list, alias="retrievalMethods")
     provider: str | None = None
     model: str | None = None
     fallback_level: int | str | None = Field(default=None, alias="fallbackLevel")

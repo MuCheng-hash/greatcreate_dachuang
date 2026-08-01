@@ -30,7 +30,13 @@ public class AgentQaResponse {
 
     private KnowledgeRetrievalStatus retrievalStatus;
 
+    private List<String> retrievalMethods = new ArrayList<>();
+
     private AgentGenerationStatus generationStatus = AgentGenerationStatus.COMPLETED;
+
+    private String provider;
+
+    private String model;
 
     private KnowledgeScopeType scopeType;
 

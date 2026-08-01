@@ -92,6 +92,7 @@ class DatabaseKnowledgeRetrieverTest {
         assertTrue(result.allCitationIds().contains("chunk:11"));
         assertTrue(result.allCitationIds().contains("source-rel:21"));
         assertEquals("keyword-fallback", result.getChunks().get(0).getRetrievalMethod());
+        assertEquals(List.of("keyword-fallback"), result.getRetrievalMethods());
     }
 
     @Test
@@ -135,7 +136,49 @@ class DatabaseKnowledgeRetrieverTest {
         assertEquals(KnowledgeRetrievalStatus.OK, result.getRetrievalStatus());
         assertEquals(1, result.getChunks().size());
         assertEquals("vector+hybrid-rerank", result.getChunks().get(0).getRetrievalMethod());
+        assertEquals(List.of("vector+hybrid-rerank"), result.getRetrievalMethods());
         assertTrue(result.getChunks().get(0).getScore() > 0.7D);
+    }
+
+    @Test
+    void fallsBackToKeywordAndReportsMethodWhenVectorRetrievalFails() {
+        ContentChunkMapper contentChunkMapper = mock(ContentChunkMapper.class);
+        ContentChunk keywordMatch = new ContentChunk();
+        keywordMatch.setChunkId(41L);
+        keywordMatch.setEntityType(EntityType.SCHOOL);
+        keywordMatch.setEntityId(1L);
+        keywordMatch.setChunkTitle("关键词兜底资料");
+        keywordMatch.setChunkText("Qdrant 不可用时仍可检索此资料。");
+        when(contentChunkMapper.selectList(any())).thenReturn(List.of(keywordMatch));
+
+        SchoolMapService schoolMapService = mock(SchoolMapService.class);
+        when(schoolMapService.getSchoolDetail(1L)).thenReturn(new SchoolMapDetailVO());
+        RagProperties properties = new RagProperties();
+        properties.setEnabled(true);
+        EmbeddingClient embeddingClient = mock(EmbeddingClient.class);
+        when(embeddingClient.embed(any(String.class))).thenThrow(new IllegalStateException("qdrant unavailable"));
+
+        DatabaseKnowledgeRetriever retriever = new DatabaseKnowledgeRetriever(
+                contentChunkMapper,
+                mock(EntitySourceRelMapper.class),
+                mock(DataSourceMapper.class),
+                schoolMapService,
+                mock(TownMapService.class),
+                null,
+                properties,
+                embeddingClient,
+                mock(ChunkVectorStore.class)
+        );
+        KnowledgeRetrieveRequest request = new KnowledgeRetrieveRequest();
+        request.setQuery("学校有哪些资料？");
+        request.setScopeType(KnowledgeScopeType.SCHOOL);
+        request.setScopeId(1L);
+
+        KnowledgeRetrieveResult result = retriever.retrieve(request);
+
+        assertEquals(KnowledgeRetrievalStatus.DEGRADED, result.getRetrievalStatus());
+        assertEquals(List.of("keyword-fallback"), result.getRetrievalMethods());
+        assertEquals("keyword-fallback", result.getChunks().get(0).getRetrievalMethod());
     }
 
     @Test

@@ -26,11 +26,20 @@ public class AgentRuntimeResult {
 
     private AgentMemoryApplied memoryApplied;
 
+    private List<String> retrievalMethods = new ArrayList<>();
+
+    private String provider;
+
+    private String model;
+
+    private String fallbackLevel;
+
     public AgentRuntimeResult(GeneratedAnswer answer,
                               String threadId,
                               String status,
                               List<String> toolExecutions) {
-        this(answer, threadId, status, toolExecutions, null, new ArrayList<>(), null);
+        this(answer, threadId, status, toolExecutions, null, new ArrayList<>(), null,
+                new ArrayList<>(), null, null, null);
     }
 
     public AgentRuntimeResult(GeneratedAnswer answer,
@@ -39,6 +48,6 @@ public class AgentRuntimeResult {
                               List<String> toolExecutions,
                               String degradedReason) {
         this(answer, threadId, status, toolExecutions, degradedReason,
-                new ArrayList<>(), null);
+                new ArrayList<>(), null, new ArrayList<>(), null, null, null);
     }
 }

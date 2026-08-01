@@ -15,6 +15,7 @@ import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -32,7 +33,7 @@ class AssistantConversationHistoryControllerTest {
             if (path.endsWith("/archive") || path.endsWith("/restore")) {
                 body = "{}";
             } else if (path.equals("/agent/threads/thread-1")) {
-                body = "{\"threadId\":\"thread-1\",\"scopeType\":\"SCHOOL\",\"scopeId\":\"7\",\"status\":\"active\",\"summary\":\"\",\"createdAt\":\"2026-07-28T00:00:00Z\",\"updatedAt\":\"2026-07-28T01:00:00Z\",\"messages\":[{\"id\":1,\"role\":\"user\",\"content\":\"历史问题\",\"createdAt\":\"2026-07-28T00:00:00Z\",\"metadata\":{}}]}";
+                body = "{\"threadId\":\"thread-1\",\"scopeType\":\"SCHOOL\",\"scopeId\":\"7\",\"status\":\"active\",\"summary\":\"\",\"createdAt\":\"2026-07-28T00:00:00Z\",\"updatedAt\":\"2026-07-28T01:00:00Z\",\"messages\":[{\"id\":1,\"role\":\"user\",\"content\":\"历史问题\",\"createdAt\":\"2026-07-28T00:00:00Z\",\"metadata\":{}},{\"id\":2,\"role\":\"assistant\",\"content\":\"历史回答\",\"createdAt\":\"2026-07-28T00:01:00Z\",\"metadata\":{\"responseSnapshot\":{\"schemaVersion\":1,\"retrievalMethods\":[\"vector+hybrid-rerank\"],\"citations\":[{\"citationId\":\"chunk:1\",\"title\":\"历史来源\"}]}}}]}";
             } else {
                 body = "[{\"threadId\":\"thread-1\",\"scopeType\":\"SCHOOL\",\"scopeId\":\"7\",\"title\":\"历史问题\",\"preview\":\"历史回答\",\"messageCount\":2,\"createdAt\":\"2026-07-28T00:00:00Z\",\"updatedAt\":\"2026-07-28T01:00:00Z\"}]";
             }
@@ -64,6 +65,11 @@ class AssistantConversationHistoryControllerTest {
             assertEquals("历史问题", history.getData().get(0).getTitle());
             assertEquals("历史问题", archivedHistory.getData().get(0).getTitle());
             assertEquals("历史问题", detail.getData().getMessages().get(0).getContent());
+            Map<?, ?> snapshot = (Map<?, ?>) detail.getData().getMessages().get(1)
+                    .getMetadata().get("responseSnapshot");
+            assertEquals(1, snapshot.get("schemaVersion"));
+            assertEquals(List.of("vector+hybrid-rerank"), snapshot.get("retrievalMethods"));
+            assertEquals("历史来源", ((Map<?, ?>) ((List<?>) snapshot.get("citations")).get(0)).get("title"));
             assertEquals(200, archived.getCode());
             assertEquals(200, restored.getCode());
             assertEquals(5, requests.size());

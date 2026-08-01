@@ -844,6 +844,7 @@ class AgentRuntime:
             status=status,
             generationStatus=status,
             retrievalStatus=self._retrieval_status(request.context),
+            retrievalMethods=self._retrieval_methods(request.context),
             provider=metadata.get("provider"),
             model=metadata.get("model"),
             fallbackLevel=metadata.get("fallbackLevel"),
@@ -875,6 +876,11 @@ class AgentRuntime:
         for item in result.get("citations") or []:
             if isinstance(item, dict) and item.get("citationId") in allowed:
                 values.append(self._citation_by_id(trusted, str(item["citationId"])))
+        if not any(item is not None for item in values):
+            values = [
+                self._citation_by_id(trusted, citation_id)
+                for citation_id in self._ordered_evidence_citation_ids(trusted)[:5]
+            ]
         return [item for item in values if item is not None]
 
     def _persist_response(self, thread: ThreadRecord, result: AgentMessageResponse) -> None:
@@ -886,6 +892,7 @@ class AgentRuntime:
                 "status": result.status,
                 "taskType": result.task_type,
                 "citations": [item.citation_id for item in result.citations],
+                "retrievalMethods": result.retrieval_methods,
                 "toolExecutions": [item.model_dump(by_alias=True) for item in result.tool_executions],
                 "teachingPlan": result.teaching_plan,
                 "resourceDiscovery": result.resource_discovery,
@@ -898,8 +905,42 @@ class AgentRuntime:
                 "memoryCandidateIds": [
                     item.id for item in (result.memory_candidates or [])
                 ],
+                "responseSnapshot": self._response_snapshot(result),
             },
         )
+
+    @staticmethod
+    def _response_snapshot(result: AgentMessageResponse) -> dict[str, Any]:
+        return {
+            "schemaVersion": 1,
+            "status": result.status,
+            "generationStatus": result.generation_status,
+            "retrievalStatus": result.retrieval_status,
+            "retrievalMethods": list(result.retrieval_methods),
+            "citations": [
+                item.model_dump(by_alias=True, mode="json")
+                for item in result.citations[:5]
+            ],
+            "relatedResources": list(result.related_resources),
+            "followUpQuestions": list(result.follow_up_questions),
+            "provider": result.provider,
+            "model": result.model,
+            "fallbackLevel": result.fallback_level,
+            "toolExecutions": [
+                {
+                    "name": item.name,
+                    "status": item.status,
+                    "durationMs": item.duration_ms,
+                }
+                for item in result.tool_executions
+            ],
+            "contextCompacted": result.context_compacted,
+            "memoryApplied": (
+                result.memory_applied.model_dump(by_alias=True, mode="json")
+                if result.memory_applied
+                else None
+            ),
+        }
 
     @staticmethod
     def _follow_up_questions(
@@ -1152,10 +1193,7 @@ class AgentRuntime:
         allowed = self._allowed_citations(trusted)
         citations = [self._citation_by_id(trusted, item) for item in parsed.citation_ids if item in allowed]
         citations = [item for item in citations if item is not None]
-        if not citations and any(
-            item.name == "query_graph_relations" and item.status in {"completed", "degraded"}
-            for item in executions
-        ):
+        if not citations:
             citations = [
                 self._citation_by_id(trusted, item)
                 for item in self._ordered_evidence_citation_ids(trusted)[:5]
@@ -1169,6 +1207,7 @@ class AgentRuntime:
             status="completed" if answer else "incomplete",
             generationStatus="completed" if answer else "degraded",
             retrievalStatus=("degraded" if normalized_reasons else self._retrieval_status(trusted)),
+            retrievalMethods=self._retrieval_methods(trusted),
             degradedReason=";".join(normalized_reasons) if normalized_reasons else None,
             citations=citations,
             relatedResources=parsed.related_resources[:8],
@@ -1429,11 +1468,15 @@ class AgentRuntime:
                 f"{scope_name}没有足够的已审核证据回答“{request.message}”。\n\n"
                 "请补充具体资源、学校范围或年级信息后重试。"
             )
-        citations = [self._citation_by_id(trusted, item) for item in self._allowed_citations(trusted)]
+        citations = [
+            self._citation_by_id(trusted, item)
+            for item in self._ordered_evidence_citation_ids(trusted)[:5]
+        ]
         return AgentMessageResponse(
             threadId=thread_id, answer=answer, status=status,
             generationStatus="degraded",
             retrievalStatus=self._retrieval_status(trusted),
+            retrievalMethods=self._retrieval_methods(trusted),
             provider="local",
             model="local",
             fallbackLevel="local",
@@ -1461,6 +1504,23 @@ class AgentRuntime:
             return "ok"
         return "empty"
 
+    def _retrieval_methods(self, trusted: TrustedContext) -> list[str]:
+        retrieval = trusted.retrieval or {}
+        values: list[str] = []
+        for value in retrieval.get("retrievalMethods", []):
+            normalized = str(value).strip()
+            if normalized and normalized not in values:
+                values.append(normalized)
+        for item in retrieval.get("chunks", []):
+            if not isinstance(item, dict):
+                continue
+            normalized = str(item.get("retrievalMethod") or "").strip()
+            if normalized and normalized not in values:
+                values.append(normalized)
+        if retrieval.get("graphFacts") and "knowledge-graph" not in values:
+            values.append("knowledge-graph")
+        return values
+
     def _allowed_citations(self, trusted: TrustedContext) -> set[str]:
         values = {str(item.get("citationId")) for item in trusted.citation_candidates if item.get("citationId")}
         retrieval = trusted.retrieval or {}
@@ -1473,9 +1533,9 @@ class AgentRuntime:
         seen: set[str] = set()
         retrieval = trusted.retrieval or {}
         groups = (
-            trusted.citation_candidates,
-            retrieval.get("graphFacts", []),
             retrieval.get("chunks", []),
+            retrieval.get("graphFacts", []),
+            trusted.citation_candidates,
         )
         for group in groups:
             for item in group:

@@ -55,6 +55,7 @@ class AgentQaServiceImplTest {
         assertEquals(KnowledgeRetrievalStatus.OK, response.getRetrievalStatus());
         assertEquals(1, response.getCitations().size());
         assertEquals("chunk:1", response.getCitations().get(0).getCitationId());
+        assertEquals(List.of("vector+hybrid-rerank"), response.getRetrievalMethods());
         assertFalse(response.getRelatedResources().isEmpty());
         verify(retriever).retrieve(any(KnowledgeRetrieveRequest.class));
     }
@@ -292,6 +293,7 @@ class AgentQaServiceImplTest {
         chunk.setTitle("敬老服务资源说明");
         chunk.setText("可组织学生开展尊老爱老和社会责任教育。");
         chunk.setScore(0.91D);
+        chunk.setRetrievalMethod("vector+hybrid-rerank");
 
         KnowledgeCitationCandidateVO candidate = new KnowledgeCitationCandidateVO();
         candidate.setCitationId("chunk:1");
