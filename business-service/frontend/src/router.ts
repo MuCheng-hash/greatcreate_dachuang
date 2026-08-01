@@ -10,7 +10,7 @@ const routes = [
   { path: "/assistant", name: "assistant", component: () => import("@/views/AssistantView.vue"), meta: { title: "智能问答" } },
   { path: "/agent-debug", name: "agent-debug", component: () => import("@/views/AgentDebugView.vue"), meta: { title: "Agent 调试" } },
   { path: "/profile", name: "profile", component: () => import("@/views/ProfileView.vue"), meta: { title: "个人中心" } },
-  // 管理后台页面
+  // ---- 管理后台页面 ----
   {
     path: "/admin/knowledge-base",
     name: "admin-knowledge-base",
@@ -22,6 +22,18 @@ const routes = [
     name: "admin-conversations",
     component: () => import("@/views/admin/ConversationHistoryView.vue"),
     meta: { title: "会话历史", admin: true },
+  },
+  {
+    path: "/admin/segments",
+    name: "admin-segments",
+    component: () => import("@/views/admin/SegmentPreviewView.vue"),
+    meta: { title: "分段预览", admin: true },
+  },
+  {
+    path: "/admin/logs",
+    name: "admin-logs",
+    component: () => import("@/views/admin/LogDashboardView.vue"),
+    meta: { title: "日志面板", admin: true },
   },
   { path: "/:pathMatch(.*)*", redirect: "/login" }
 ];
@@ -40,12 +52,10 @@ interface RouteAuthState {
 type AccessResult = true | string | { external: string } | { path: string; query: { redirect: string } };
 
 export function resolveRouteAccess(to: Pick<RouteLocationNormalized, "meta" | "fullPath">, auth: RouteAuthState): AccessResult {
-  // 管理页面需要 admin 角色
   if (to.meta.admin && !auth.isAdmin) {
     return { path: "/login", query: { redirect: to.fullPath } };
   }
-  // 非管理员用户访问任何页面都跳转到旧的 /admin.html（保持向后兼容）
-  if (auth.isAdmin && !to.meta.admin && !to.meta.public && to.path !== "/admin/knowledge-base" && to.path !== "/admin/conversations") {
+  if (auth.isAdmin && !to.meta.admin && !to.meta.public) {
     return { external: "/admin.html" };
   }
   if (to.meta.public && auth.isAuthenticated) return "/map";
@@ -74,11 +84,10 @@ window.addEventListener("portal:unauthorized", () => {
   if (router.currentRoute.value.name !== "login") void router.replace("/login");
 });
 
-export default router;
-
-// 兼容新旧两套 auth 未授权事件
 window.addEventListener("app:unauthorized", () => {
   const auth = useAuthStore();
   auth.clear();
   if (router.currentRoute.value.name !== "login") void router.replace("/login");
 });
+
+export default router;
