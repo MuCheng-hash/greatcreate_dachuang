@@ -14,8 +14,10 @@ import {
 } from "@lucide/vue";
 import InlineNotice from "@/components/InlineNotice.vue";
 import ConfirmDialog from "@/components/ConfirmDialog.vue";
-import { memoryApi } from "@/services/memory";
+import MemoryConflictDialog from "@/components/MemoryConflictDialog.vue";
+import { memoryApi, memoryConflictPreviewFromError } from "@/services/memory";
 import type {
+  AgentMemoryConflictPreview,
   AgentMemoryItem,
   AgentMemorySetting,
   MemoryStatus,
@@ -26,7 +28,7 @@ type CoreFieldKey =
   | "grade"
   | "subject"
   | "teaching_style"
-  | "response_format"
+  | "answer_format"
   | "lesson_duration";
 
 interface CoreFieldDefinition {
@@ -47,11 +49,20 @@ interface MemoryConfirmation {
   targets?: AgentMemoryItem[];
 }
 
+interface MemoryConflictResolution {
+  candidate: AgentMemoryItem;
+  conflicts: AgentMemoryItem[];
+  replace: () => Promise<unknown>;
+  keep: () => Promise<unknown>;
+  replaceMessage: string;
+  keepMessage: string;
+}
+
 const coreFields: CoreFieldDefinition[] = [
   { key: "grade", label: "常教年级", placeholder: "例如：四年级" },
   { key: "subject", label: "常教学科", placeholder: "例如：道德与法治" },
   { key: "teaching_style", label: "教学风格", placeholder: "例如：项目式教学、启发式" },
-  { key: "response_format", label: "回答格式", placeholder: "例如：先结论后步骤、优先表格" },
+  { key: "answer_format", label: "回答格式", placeholder: "例如：先结论后步骤、优先表格" },
   { key: "lesson_duration", label: "常用课时", placeholder: "例如：40 分钟" },
 ];
 
@@ -70,6 +81,9 @@ const busyId = ref("");
 const confirmation = ref<MemoryConfirmation | null>(null);
 const confirmationPending = ref(false);
 const confirmationError = ref("");
+const memoryConflict = ref<MemoryConflictResolution | null>(null);
+const memoryConflictBusy = ref(false);
+const memoryConflictError = ref("");
 const activeStatus = ref<MemoryStatus>("active");
 const editingId = ref("");
 const editingContent = ref("");
@@ -81,7 +95,7 @@ const profileValues = reactive<Record<CoreFieldKey, string>>({
   grade: "",
   subject: "",
   teaching_style: "",
-  response_format: "",
+  answer_format: "",
   lesson_duration: "",
 });
 const customMemory = reactive<{ memoryType: MemoryType; content: string }>({
@@ -96,7 +110,7 @@ const items = reactive<Record<MemoryStatus, AgentMemoryItem[]>>({
 
 const currentItems = computed(() => items[activeStatus.value]);
 const currentTab = computed(() => statusTabs.find((item) => item.status === activeStatus.value)!);
-const isInteractionLocked = computed(() => Boolean(busyId.value) || Boolean(confirmation.value));
+const isInteractionLocked = computed(() => Boolean(busyId.value) || Boolean(confirmation.value) || Boolean(memoryConflict.value));
 
 onMounted(loadMemoryCenter);
 
@@ -104,17 +118,8 @@ async function loadMemoryCenter(): Promise<void> {
   loading.value = true;
   notice.text = "";
   try {
-    const [memorySetting, pending, active, deleted] = await Promise.all([
-      memoryApi.setting(),
-      memoryApi.list("pending"),
-      memoryApi.list("active"),
-      memoryApi.list("deleted"),
-    ]);
-    setting.value = memorySetting;
-    items.pending = pending;
-    items.active = active;
-    items.deleted = deleted;
-    syncCoreFields();
+    setting.value = await memoryApi.setting();
+    await refreshMemoryLists();
   } catch (error) {
     notice.tone = "error";
     notice.text = errorMessage(error);
@@ -123,18 +128,103 @@ async function loadMemoryCenter(): Promise<void> {
   }
 }
 
+async function refreshMemoryLists(): Promise<void> {
+  const [pending, active, deleted] = await Promise.all([
+    memoryApi.list("pending"),
+    memoryApi.list("active"),
+    memoryApi.list("deleted"),
+  ]);
+  items.pending = pending;
+  items.active = active;
+  items.deleted = deleted;
+  syncCoreFields();
+}
+
+function normalizeCoreFieldKey(fieldKey: string | null | undefined): CoreFieldKey | null {
+  const canonical = fieldKey === "response_format" ? "answer_format" : fieldKey;
+  return coreFields.some((field) => field.key === canonical) ? canonical as CoreFieldKey : null;
+}
+
 function syncCoreFields(): void {
   for (const field of coreFields) profileValues[field.key] = "";
   for (const item of items.active) {
     if (item.memoryType !== "PROFILE" || !item.fieldKey) continue;
-    if (coreFields.some((field) => field.key === item.fieldKey)) {
-      profileValues[item.fieldKey as CoreFieldKey] = item.content;
-    }
+    const fieldKey = normalizeCoreFieldKey(item.fieldKey);
+    if (fieldKey) profileValues[fieldKey] = item.content;
   }
 }
 
 function coreMemory(fieldKey: CoreFieldKey): AgentMemoryItem | undefined {
-  return items.active.find((item) => item.memoryType === "PROFILE" && item.fieldKey === fieldKey);
+  return items.active.find((item) => item.memoryType === "PROFILE" && normalizeCoreFieldKey(item.fieldKey) === fieldKey);
+}
+
+function previewHasConflicts(preview: AgentMemoryConflictPreview): boolean {
+  return !preview.duplicate && Array.isArray(preview.conflicts) && preview.conflicts.length > 0;
+}
+
+function previewCandidate(preview: AgentMemoryConflictPreview, fallback: AgentMemoryItem): AgentMemoryItem {
+  return preview.candidate?.content ? preview.candidate : fallback;
+}
+
+function openMemoryConflict(nextConflict: MemoryConflictResolution): void {
+  if (memoryConflict.value || memoryConflictBusy.value) return;
+  memoryConflictError.value = "";
+  memoryConflict.value = nextConflict;
+}
+
+function closeMemoryConflict(): void {
+  if (memoryConflictBusy.value) return;
+  memoryConflictError.value = "";
+  memoryConflict.value = null;
+}
+
+async function resolveMemoryConflict(action: "replace" | "keep"): Promise<void> {
+  const conflict = memoryConflict.value;
+  if (!conflict || memoryConflictBusy.value) return;
+  memoryConflictBusy.value = true;
+  memoryConflictError.value = "";
+  try {
+    if (action === "replace") await conflict.replace();
+    else await conflict.keep();
+    await refreshMemoryLists();
+    memoryConflict.value = null;
+    notice.tone = "success";
+    notice.text = action === "replace" ? conflict.replaceMessage : conflict.keepMessage;
+  } catch (error) {
+    memoryConflictError.value = errorMessage(error);
+  } finally {
+    memoryConflictBusy.value = false;
+  }
+}
+
+async function runConflictAwareMutation(
+  fallbackCandidate: AgentMemoryItem,
+  mutation: (replaceConflicts: boolean) => Promise<unknown>,
+  replaceMessage: string,
+  keepMessage: string,
+): Promise<boolean> {
+  try {
+    await mutation(false);
+    return true;
+  } catch (error) {
+    const preview = memoryConflictPreviewFromError(error);
+    if (preview?.duplicate) {
+      await refreshMemoryLists();
+      notice.tone = "info";
+      notice.text = "该记忆已存在，未创建重复的已生效记忆。";
+      return false;
+    }
+    if (!preview || !previewHasConflicts(preview)) throw error;
+    openMemoryConflict({
+      candidate: previewCandidate(preview, fallbackCandidate),
+      conflicts: preview.conflicts,
+      replace: () => mutation(true),
+      keep: async () => undefined,
+      replaceMessage,
+      keepMessage,
+    });
+    return false;
+  }
 }
 
 async function toggleMemory(event: Event): Promise<void> {
@@ -167,19 +257,39 @@ async function saveProfileMemories(): Promise<void> {
       const content = profileValues[field.key].trim();
       const existing = coreMemory(field.key);
       if (content && existing && content !== existing.content) {
-        replaceMemory(await memoryApi.update(existing.id, { content }));
+        const completed = await runConflictAwareMutation(
+          { ...existing, fieldKey: field.key, content, status: "active" },
+          (replaceConflicts) => memoryApi.update(existing.id, replaceConflicts ? { content, replaceConflicts: true } : { content }),
+          "已用新画像替换同字段旧值，旧值已移入回收站。",
+          "已保留当前画像，未保存新的字段值。",
+        );
+        if (!completed) return;
       } else if (content && !existing) {
-        replaceMemory(await memoryApi.create({
+        const candidate: AgentMemoryItem = {
+          id: `profile-${field.key}`,
           memoryType: "PROFILE",
           fieldKey: field.key,
           content,
-        }));
+          status: "active",
+          source: "profile_ui",
+        };
+        const completed = await runConflictAwareMutation(
+          candidate,
+          (replaceConflicts) => memoryApi.create({
+            memoryType: "PROFILE",
+            fieldKey: field.key,
+            content,
+            ...(replaceConflicts ? { replaceConflicts: true } : {}),
+          }),
+          "已用新画像替换同字段旧值，旧值已移入回收站。",
+          "已保留当前画像，未保存新的字段值。",
+        );
+        if (!completed) return;
       } else if (!content && existing) {
-        const recycled = await memoryApi.recycle(existing.id);
-        replaceMemory(recycled || { ...existing, status: "deleted" });
+        await memoryApi.recycle(existing.id);
       }
     }
-    syncCoreFields();
+    await refreshMemoryLists();
     notice.tone = "success";
     notice.text = "核心用户画像已保存。当前对话中的明确要求仍会优先于这些偏好。";
   } catch (error) {
@@ -201,12 +311,12 @@ async function createCustomMemory(): Promise<void> {
   customSaving.value = true;
   notice.text = "";
   try {
-    const created = await memoryApi.create({
+    await memoryApi.create({
       memoryType: customMemory.memoryType,
       fieldKey: null,
       content,
     });
-    replaceMemory(created);
+    await refreshMemoryLists();
     customMemory.content = "";
     activeStatus.value = "active";
     notice.tone = "success";
@@ -222,7 +332,27 @@ async function createCustomMemory(): Promise<void> {
 
 async function confirmMemory(item: AgentMemoryItem): Promise<void> {
   await runItemAction(item.id, async () => {
-    replaceMemory(await memoryApi.confirm(item.id));
+    const preview = await memoryApi.confirmationPreview(item.id);
+    if (preview.duplicate) {
+      await memoryApi.confirm(item.id);
+      await refreshMemoryLists();
+      notice.tone = "success";
+      notice.text = "该记忆已存在，已保留原有值并将候选移入回收站。";
+      return;
+    }
+    if (previewHasConflicts(preview)) {
+      openMemoryConflict({
+        candidate: previewCandidate(preview, item),
+        conflicts: preview.conflicts,
+        replace: () => memoryApi.confirm(item.id, true),
+        keep: () => memoryApi.recycle(item.id),
+        replaceMessage: "候选记忆已确认，旧值已移入回收站。",
+        keepMessage: "已保留了原有记忆，这条候选已移入回收站。",
+      });
+      return;
+    }
+    await memoryApi.confirm(item.id);
+    await refreshMemoryLists();
     notice.tone = "success";
     notice.text = "候选记忆已确认，后续新对话可按规则使用。";
   });
@@ -248,8 +378,27 @@ async function ignoreMemory(item: AgentMemoryItem): Promise<void> {
 
 async function restoreMemory(item: AgentMemoryItem): Promise<void> {
   await runItemAction(item.id, async () => {
-    replaceMemory(await memoryApi.restore(item.id));
-    syncCoreFields();
+    const preview = await memoryApi.confirmationPreview(item.id);
+    if (preview.duplicate) {
+      await memoryApi.restore(item.id);
+      await refreshMemoryLists();
+      notice.tone = "success";
+      notice.text = "该记忆已存在，已保留原有值，回收站条目未重复生效。";
+      return;
+    }
+    if (previewHasConflicts(preview)) {
+      openMemoryConflict({
+        candidate: previewCandidate(preview, item),
+        conflicts: preview.conflicts,
+        replace: () => memoryApi.restore(item.id, true),
+        keep: async () => undefined,
+        replaceMessage: "记忆已恢复并替换同字段旧值，旧值已移入回收站。",
+        keepMessage: "已保留当前已生效记忆，回收站条目未恢复。",
+      });
+      return;
+    }
+    await memoryApi.restore(item.id);
+    await refreshMemoryLists();
     notice.tone = "success";
     notice.text = "记忆已恢复并重新生效。";
   });
@@ -282,9 +431,15 @@ async function saveEdit(item: AgentMemoryItem): Promise<void> {
     return;
   }
   await runItemAction(item.id, async () => {
-    replaceMemory(await memoryApi.update(item.id, { content }));
+    const completed = await runConflictAwareMutation(
+      { ...item, content },
+      (replaceConflicts) => memoryApi.update(item.id, replaceConflicts ? { content, replaceConflicts: true } : { content }),
+      "已用新值替换同字段旧记忆，旧值已移入回收站。",
+      "已保留当前记忆，未保存新的内容。",
+    );
+    if (!completed) return;
+    await refreshMemoryLists();
     cancelEdit();
-    syncCoreFields();
     notice.tone = "success";
     notice.text = "记忆内容已更新。";
   });
@@ -463,12 +618,12 @@ function errorMessage(error: unknown): string {
         <input
           data-memory-switch
           type="checkbox"
-          :checked="Boolean(setting?.enabled)"
+          :checked="Boolean(setting?.enabled && setting?.available)"
           :disabled="loading || settingSaving || !setting?.available"
           @change="toggleMemory"
         />
         <span aria-hidden="true"></span>
-        {{ settingSaving ? "保存中" : setting?.enabled ? "已开启" : "未开启" }}
+        {{ settingSaving ? "保存中" : !setting?.available ? "系统未开放" : setting?.enabled ? "已开启" : "未开启" }}
       </label>
     </div>
 
@@ -478,7 +633,9 @@ function errorMessage(error: unknown): string {
         <InlineNotice v-if="notice.text" :tone="notice.tone">{{ notice.text }}</InlineNotice>
 
         <InlineNotice v-if="setting && !setting.available" tone="info">
-          系统暂未开放长期记忆。全局开关开启后，你可以在这里主动启用。
+          {{ setting.enabled
+            ? "系统暂未开放长期记忆。您的个人设置已保存为“开启”，全局开放后会自动生效。"
+            : "系统暂未开放长期记忆。全局开关开启后，你可以在这里主动启用。" }}
         </InlineNotice>
 
         <div v-else-if="setting && !setting.enabled" class="memory-first-use">
@@ -633,6 +790,16 @@ function errorMessage(error: unknown): string {
       :error-message="confirmationError"
       @cancel="closeConfirmation"
       @confirm="confirmDestructiveAction"
+    />
+    <MemoryConflictDialog
+      :open="Boolean(memoryConflict)"
+      :candidate="memoryConflict?.candidate || null"
+      :conflicts="memoryConflict?.conflicts || []"
+      :busy="memoryConflictBusy"
+      :error-message="memoryConflictError"
+      @cancel="closeMemoryConflict"
+      @keep="resolveMemoryConflict('keep')"
+      @replace="resolveMemoryConflict('replace')"
     />
   </section>
 </template>

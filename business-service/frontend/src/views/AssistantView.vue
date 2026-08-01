@@ -5,6 +5,7 @@ import DOMPurify from "dompurify";
 import { marked } from "marked";
 import AppShell from "@/components/AppShell.vue";
 import InlineNotice from "@/components/InlineNotice.vue";
+import MemoryConflictDialog from "@/components/MemoryConflictDialog.vue";
 import { api } from "@/services/api";
 import { memoryApi } from "@/services/memory";
 import { useSchoolStore } from "@/stores/school";
@@ -17,6 +18,7 @@ import type {
   AgentSseEventData,
   AgentSseEventName,
   AgentMemoryApplied,
+  AgentMemoryConflictPreview,
   AgentMemoryItem,
   AgentToolExecution,
   LlmModelOption,
@@ -57,6 +59,10 @@ interface AssistantMessage extends AgentQaResponse {
 interface PendingMemoryCandidate {
   message: AssistantMessage;
   candidate: AgentMemoryItem;
+}
+
+interface PendingMemoryConflict extends PendingMemoryCandidate {
+  preview: AgentMemoryConflictPreview;
 }
 
 interface StreamRenderState {
@@ -105,6 +111,9 @@ const listening = ref(false);
 const speakingIndex = ref<number | null>(null);
 const copiedIndex = ref<number | null>(null);
 const memoryBusyId = ref<string>("");
+const memoryConflict = ref<PendingMemoryConflict | null>(null);
+const memoryConflictBusy = ref(false);
+const memoryConflictError = ref("");
 const recognition = ref<SpeechRecognitionLike | null>(null);
 const streamRenderStates = new WeakMap<object, StreamRenderState>();
 const composerMemoryFeedback = reactive<{
@@ -736,15 +745,25 @@ async function confirmMemoryCandidate(
   message: AssistantMessage,
   candidate: AgentMemoryItem,
 ): Promise<void> {
-  if (memoryBusyId.value) return;
+  if (memoryBusyId.value || memoryConflict.value) return;
   memoryBusyId.value = candidate.id;
   clearComposerMemoryFeedback();
   try {
-    await memoryApi.confirm(candidate.id);
-    removeMemoryCandidate(message, candidate.id);
-    showComposerMemoryFeedback("success", "已确认并保存这条记忆。");
-    await focusComposerAfterLastMemoryCandidate();
+    const preview = await memoryApi.confirmationPreview(candidate.id);
+    if (preview.duplicate) {
+      const result = await memoryApi.confirm(candidate.id);
+      await completeMemoryCandidateConfirmation(message, candidate, result);
+      return;
+    }
+    if (preview.conflicts.length) {
+      memoryConflictError.value = "";
+      memoryConflict.value = { message, candidate, preview };
+      return;
+    }
+    const result = await memoryApi.confirm(candidate.id);
+    await completeMemoryCandidateConfirmation(message, candidate, result);
   } catch (candidateError) {
+    if (await reopenMemoryConflictIfNeeded(message, candidate)) return;
     showComposerMemoryFeedback(
       "error",
       candidateError instanceof Error ? candidateError.message : "确认记忆失败，请稍后重试。",
@@ -758,7 +777,7 @@ async function ignoreMemoryCandidate(
   message: AssistantMessage,
   candidate: AgentMemoryItem,
 ): Promise<void> {
-  if (memoryBusyId.value) return;
+  if (memoryBusyId.value || memoryConflict.value) return;
   memoryBusyId.value = candidate.id;
   clearComposerMemoryFeedback();
   try {
@@ -773,6 +792,85 @@ async function ignoreMemoryCandidate(
     );
   } finally {
     memoryBusyId.value = "";
+  }
+}
+
+async function completeMemoryCandidateConfirmation(
+  message: AssistantMessage,
+  candidate: AgentMemoryItem,
+  result: AgentMemoryItem,
+): Promise<void> {
+  removeMemoryCandidate(message, candidate.id);
+  showComposerMemoryFeedback(
+    "success",
+    result.status === "deleted"
+      ? "该记忆已存在，已保留已有值并将候选移入回收站。"
+      : "已确认并保存这条记忆。",
+  );
+  await focusComposerAfterLastMemoryCandidate();
+}
+
+async function reopenMemoryConflictIfNeeded(
+  message: AssistantMessage,
+  candidate: AgentMemoryItem,
+): Promise<boolean> {
+  try {
+    const preview = await memoryApi.confirmationPreview(candidate.id);
+    if (!preview.duplicate && preview.conflicts.length) {
+      memoryConflictError.value = "";
+      memoryConflict.value = { message, candidate, preview };
+      return true;
+    }
+  } catch {
+    // 保留原始请求错误，避免二次预检错误覆盖可读的失败原因。
+  }
+  return false;
+}
+
+function closeMemoryConflict(): void {
+  if (memoryConflictBusy.value) return;
+  memoryConflictError.value = "";
+  memoryConflict.value = null;
+}
+
+async function keepExistingMemoryConflict(): Promise<void> {
+  const conflict = memoryConflict.value;
+  if (!conflict || memoryConflictBusy.value) return;
+  memoryConflictBusy.value = true;
+  memoryConflictError.value = "";
+  try {
+    await memoryApi.recycle(conflict.candidate.id);
+    removeMemoryCandidate(conflict.message, conflict.candidate.id);
+    memoryConflict.value = null;
+    showComposerMemoryFeedback("success", "已保留了原有记忆，这条候选已移入回收站。");
+    await focusComposerAfterLastMemoryCandidate();
+  } catch (candidateError) {
+    memoryConflictError.value = candidateError instanceof Error ? candidateError.message : "保留旧值失败，请稍后重试。";
+  } finally {
+    memoryConflictBusy.value = false;
+  }
+}
+
+async function replaceMemoryConflict(): Promise<void> {
+  const conflict = memoryConflict.value;
+  if (!conflict || memoryConflictBusy.value) return;
+  memoryConflictBusy.value = true;
+  memoryConflictError.value = "";
+  try {
+    const result = await memoryApi.confirm(conflict.candidate.id, true);
+    removeMemoryCandidate(conflict.message, conflict.candidate.id);
+    memoryConflict.value = null;
+    showComposerMemoryFeedback(
+      "success",
+      result.status === "deleted"
+        ? "该记忆已存在，已保留已有值并将候选移入回收站。"
+        : "已用新值替换旧记忆，旧值已移入回收站。",
+    );
+    await focusComposerAfterLastMemoryCandidate();
+  } catch (candidateError) {
+    memoryConflictError.value = candidateError instanceof Error ? candidateError.message : "替换旧值失败，请稍后重试。";
+  } finally {
+    memoryConflictBusy.value = false;
   }
 }
 
@@ -1257,10 +1355,10 @@ function clearChat(): void {
                 <p>{{ item.candidate.content }}</p>
               </div>
               <div class="composer-memory-candidate-actions">
-                <button data-action="confirm" type="button" :disabled="Boolean(memoryBusyId) || readOnlyConversation" @click="confirmMemoryCandidate(item.message, item.candidate)">
+                <button data-action="confirm" type="button" :disabled="Boolean(memoryBusyId) || Boolean(memoryConflict) || readOnlyConversation" @click="confirmMemoryCandidate(item.message, item.candidate)">
                   <Check :size="14" />确认
                 </button>
-                <button data-action="ignore" type="button" :disabled="Boolean(memoryBusyId) || readOnlyConversation" @click="ignoreMemoryCandidate(item.message, item.candidate)">
+                <button data-action="ignore" type="button" :disabled="Boolean(memoryBusyId) || Boolean(memoryConflict) || readOnlyConversation" @click="ignoreMemoryCandidate(item.message, item.candidate)">
                   <X :size="14" />忽略
                 </button>
               </div>
@@ -1304,6 +1402,16 @@ function clearChat(): void {
       </div>
     </section>
   </AppShell>
+  <MemoryConflictDialog
+    :open="Boolean(memoryConflict)"
+    :candidate="memoryConflict?.candidate || null"
+    :conflicts="memoryConflict?.preview.conflicts || []"
+    :busy="memoryConflictBusy"
+    :error-message="memoryConflictError"
+    @cancel="closeMemoryConflict"
+    @keep="keepExistingMemoryConflict"
+    @replace="replaceMemoryConflict"
+  />
 </template>
 
 <style scoped>

@@ -29,6 +29,12 @@ export interface AgentMemoryItem {
   updatedAt?: string | null;
 }
 
+export interface AgentMemoryConflictPreview {
+  candidate: AgentMemoryItem;
+  conflicts: AgentMemoryItem[];
+  duplicate: boolean;
+}
+
 export interface AgentMemoryApplied {
   count: number;
   memoryIds: string[];
@@ -38,12 +44,14 @@ export interface AgentMemoryCreatePayload {
   memoryType: MemoryType;
   fieldKey?: string | null;
   content: string;
+  replaceConflicts?: boolean;
 }
 
 export interface AgentMemoryUpdatePayload {
   memoryType?: MemoryType;
   fieldKey?: string | null;
   content?: string;
+  replaceConflicts?: boolean;
 }
 
 export interface LlmModelOption {

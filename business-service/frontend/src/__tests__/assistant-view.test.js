@@ -16,6 +16,14 @@ vi.mock("@/stores/school", () => ({ useSchoolStore: () => schoolMock }));
 
 import AssistantView from "@/views/AssistantView.vue";
 
+function memoryConflictControl(action) {
+  const element = document.body.querySelector(`[data-memory-conflict-${action}]`);
+  if (!(element instanceof HTMLButtonElement)) {
+    throw new Error(`未找到记忆冲突弹窗按钮：${action}`);
+  }
+  return element;
+}
+
 describe("assistant view", () => {
   beforeEach(() => {
     sessionStorage.clear();
@@ -24,7 +32,7 @@ describe("assistant view", () => {
     schoolMock.load.mockResolvedValue(schoolMock);
     apiMock.get.mockImplementation(async (path) => path === "/api/ai/models" ? [
       { id: "deepseek", displayName: "DeepSeek", provider: "deepseek", model: "deepseek-chat", isDefault: true }
-    ] : []);
+    ] : path.includes("/confirmation-preview") ? { candidate: {}, conflicts: [], duplicate: false } : []);
     apiMock.delete.mockResolvedValue(undefined);
     apiMock.post.mockResolvedValue({
       threadId: "thread-1",
@@ -875,6 +883,120 @@ describe("assistant view", () => {
     expect(wrapper.find(".composer-memory-candidate-card").exists()).toBe(false);
     expect(wrapper.get(".composer-memory-feedback").text()).toContain("已忽略这条候选记忆");
     expect(document.activeElement).toBe(wrapper.get("textarea").element);
+    wrapper.unmount();
+  });
+
+  it("asks before replacing an active conflicting memory and keeps the candidate pending on cancel", async () => {
+    apiMock.post.mockImplementation(async (path, body) => {
+      if (path === "/api/ai/qa/ask") {
+        return {
+          threadId: "thread-memory-conflict",
+          answer: "这是带冲突候选的回答。",
+          citations: [],
+          retrievalStatus: "ok",
+          generationStatus: "completed",
+          memoryCandidates: [{
+            id: "candidate-conflict",
+            memoryType: "PROFILE",
+            fieldKey: "teacher_gender_age",
+            content: "26岁男教师",
+            status: "pending",
+            source: "inferred_chat",
+          }],
+        };
+      }
+      if (path === "/api/ai/memories/candidate-conflict/confirm") {
+        expect(body).toEqual({ replaceConflicts: true });
+        return { id: "candidate-conflict", status: "active" };
+      }
+      return {};
+    });
+    apiMock.get.mockImplementation(async (path) => {
+      if (path === "/api/ai/models") return [];
+      if (path === "/api/ai/memories/candidate-conflict/confirmation-preview") {
+        return {
+          candidate: { id: "candidate-conflict", content: "26岁男教师", fieldKey: "teacher_gender_age" },
+          conflicts: [{ id: "active-old", content: "28岁女教师", fieldKey: "teacher_gender_age" }],
+          duplicate: false,
+        };
+      }
+      return [];
+    });
+
+    const wrapper = mount(AssistantView, {
+      attachTo: document.body,
+      global: { stubs: { AppShell: { template: "<div><slot /></div>" }, InlineNotice: true } },
+    });
+    await flushPromises();
+    await wrapper.get("textarea").setValue("确认我的资料");
+    await wrapper.get("form").trigger("submit.prevent");
+    await flushPromises();
+
+    await wrapper.get('[data-memory-id="candidate-conflict"] [data-action="confirm"]').trigger("click");
+    await flushPromises();
+    expect(document.body.querySelector('[data-memory-conflict-dialog]')?.textContent).toContain("28岁女教师");
+    expect(apiMock.post).not.toHaveBeenCalledWith("/api/ai/memories/candidate-conflict/confirm", expect.anything());
+
+    await memoryConflictControl("cancel").click();
+    await flushPromises();
+    expect(wrapper.find('[data-memory-id="candidate-conflict"]').exists()).toBe(true);
+
+    await wrapper.get('[data-memory-id="candidate-conflict"] [data-action="confirm"]').trigger("click");
+    await flushPromises();
+    await memoryConflictControl("replace").click();
+    await flushPromises();
+    expect(wrapper.find('[data-memory-id="candidate-conflict"]').exists()).toBe(false);
+    expect(wrapper.get(".composer-memory-feedback").text()).toContain("已用新值替换旧记忆");
+    wrapper.unmount();
+  });
+
+  it("recycles a conflicting candidate when the user keeps the active value", async () => {
+    apiMock.post.mockImplementation(async (path) => {
+      if (path === "/api/ai/qa/ask") {
+        return {
+          threadId: "thread-memory-keep",
+          answer: "这是带冲突候选的回答。",
+          citations: [],
+          memoryCandidates: [{
+            id: "candidate-keep",
+            memoryType: "PROFILE",
+            fieldKey: "grade",
+            content: "常教五年级",
+            status: "pending",
+            source: "inferred_chat",
+          }],
+        };
+      }
+      return {};
+    });
+    apiMock.get.mockImplementation(async (path) => {
+      if (path === "/api/ai/models") return [];
+      if (path === "/api/ai/memories/candidate-keep/confirmation-preview") {
+        return {
+          candidate: { id: "candidate-keep", content: "常教五年级", fieldKey: "grade" },
+          conflicts: [{ id: "grade-old", content: "常教四年级", fieldKey: "grade" }],
+          duplicate: false,
+        };
+      }
+      return [];
+    });
+
+    const wrapper = mount(AssistantView, {
+      attachTo: document.body,
+      global: { stubs: { AppShell: { template: "<div><slot /></div>" }, InlineNotice: true } },
+    });
+    await flushPromises();
+    await wrapper.get("textarea").setValue("确认年级");
+    await wrapper.get("form").trigger("submit.prevent");
+    await flushPromises();
+
+    await wrapper.get('[data-memory-id="candidate-keep"] [data-action="confirm"]').trigger("click");
+    await flushPromises();
+    await memoryConflictControl("keep").click();
+    await flushPromises();
+    expect(apiMock.delete).toHaveBeenCalledWith("/api/ai/memories/candidate-keep");
+    expect(wrapper.find('[data-memory-id="candidate-keep"]').exists()).toBe(false);
+    expect(wrapper.get(".composer-memory-feedback").text()).toContain("保留了原有记忆");
     wrapper.unmount();
   });
 

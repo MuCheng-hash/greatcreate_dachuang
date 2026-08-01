@@ -21,6 +21,14 @@ function dialogControl(action) {
   return element;
 }
 
+function memoryConflictControl(action) {
+  const element = document.body.querySelector(`[data-memory-conflict-${action}]`);
+  if (!(element instanceof HTMLButtonElement)) {
+    throw new Error(`未找到记忆冲突弹窗按钮：${action}`);
+  }
+  return element;
+}
+
 function memory(overrides = {}) {
   return {
     id: "memory-1",
@@ -122,7 +130,7 @@ describe("memory center", () => {
   it("disables activation when the server feature flag is unavailable", async () => {
     apiMock.get.mockImplementation(async (path) => (
       path === "/api/ai/memory-settings"
-        ? { available: false, enabled: false, effectiveEnabled: false }
+        ? { available: false, enabled: true, effectiveEnabled: false }
         : []
     ));
 
@@ -130,7 +138,10 @@ describe("memory center", () => {
     await flushPromises();
 
     expect(wrapper.text()).toContain("系统暂未开放长期记忆");
+    expect(wrapper.text()).toContain("个人设置已保存");
     expect(wrapper.get("[data-memory-switch]").attributes("disabled")).toBeDefined();
+    expect(wrapper.get("[data-memory-switch]").element.checked).toBe(false);
+    expect(wrapper.get(".memory-header").text()).toContain("系统未开放");
   });
 
   it("confirms, ignores, edits, recycles, restores, permanently deletes, and clears memories", async () => {
@@ -185,8 +196,7 @@ describe("memory center", () => {
     expect(document.body.querySelector('[role="alertdialog"]')?.textContent).toContain("清空回收站");
     await dialogControl("confirm").click();
     await flushPromises();
-    expect(apiMock.delete).toHaveBeenCalledWith("/api/ai/memories/custom-active/permanent");
-    expect(apiMock.delete).toHaveBeenCalledWith("/api/ai/memories/pending-2/permanent");
+    expect(apiMock.delete).toHaveBeenCalledWith("/api/ai/memories/deleted-1/permanent");
     expect(window.confirm).not.toHaveBeenCalled();
   });
 
@@ -252,5 +262,106 @@ describe("memory center", () => {
     expect(apiMock.delete).toHaveBeenCalledWith("/api/ai/memories/custom-active");
     expect(apiMock.delete).toHaveBeenCalledTimes(3);
     expect(window.confirm).not.toHaveBeenCalled();
+  });
+
+  it("shows an explicit conflict decision and synchronizes active and recycle-bin lists immediately", async () => {
+    const oldValue = memory({ id: "age-28", fieldKey: "teacher_gender_age", content: "28岁女教师" });
+    const candidate = memory({
+      id: "age-26",
+      fieldKey: "teacher_gender_age",
+      content: "26岁男教师",
+      status: "pending",
+      source: "inferred_chat",
+    });
+    const records = {
+      pending: [candidate],
+      active: [oldValue],
+      deleted: [],
+    };
+    apiMock.get.mockImplementation(async (path) => {
+      if (path === "/api/ai/memory-settings") return { available: true, enabled: true, effectiveEnabled: true };
+      if (path === "/api/ai/memories?status=pending") return records.pending;
+      if (path === "/api/ai/memories?status=active") return records.active;
+      if (path === "/api/ai/memories?status=deleted") return records.deleted;
+      if (path === "/api/ai/memories/age-26/confirmation-preview") {
+        return { candidate, conflicts: [oldValue], duplicate: false };
+      }
+      return [];
+    });
+    apiMock.post.mockImplementation(async (path, body) => {
+      if (path === "/api/ai/memories/age-26/confirm" && body?.replaceConflicts) {
+        records.pending = [];
+        records.active = [candidate];
+        records.deleted = [{ ...oldValue, status: "deleted" }];
+        return candidate;
+      }
+      return memory({ id: "created", ...body });
+    });
+
+    const wrapper = mount(MemoryCenter, { attachTo: document.body });
+    await flushPromises();
+    await wrapper.get('[data-memory-status="pending"]').trigger("click");
+    await wrapper.get('[data-memory-id="age-26"] [data-action="confirm"]').trigger("click");
+    await flushPromises();
+
+    expect(document.body.querySelector('[data-memory-conflict-dialog]')?.textContent).toContain("28岁女教师");
+    expect(document.body.querySelector('[data-memory-conflict-dialog]')?.textContent).toContain("26岁男教师");
+    expect(apiMock.post).not.toHaveBeenCalledWith("/api/ai/memories/age-26/confirm", expect.anything());
+
+    await memoryConflictControl("cancel").click();
+    await flushPromises();
+    expect(wrapper.find('[data-memory-id="age-26"]').exists()).toBe(true);
+
+    await wrapper.get('[data-memory-id="age-26"] [data-action="confirm"]').trigger("click");
+    await flushPromises();
+    await memoryConflictControl("replace").click();
+    await flushPromises();
+    expect(apiMock.post).toHaveBeenCalledWith("/api/ai/memories/age-26/confirm", { replaceConflicts: true });
+
+    await wrapper.get('[data-memory-status="active"]').trigger("click");
+    expect(wrapper.text()).toContain("26岁男教师");
+    expect(wrapper.text()).not.toContain("28岁女教师");
+    await wrapper.get('[data-memory-status="deleted"]').trigger("click");
+    expect(wrapper.text()).toContain("28岁女教师");
+    expect(wrapper.text()).not.toContain("26岁男教师");
+    wrapper.unmount();
+  });
+
+  it("keeps the active value and recycles the pending candidate when the user declines replacement", async () => {
+    const oldValue = memory({ id: "grade-4", fieldKey: "grade", content: "四年级" });
+    const candidate = memory({ id: "grade-5", fieldKey: "grade", content: "五年级", status: "pending", source: "inferred_chat" });
+    const records = { pending: [candidate], active: [oldValue], deleted: [] };
+    apiMock.get.mockImplementation(async (path) => {
+      if (path === "/api/ai/memory-settings") return { available: true, enabled: true, effectiveEnabled: true };
+      if (path === "/api/ai/memories?status=pending") return records.pending;
+      if (path === "/api/ai/memories?status=active") return records.active;
+      if (path === "/api/ai/memories?status=deleted") return records.deleted;
+      if (path === "/api/ai/memories/grade-5/confirmation-preview") return { candidate, conflicts: [oldValue], duplicate: false };
+      return [];
+    });
+    apiMock.delete.mockImplementation(async (path) => {
+      if (path === "/api/ai/memories/grade-5") {
+        records.pending = [];
+        records.deleted = [{ ...candidate, status: "deleted" }];
+        return records.deleted[0];
+      }
+      return undefined;
+    });
+
+    const wrapper = mount(MemoryCenter, { attachTo: document.body });
+    await flushPromises();
+    await wrapper.get('[data-memory-status="pending"]').trigger("click");
+    await wrapper.get('[data-memory-id="grade-5"] [data-action="confirm"]').trigger("click");
+    await flushPromises();
+    await memoryConflictControl("keep").click();
+    await flushPromises();
+
+    expect(apiMock.delete).toHaveBeenCalledWith("/api/ai/memories/grade-5");
+    await wrapper.get('[data-memory-status="active"]').trigger("click");
+    expect(wrapper.text()).toContain("四年级");
+    await wrapper.get('[data-memory-status="deleted"]').trigger("click");
+    expect(wrapper.text()).toContain("五年级");
+    expect(wrapper.text()).toContain("已保留了原有记忆");
+    wrapper.unmount();
   });
 });
