@@ -42,6 +42,10 @@ public class StatefulAgentResponse {
 
     private GeneratedTeachingPlanResponse teachingPlan;
 
+    private List<AgentMemoryItem> memoryCandidates = new ArrayList<>();
+
+    private AgentMemoryApplied memoryApplied;
+
     @Data
     public static class ToolExecutionResponse {
         private String name;

@@ -16,6 +16,8 @@ import com.redculture.platform.vo.SchoolMapDetailVO;
 import com.redculture.platform.vo.SchoolResourceItemVO;
 import com.redculture.platform.vo.TeachingActivityPlanAdminVO;
 import com.redculture.platform.vo.ai.AgentActorVO;
+import com.redculture.platform.vo.ai.AgentMemoryApplied;
+import com.redculture.platform.vo.ai.AgentMemoryItem;
 import com.redculture.platform.vo.ai.KnowledgeChunkVO;
 import com.redculture.platform.vo.ai.KnowledgeCitationCandidateVO;
 import com.redculture.platform.vo.ai.KnowledgeGraphFactVO;
@@ -333,6 +335,7 @@ public class AiTeachingPlanServiceImpl implements AiTeachingPlanService {
                     normalizeRawTeachingPlan(rawPlan), GeneratedTeachingPlanResponse.class
             );
             response.setThreadId(textValue(payload.get("threadId"), textValue(responseMap.get("threadId"), "")));
+            applyMemoryMetadata(response, responseMap);
             sendFinalEvent(emitter, finalizeResponse(response, context));
             return true;
         }
@@ -423,6 +426,12 @@ public class AiTeachingPlanServiceImpl implements AiTeachingPlanService {
         agentResponse.put("retrievalStatus", response.getRetrievalStatus());
         agentResponse.put("teachingPlan", response);
         agentResponse.put("citations", response.getCitations());
+        if (response.getMemoryApplied() != null) {
+            agentResponse.put("memoryApplied", response.getMemoryApplied());
+        }
+        if (response.getMemoryCandidates() != null && !response.getMemoryCandidates().isEmpty()) {
+            agentResponse.put("memoryCandidates", response.getMemoryCandidates());
+        }
         sendEvent(emitter, "final", Map.of(
                 "threadId", response.getThreadId() == null ? "" : response.getThreadId(),
                 "response", agentResponse
@@ -444,6 +453,11 @@ public class AiTeachingPlanServiceImpl implements AiTeachingPlanService {
             GeneratedTeachingPlanResponse plan = response.getTeachingPlan();
             if (plan != null) {
                 plan.setThreadId(response.getThreadId());
+                plan.setMemoryApplied(response.getMemoryApplied());
+                if (response.getMemoryCandidates() != null
+                        && !response.getMemoryCandidates().isEmpty()) {
+                    plan.setMemoryCandidates(response.getMemoryCandidates());
+                }
             }
             return plan;
         } catch (Exception exception) {
@@ -485,6 +499,25 @@ public class AiTeachingPlanServiceImpl implements AiTeachingPlanService {
     private String textValue(Object value, String fallback) {
         return StringUtils.hasText(value == null ? null : String.valueOf(value))
                 ? String.valueOf(value) : fallback;
+    }
+
+    private void applyMemoryMetadata(GeneratedTeachingPlanResponse response,
+                                     Map<?, ?> responseMap) {
+        Object rawApplied = responseMap.get("memoryApplied");
+        if (rawApplied instanceof Map<?, ?>) {
+            response.setMemoryApplied(objectMapper.convertValue(
+                    rawApplied, AgentMemoryApplied.class
+            ));
+        }
+        Object rawCandidates = responseMap.get("memoryCandidates");
+        if (rawCandidates instanceof List<?> candidates && !candidates.isEmpty()) {
+            response.setMemoryCandidates(objectMapper.convertValue(
+                    candidates,
+                    objectMapper.getTypeFactory().constructCollectionType(
+                            List.class, AgentMemoryItem.class
+                    )
+            ));
+        }
     }
 
     private String canonicalGenerationStatus(String value, boolean fallback) {

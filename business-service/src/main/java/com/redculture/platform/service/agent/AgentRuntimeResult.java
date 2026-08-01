@@ -1,5 +1,7 @@
 package com.redculture.platform.service.agent;
 
+import com.redculture.platform.vo.ai.AgentMemoryApplied;
+import com.redculture.platform.vo.ai.AgentMemoryItem;
 import lombok.AllArgsConstructor;
 import lombok.Data;
 
@@ -20,10 +22,23 @@ public class AgentRuntimeResult {
 
     private String degradedReason;
 
+    private List<AgentMemoryItem> memoryCandidates = new ArrayList<>();
+
+    private AgentMemoryApplied memoryApplied;
+
     public AgentRuntimeResult(GeneratedAnswer answer,
                               String threadId,
                               String status,
                               List<String> toolExecutions) {
-        this(answer, threadId, status, toolExecutions, null);
+        this(answer, threadId, status, toolExecutions, null, new ArrayList<>(), null);
+    }
+
+    public AgentRuntimeResult(GeneratedAnswer answer,
+                              String threadId,
+                              String status,
+                              List<String> toolExecutions,
+                              String degradedReason) {
+        this(answer, threadId, status, toolExecutions, degradedReason,
+                new ArrayList<>(), null);
     }
 }

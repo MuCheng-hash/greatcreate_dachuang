@@ -1,5 +1,7 @@
 package com.redculture.platform.vo;
 
+import com.redculture.platform.vo.ai.AgentMemoryApplied;
+import com.redculture.platform.vo.ai.AgentMemoryItem;
 import lombok.Data;
 
 import java.util.ArrayList;
@@ -29,6 +31,10 @@ public class GeneratedTeachingPlanResponse {
     private String llmModel;
 
     private Integer fallbackLevel;
+
+    private List<AgentMemoryItem> memoryCandidates;
+
+    private AgentMemoryApplied memoryApplied;
 
     private String message;
 

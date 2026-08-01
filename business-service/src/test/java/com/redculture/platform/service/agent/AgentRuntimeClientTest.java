@@ -77,7 +77,15 @@ class AgentRuntimeClientTest {
         server.createContext("/agent/messages", exchange -> {
             requestBodies.add(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
             receivedTokens.add(exchange.getRequestHeaders().getFirst("X-Agent-Service-Token"));
-            byte[] body = "{\"threadId\":\"thread-1\",\"answer\":\"状态回答\",\"status\":\"completed\",\"citations\":[],\"followUpQuestions\":[],\"toolExecutions\":[]}".getBytes(StandardCharsets.UTF_8);
+            byte[] body = ("{\"threadId\":\"thread-1\",\"answer\":\"状态回答\","
+                    + "\"status\":\"completed\",\"citations\":[],\"followUpQuestions\":[],"
+                    + "\"toolExecutions\":[],\"memoryCandidates\":[{\"id\":\"memory-1\","
+                    + "\"memoryType\":\"PROFILE\",\"content\":\"偏好项目式教学\","
+                    + "\"status\":\"pending\",\"source\":\"inferred_chat\","
+                    + "\"createdAt\":\"2026-07-31T00:00:00Z\","
+                    + "\"updatedAt\":\"2026-07-31T00:00:00Z\"}],"
+                    + "\"memoryApplied\":{\"count\":1,\"memoryIds\":[\"profile-1\"]}}")
+                    .getBytes(StandardCharsets.UTF_8);
             exchange.getResponseHeaders().set("Content-Type", "application/json");
             exchange.sendResponseHeaders(200, body.length);
             try (OutputStream output = exchange.getResponseBody()) {
@@ -139,6 +147,8 @@ class AgentRuntimeClientTest {
             var models = client.listModels();
 
             assertEquals("状态回答", result.getAnswer().getAnswer());
+            assertEquals("memory-1", result.getMemoryCandidates().get(0).getId());
+            assertEquals(1, result.getMemoryApplied().getCount());
             assertEquals(List.of("run.started", "token", "final", "done"),
                     events.stream().map(AgentRuntimeClient.StreamEvent::event).toList());
             assertEquals("deepseek-chat", models.get(0).getModel());

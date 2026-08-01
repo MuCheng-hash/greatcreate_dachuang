@@ -43,6 +43,11 @@ public class AgentAdminController {
         return ApiResponse.success(agentAdminClient.toolTraces(filters));
     }
 
+    @GetMapping("/memory-metrics")
+    public ApiResponse<Map<String, Object>> memoryMetrics() {
+        return ApiResponse.success(agentAdminClient.memoryMetrics());
+    }
+
     @GetMapping("/prompts/{promptKey}/versions")
     public ApiResponse<List<Map<String, Object>>> promptVersions(@PathVariable String promptKey) {
         return ApiResponse.success(agentAdminClient.promptVersions(promptKey));
