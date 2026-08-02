@@ -4,6 +4,7 @@ import { Building2, KeyRound, Save, ShieldCheck, UserRound } from "@lucide/vue";
 import AppShell from "@/components/AppShell.vue";
 import InlineNotice from "@/components/InlineNotice.vue";
 import LoadingBlock from "@/components/LoadingBlock.vue";
+import MemoryCenter from "@/components/MemoryCenter.vue";
 import { api } from "@/services/api";
 import { useAuthStore } from "@/stores/auth";
 import { useSchoolStore } from "@/stores/school";
@@ -67,7 +68,7 @@ function formatDate(value) {
 </script>
 
 <template>
-  <AppShell title="个人中心" subtitle="管理账号联系人信息并查看绑定学校资料">
+  <AppShell title="个人中心" subtitle="管理账号资料、绑定学校与跨会话教学偏好">
     <LoadingBlock v-if="schoolStore.loading && !schoolStore.detail" />
     <div v-else class="profile-layout">
       <section class="profile-summary page-panel">
@@ -102,6 +103,8 @@ function formatDate(value) {
             <div><dt>学校坐标</dt><dd>{{ schoolStore.school?.longitude || "-" }}, {{ schoolStore.school?.latitude || "-" }}</dd></div>
           </dl>
         </section>
+
+        <MemoryCenter />
 
         <section class="page-panel">
           <div class="panel-header"><div><h2>修改密码</h2><p>修改后当前设备仍保持登录。</p></div><KeyRound :size="21" /></div>

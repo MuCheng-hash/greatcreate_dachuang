@@ -9,6 +9,9 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 
 TaskType = Literal["CHAT", "TEACHING_PLAN", "RESOURCE_DISCOVERY"]
+MemoryType = Literal["PROFILE", "TASK"]
+MemoryStatus = Literal["pending", "active", "deleted"]
+MemorySource = Literal["explicit_chat", "inferred_chat", "profile_ui", "teaching_plan"]
 
 
 class ApiModel(BaseModel):
@@ -92,6 +95,104 @@ class ThreadCreateRequest(ApiModel):
         return value
 
 
+class MemorySettingUpdateRequest(ApiModel):
+    owner_id: str = Field(alias="ownerId", min_length=1, max_length=160)
+    scope_type: str = Field(alias="scopeType", min_length=1, max_length=32)
+    scope_id: str | int = Field(alias="scopeId")
+    enabled: bool
+
+    @field_validator("scope_type")
+    @classmethod
+    def normalize_scope(cls, value: str) -> str:
+        value = value.strip().upper()
+        if value not in {"SCHOOL", "REGION", "RESOURCE"}:
+            raise ValueError("scopeType must be SCHOOL, REGION, or RESOURCE")
+        return value
+
+
+class MemorySettingResponse(ApiModel):
+    available: bool
+    enabled: bool
+    effective_enabled: bool = Field(alias="effectiveEnabled")
+    created_at: datetime | None = Field(default=None, alias="createdAt")
+    updated_at: datetime | None = Field(default=None, alias="updatedAt")
+
+
+class MemoryCreateRequest(ApiModel):
+    owner_id: str = Field(alias="ownerId", min_length=1, max_length=160)
+    scope_type: str = Field(alias="scopeType", min_length=1, max_length=32)
+    scope_id: str | int = Field(alias="scopeId")
+    memory_type: MemoryType = Field(alias="memoryType")
+    field_key: str | None = Field(default=None, alias="fieldKey", max_length=64)
+    content: str = Field(min_length=2, max_length=1000)
+    status: MemoryStatus = "active"
+    source: MemorySource = "profile_ui"
+    source_thread_id: str | None = Field(
+        default=None, alias="sourceThreadId", max_length=128
+    )
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    replace_conflicts: bool = Field(default=False, alias="replaceConflicts")
+
+    @field_validator("scope_type")
+    @classmethod
+    def normalize_scope(cls, value: str) -> str:
+        value = value.strip().upper()
+        if value not in {"SCHOOL", "REGION", "RESOURCE"}:
+            raise ValueError("scopeType must be SCHOOL, REGION, or RESOURCE")
+        return value
+
+
+class MemoryUpdateRequest(ApiModel):
+    memory_type: MemoryType | None = Field(default=None, alias="memoryType")
+    field_key: str | None = Field(default=None, alias="fieldKey", max_length=64)
+    content: str | None = Field(default=None, min_length=2, max_length=1000)
+    replace_conflicts: bool = Field(default=False, alias="replaceConflicts")
+
+    @model_validator(mode="after")
+    def require_update(self) -> "MemoryUpdateRequest":
+        if not ({"memory_type", "field_key", "content"} & self.model_fields_set):
+            raise ValueError("at least one memory field is required")
+        return self
+
+
+class MemoryResolutionRequest(ApiModel):
+    replace_conflicts: bool = Field(default=False, alias="replaceConflicts")
+
+
+class MemoryItem(ApiModel):
+    id: str
+    memory_type: MemoryType = Field(alias="memoryType")
+    field_key: str | None = Field(default=None, alias="fieldKey")
+    content: str
+    status: MemoryStatus
+    source: MemorySource
+    source_thread_id: str | None = Field(default=None, alias="sourceThreadId")
+    confidence: float | None = None
+    expires_at: datetime | None = Field(default=None, alias="expiresAt")
+    deleted_at: datetime | None = Field(default=None, alias="deletedAt")
+    purge_after: datetime | None = Field(default=None, alias="purgeAfter")
+    created_at: datetime = Field(alias="createdAt")
+    updated_at: datetime = Field(alias="updatedAt")
+
+
+class MemoryConflictPreviewResponse(ApiModel):
+    candidate: MemoryItem
+    conflicts: list[MemoryItem] = Field(default_factory=list)
+    duplicate: bool = False
+
+
+class MemoryCandidateOutput(ApiModel):
+    memory_type: MemoryType = Field(alias="memoryType")
+    field_key: str | None = Field(default=None, alias="fieldKey", max_length=64)
+    content: str = Field(min_length=2, max_length=1000)
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+
+
+class MemoryApplied(ApiModel):
+    count: int = Field(ge=0)
+    memory_ids: list[str] = Field(default_factory=list, alias="memoryIds")
+
+
 class Citation(ApiModel):
     citation_id: str = Field(alias="citationId")
     title: str | None = None
@@ -115,6 +216,7 @@ class AgentMessageResponse(ApiModel):
         default=None, alias="generationStatus"
     )
     retrieval_status: str | None = Field(default=None, alias="retrievalStatus")
+    retrieval_methods: list[str] = Field(default_factory=list, alias="retrievalMethods")
     provider: str | None = None
     model: str | None = None
     fallback_level: int | str | None = Field(default=None, alias="fallbackLevel")
@@ -126,6 +228,10 @@ class AgentMessageResponse(ApiModel):
     context_compacted: bool = Field(default=False, alias="contextCompacted")
     teaching_plan: dict[str, Any] | None = Field(default=None, alias="teachingPlan")
     resource_discovery: dict[str, Any] | None = Field(default=None, alias="resourceDiscovery")
+    memory_candidates: list[MemoryItem] | None = Field(
+        default=None, alias="memoryCandidates"
+    )
+    memory_applied: MemoryApplied | None = Field(default=None, alias="memoryApplied")
 
 
 class StoredMessage(ApiModel):
@@ -164,3 +270,6 @@ class AgentModelOutput(ApiModel):
     citation_ids: list[str] = Field(default_factory=list, alias="citationIds")
     related_resources: list[str] = Field(default_factory=list, alias="relatedResources")
     follow_up_questions: list[str] = Field(default_factory=list, alias="followUpQuestions")
+    memory_candidates: list[MemoryCandidateOutput] = Field(
+        default_factory=list, alias="memoryCandidates"
+    )

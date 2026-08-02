@@ -2,6 +2,7 @@ package com.redculture.platform.service.agent;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.redculture.platform.config.AgentProperties;
 import com.redculture.platform.config.AppMapProperties;
@@ -9,10 +10,15 @@ import com.redculture.platform.vo.AuthCurrentUserVO;
 import com.redculture.platform.vo.AgentGenerationStatus;
 import com.redculture.platform.vo.ai.StatefulAgentRequest;
 import com.redculture.platform.vo.ai.StatefulAgentResponse;
+import com.redculture.platform.vo.ai.AgentMemoryItem;
+import com.redculture.platform.vo.ai.AgentMemoryConflictPreview;
+import com.redculture.platform.vo.ai.AgentMemorySetting;
 import com.redculture.platform.vo.ai.LlmModelOption;
 import com.redculture.platform.vo.ai.AssistantConversationDetail;
 import com.redculture.platform.vo.ai.AssistantConversationSummary;
 import com.redculture.platform.vo.request.AgentQaRequest;
+import com.redculture.platform.vo.request.AgentMemoryCreateRequest;
+import com.redculture.platform.vo.request.AgentMemoryUpdateRequest;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.http.client.SimpleClientHttpRequestFactory;
@@ -20,12 +26,19 @@ import org.springframework.core.ParameterizedTypeReference;
 import org.springframework.stereotype.Component;
 import org.springframework.util.StringUtils;
 import org.springframework.web.client.RestClient;
+import org.springframework.web.client.RestClientResponseException;
+import org.springframework.web.util.UriBuilder;
+import org.springframework.web.util.UriComponentsBuilder;
 
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -38,6 +51,8 @@ import java.util.function.Consumer;
 public class AgentRuntimeClient {
 
     private final RestClient restClient;
+    private final HttpClient patchHttpClient;
+    private final Duration patchRequestTimeout;
     private final ObjectMapper objectMapper;
     private final AppMapProperties appMapProperties;
     private final String internalServiceToken;
@@ -49,6 +64,18 @@ public class AgentRuntimeClient {
                 .baseUrl(appMapProperties.getLlmServiceBaseUrl())
                 .requestFactory(requestFactory(agentProperties))
                 .build();
+        this.patchHttpClient = HttpClient.newBuilder()
+                .connectTimeout(Duration.ofMillis(Math.max(
+                        1, agentProperties.getConnectTimeoutMs()
+                )))
+                .build();
+        this.patchRequestTimeout = Duration.ofMillis(Math.max(
+                1L,
+                Math.max(
+                        agentProperties.getReadTimeoutMs(),
+                        agentProperties.getStreamTimeoutMs()
+                )
+        ));
         this.objectMapper = objectMapper;
         this.appMapProperties = appMapProperties;
         this.internalServiceToken = agentProperties.getInternalServiceToken();
@@ -83,7 +110,18 @@ public class AgentRuntimeClient {
             AgentGenerationStatus generationStatus = generationStatus(response);
             return new AgentRuntimeResult(
                     new GeneratedAnswer(response.getAnswer(), citationIds, followUps, generationStatus),
-                    response.getThreadId(), response.getStatus(), toolNames
+                    response.getThreadId(),
+                    response.getStatus(),
+                    toolNames,
+                    response.getDegradedReason(),
+                    response.getMemoryCandidates() == null
+                            ? new ArrayList<>() : response.getMemoryCandidates(),
+                    response.getMemoryApplied(),
+                    response.getRetrievalMethods() == null
+                            ? new ArrayList<>() : response.getRetrievalMethods(),
+                    response.getProvider(),
+                    response.getModel(),
+                    response.getFallbackLevel()
             );
         } catch (RuntimeException ignored) {
             return null;
@@ -122,6 +160,189 @@ public class AgentRuntimeClient {
                 .body(new ParameterizedTypeReference<>() {});
         return response == null || response.get("models") == null
                 ? List.of() : response.get("models");
+    }
+
+    public AgentMemorySetting getMemorySetting(
+            String ownerId, String scopeType, Long scopeId) {
+        return restClient.get()
+                .uri(uriBuilder -> uriBuilder.path("/agent/memory-settings")
+                        .queryParam("ownerId", ownerId)
+                        .queryParam("scopeType", scopeType)
+                        .queryParam("scopeId", scopeId)
+                        .build())
+                .headers(this::applyInternalServiceToken)
+                .accept(MediaType.APPLICATION_JSON)
+                .retrieve()
+                .body(AgentMemorySetting.class);
+    }
+
+    public AgentMemorySetting updateMemorySetting(
+            String ownerId, String scopeType, Long scopeId, boolean enabled) {
+        Map<String, Object> body = scopeBody(ownerId, scopeType, scopeId);
+        body.put("enabled", enabled);
+        return restClient.put()
+                .uri("/agent/memory-settings")
+                .headers(this::applyInternalServiceToken)
+                .contentType(MediaType.APPLICATION_JSON)
+                .accept(MediaType.APPLICATION_JSON)
+                .body(body)
+                .retrieve()
+                .body(AgentMemorySetting.class);
+    }
+
+    public List<AgentMemoryItem> listMemories(
+            String ownerId,
+            String scopeType,
+            Long scopeId,
+            String status,
+            String memoryType) {
+        List<AgentMemoryItem> response = restClient.get()
+                .uri(uriBuilder -> {
+                    var builder = uriBuilder.path("/agent/memories")
+                            .queryParam("ownerId", ownerId)
+                            .queryParam("scopeType", scopeType)
+                            .queryParam("scopeId", scopeId);
+                    if (StringUtils.hasText(status)) {
+                        builder.queryParam("status", status);
+                    }
+                    if (StringUtils.hasText(memoryType)) {
+                        builder.queryParam("memoryType", memoryType);
+                    }
+                    return builder.build();
+                })
+                .headers(this::applyInternalServiceToken)
+                .accept(MediaType.APPLICATION_JSON)
+                .retrieve()
+                .body(new ParameterizedTypeReference<>() { });
+        return response == null ? List.of() : response;
+    }
+
+    public AgentMemoryItem createMemory(
+            String ownerId,
+            String scopeType,
+            Long scopeId,
+            AgentMemoryCreateRequest request) {
+        Map<String, Object> body = scopeBody(ownerId, scopeType, scopeId);
+        body.put("memoryType", request.getMemoryType());
+        body.put("fieldKey", request.getFieldKey());
+        body.put("content", request.getContent());
+        body.put("status", "active");
+        body.put("source", "profile_ui");
+        body.put("replaceConflicts", Boolean.TRUE.equals(request.getReplaceConflicts()));
+        try {
+            return restClient.post()
+                    .uri("/agent/memories")
+                    .headers(this::applyInternalServiceToken)
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .accept(MediaType.APPLICATION_JSON)
+                    .body(body)
+                    .retrieve()
+                    .body(AgentMemoryItem.class);
+        } catch (RestClientResponseException exception) {
+            throw translateMemoryConflict(exception);
+        }
+    }
+
+    public AgentMemoryConflictPreview getMemoryConfirmationPreview(
+            String memoryId, String ownerId, String scopeType, Long scopeId) {
+        try {
+            return restClient.get()
+                    .uri(uriBuilder -> scopedMemoryUri(
+                            uriBuilder,
+                            "/agent/memories/{memoryId}/confirmation-preview",
+                            memoryId,
+                            ownerId,
+                            scopeType,
+                            scopeId))
+                    .headers(this::applyInternalServiceToken)
+                    .accept(MediaType.APPLICATION_JSON)
+                    .retrieve()
+                    .body(AgentMemoryConflictPreview.class);
+        } catch (RestClientResponseException exception) {
+            throw translateMemoryConflict(exception);
+        }
+    }
+
+    public AgentMemoryItem updateMemory(
+            String memoryId,
+            String ownerId,
+            String scopeType,
+            Long scopeId,
+            AgentMemoryUpdateRequest request) {
+        Map<String, Object> body = new LinkedHashMap<>();
+        if (request.getMemoryType() != null) {
+            body.put("memoryType", request.getMemoryType());
+        }
+        if (request.getFieldKey() != null) {
+            body.put("fieldKey", request.getFieldKey());
+        }
+        if (request.getContent() != null) {
+            body.put("content", request.getContent());
+        }
+        body.put("replaceConflicts", Boolean.TRUE.equals(request.getReplaceConflicts()));
+        return sendMemoryPatch(
+                "/agent/memories/{memoryId}",
+                memoryId,
+                ownerId,
+                scopeType,
+                scopeId,
+                body
+        );
+    }
+
+    public AgentMemoryItem confirmMemory(
+            String memoryId, String ownerId, String scopeType, Long scopeId) {
+        return confirmMemory(memoryId, ownerId, scopeType, scopeId, false);
+    }
+
+    public AgentMemoryItem confirmMemory(
+            String memoryId,
+            String ownerId,
+            String scopeType,
+            Long scopeId,
+            boolean replaceConflicts) {
+        return postMemoryAction(
+                "/agent/memories/{memoryId}/confirm",
+                memoryId, ownerId, scopeType, scopeId, replaceConflicts);
+    }
+
+    public AgentMemoryItem deleteMemory(
+            String memoryId, String ownerId, String scopeType, Long scopeId) {
+        return restClient.delete()
+                .uri(uriBuilder -> scopedMemoryUri(
+                        uriBuilder, "/agent/memories/{memoryId}",
+                        memoryId, ownerId, scopeType, scopeId))
+                .headers(this::applyInternalServiceToken)
+                .accept(MediaType.APPLICATION_JSON)
+                .retrieve()
+                .body(AgentMemoryItem.class);
+    }
+
+    public AgentMemoryItem restoreMemory(
+            String memoryId, String ownerId, String scopeType, Long scopeId) {
+        return restoreMemory(memoryId, ownerId, scopeType, scopeId, false);
+    }
+
+    public AgentMemoryItem restoreMemory(
+            String memoryId,
+            String ownerId,
+            String scopeType,
+            Long scopeId,
+            boolean replaceConflicts) {
+        return postMemoryAction(
+                "/agent/memories/{memoryId}/restore",
+                memoryId, ownerId, scopeType, scopeId, replaceConflicts);
+    }
+
+    public void permanentlyDeleteMemory(
+            String memoryId, String ownerId, String scopeType, Long scopeId) {
+        restClient.delete()
+                .uri(uriBuilder -> scopedMemoryUri(
+                        uriBuilder, "/agent/memories/{memoryId}/permanent",
+                        memoryId, ownerId, scopeType, scopeId))
+                .headers(this::applyInternalServiceToken)
+                .retrieve()
+                .toBodilessEntity();
     }
 
     public List<AssistantConversationSummary> listConversations(
@@ -267,6 +488,123 @@ public class AgentRuntimeClient {
         return request;
     }
 
+    private Map<String, Object> scopeBody(
+            String ownerId, String scopeType, Long scopeId) {
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("ownerId", ownerId);
+        body.put("scopeType", scopeType);
+        body.put("scopeId", scopeId);
+        return body;
+    }
+
+    private AgentMemoryItem postMemoryAction(
+            String path,
+            String memoryId,
+            String ownerId,
+            String scopeType,
+            Long scopeId,
+            boolean replaceConflicts) {
+        try {
+            return restClient.post()
+                    .uri(uriBuilder -> scopedMemoryUri(
+                            uriBuilder, path, memoryId, ownerId, scopeType, scopeId))
+                    .headers(this::applyInternalServiceToken)
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .accept(MediaType.APPLICATION_JSON)
+                    .body(Map.of("replaceConflicts", replaceConflicts))
+                    .retrieve()
+                    .body(AgentMemoryItem.class);
+        } catch (RestClientResponseException exception) {
+            throw translateMemoryConflict(exception);
+        }
+    }
+
+    private URI scopedMemoryUri(
+            UriBuilder uriBuilder,
+            String path,
+            String memoryId,
+            String ownerId,
+            String scopeType,
+            Long scopeId) {
+        return uriBuilder.path(path)
+                .queryParam("ownerId", ownerId)
+                .queryParam("scopeType", scopeType)
+                .queryParam("scopeId", scopeId)
+                .build(memoryId);
+    }
+
+    private AgentMemoryItem sendMemoryPatch(
+            String path,
+            String memoryId,
+            String ownerId,
+            String scopeType,
+            Long scopeId,
+            Map<String, Object> body) {
+        URI uri = UriComponentsBuilder
+                .fromUriString(appMapProperties.getLlmServiceBaseUrl())
+                .path(path)
+                .queryParam("ownerId", ownerId)
+                .queryParam("scopeType", scopeType)
+                .queryParam("scopeId", scopeId)
+                .buildAndExpand(memoryId)
+                .encode()
+                .toUri();
+        try {
+            HttpRequest.Builder requestBuilder = HttpRequest.newBuilder(uri)
+                    .timeout(patchRequestTimeout)
+                    .header(HttpHeaders.CONTENT_TYPE, MediaType.APPLICATION_JSON_VALUE)
+                    .header(HttpHeaders.ACCEPT, MediaType.APPLICATION_JSON_VALUE)
+                    .method(
+                            "PATCH",
+                            HttpRequest.BodyPublishers.ofString(
+                                    objectMapper.writeValueAsString(body),
+                                    StandardCharsets.UTF_8
+                            )
+                    );
+            if (StringUtils.hasText(internalServiceToken)) {
+                requestBuilder.header("X-Agent-Service-Token", internalServiceToken);
+            }
+            HttpResponse<String> response = patchHttpClient.send(
+                    requestBuilder.build(),
+                    HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8)
+            );
+            if (response.statusCode() == 409) {
+                throw memoryConflictException(response.body());
+            }
+            if (response.statusCode() < 200 || response.statusCode() >= 300) {
+                throw new IllegalStateException(
+                        "agent memory PATCH HTTP " + response.statusCode()
+                );
+            }
+            return objectMapper.readValue(response.body(), AgentMemoryItem.class);
+        } catch (InterruptedException exception) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("agent memory PATCH interrupted", exception);
+        } catch (IOException exception) {
+            throw new IllegalStateException("agent memory PATCH failed", exception);
+        }
+    }
+
+    private RuntimeException translateMemoryConflict(RestClientResponseException exception) {
+        if (exception.getStatusCode().value() != 409) {
+            return exception;
+        }
+        return memoryConflictException(exception.getResponseBodyAsString());
+    }
+
+    private AgentMemoryConflictException memoryConflictException(String payload) {
+        try {
+            JsonNode detail = objectMapper.readTree(payload).path("detail");
+            String message = detail.path("message").asText("记忆字段发生冲突，请先确认是否替换");
+            AgentMemoryConflictPreview preview = detail.has("preview")
+                    ? objectMapper.treeToValue(detail.path("preview"), AgentMemoryConflictPreview.class)
+                    : null;
+            return new AgentMemoryConflictException(message, preview);
+        } catch (JsonProcessingException exception) {
+            return new AgentMemoryConflictException("记忆字段发生冲突，请先确认是否替换", null);
+        }
+    }
+
     private void applyInternalServiceToken(HttpHeaders headers) {
         if (StringUtils.hasText(internalServiceToken)) {
             headers.set("X-Agent-Service-Token", internalServiceToken);
@@ -356,7 +694,9 @@ public class AgentRuntimeClient {
 
     private SimpleClientHttpRequestFactory requestFactory(AgentProperties properties) {
         SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
-        factory.setConnectTimeout(Duration.ofMillis(Math.max(1, properties.getConnectTimeoutMs())));
+        factory.setConnectTimeout(Duration.ofMillis(
+                Math.max(1, properties.getConnectTimeoutMs())
+        ));
         factory.setReadTimeout(Duration.ofMillis(Math.max(
                 1L,
                 Math.max(properties.getReadTimeoutMs(), properties.getStreamTimeoutMs())

@@ -1,5 +1,7 @@
 package com.redculture.platform.vo;
 
+import com.redculture.platform.vo.ai.AgentMemoryApplied;
+import com.redculture.platform.vo.ai.AgentMemoryItem;
 import com.redculture.platform.vo.ai.KnowledgeRetrievalStatus;
 import com.redculture.platform.vo.ai.KnowledgeScopeType;
 import lombok.Data;
@@ -28,7 +30,13 @@ public class AgentQaResponse {
 
     private KnowledgeRetrievalStatus retrievalStatus;
 
+    private List<String> retrievalMethods = new ArrayList<>();
+
     private AgentGenerationStatus generationStatus = AgentGenerationStatus.COMPLETED;
+
+    private String provider;
+
+    private String model;
 
     private KnowledgeScopeType scopeType;
 
@@ -47,4 +55,8 @@ public class AgentQaResponse {
     private List<String> clarificationOptions = new ArrayList<>();
 
     private List<String> toolExecutions = new ArrayList<>();
+
+    private List<AgentMemoryItem> memoryCandidates = new ArrayList<>();
+
+    private AgentMemoryApplied memoryApplied;
 }

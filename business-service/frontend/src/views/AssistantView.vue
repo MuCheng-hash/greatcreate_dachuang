@@ -1,11 +1,13 @@
 <script setup lang="ts">
-import { nextTick, onMounted, reactive, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { Archive, ArchiveRestore, Bot, BrainCircuit, Check, ChevronDown, Clock3, Copy, History, ImagePlus, LoaderCircle, MessageCircleQuestion, Mic, Plus, Send, Sparkles, Trash2, UserRound, Volume2, VolumeX, Wrench, X } from "@lucide/vue";
 import DOMPurify from "dompurify";
 import { marked } from "marked";
 import AppShell from "@/components/AppShell.vue";
 import InlineNotice from "@/components/InlineNotice.vue";
+import MemoryConflictDialog from "@/components/MemoryConflictDialog.vue";
 import { api } from "@/services/api";
+import { memoryApi } from "@/services/memory";
 import { useSchoolStore } from "@/stores/school";
 import { useAuthStore, type AuthCurrentUser } from "@/stores/auth";
 import type {
@@ -15,8 +17,13 @@ import type {
   AgentQaResponse,
   AgentSseEventData,
   AgentSseEventName,
+  AgentMemoryApplied,
+  AgentMemoryConflictPreview,
+  AgentMemoryItem,
+  AgentToolExecution,
   LlmModelOption,
   AssistantConversationDetail,
+  AssistantResponseSnapshot,
   AssistantConversationSummary,
 } from "@/types/agent";
 
@@ -47,6 +54,15 @@ interface AssistantMessage extends AgentQaResponse {
   traceExpanded?: boolean;
   attachments?: AgentAttachment[];
   isStreaming?: boolean;
+}
+
+interface PendingMemoryCandidate {
+  message: AssistantMessage;
+  candidate: AgentMemoryItem;
+}
+
+interface PendingMemoryConflict extends PendingMemoryCandidate {
+  preview: AgentMemoryConflictPreview;
 }
 
 interface StreamRenderState {
@@ -89,12 +105,32 @@ const historyBusyId = ref<string>("");
 const historyMode = ref<HistoryMode>("active");
 const readOnlyConversation = ref<boolean>(false);
 const imageInput = ref<HTMLInputElement | null>(null);
+const composerTextarea = ref<HTMLTextAreaElement | null>(null);
 const pendingImages = ref<AgentAttachment[]>([]);
 const listening = ref(false);
 const speakingIndex = ref<number | null>(null);
 const copiedIndex = ref<number | null>(null);
+const memoryBusyId = ref<string>("");
+const memoryConflict = ref<PendingMemoryConflict | null>(null);
+const memoryConflictBusy = ref(false);
+const memoryConflictError = ref("");
 const recognition = ref<SpeechRecognitionLike | null>(null);
 const streamRenderStates = new WeakMap<object, StreamRenderState>();
+const composerMemoryFeedback = reactive<{
+  tone: "success" | "error";
+  message: string;
+}>({ tone: "success", message: "" });
+let composerMemoryFeedbackTimer: number | null = null;
+const pendingMemoryCandidates = computed<PendingMemoryCandidate[]>(() => {
+  const candidates: PendingMemoryCandidate[] = [];
+  messages.value.forEach((message) => {
+    if (message.role !== "assistant") return;
+    (message.memoryCandidates || []).forEach((candidate) => {
+      if (candidate.status === "pending") candidates.push({ message, candidate });
+    });
+  });
+  return candidates;
+});
 
 const markdownOptions = {
   async: false,
@@ -145,6 +181,10 @@ onMounted(async () => {
   }
 });
 
+onBeforeUnmount(() => {
+  clearComposerMemoryFeedback();
+});
+
 async function loadHistory(mode: HistoryMode = historyMode.value): Promise<void> {
   historyLoading.value = true;
   historyError.value = "";
@@ -171,20 +211,43 @@ async function switchHistoryMode(mode: HistoryMode): Promise<void> {
 async function openConversation(selectedThreadId: string, showError = true): Promise<void> {
   if (!selectedThreadId || historyBusyId.value) return;
   historyBusyId.value = selectedThreadId;
+  clearComposerMemoryFeedback();
   try {
     const detail = await api.get<AssistantConversationDetail>(`/api/ai/qa/history/${selectedThreadId}`);
     const storedMessages = detail.messages.filter((item) => item.role === "user" || item.role === "assistant");
     messages.value = storedMessages.map((item, index) => {
       if (item.role === "user") return { role: "user", text: item.content };
       const previousUser = [...storedMessages.slice(0, index)].reverse().find((candidate) => candidate.role === "user");
-      const storedFollowUps = normalizeFollowUpQuestions(item.metadata?.followUpQuestions, 4, previousUser?.content || "");
+      const metadata = item.metadata || {};
+      const snapshot = normalizeResponseSnapshot(metadata.responseSnapshot);
+      const storedFollowUps = snapshot
+        ? normalizeFollowUpQuestions(snapshot.followUpQuestions, 4, previousUser?.content || "")
+        : normalizeFollowUpQuestions(metadata.followUpQuestions, 4, previousUser?.content || "");
+      const toolExecutions = snapshot?.toolExecutions || normalizeToolExecutions(metadata.toolExecutions);
+      const traceEvents = buildHistoricalTrace(snapshot, toolExecutions);
       return {
         role: "assistant",
         answer: item.content,
-        citations: [],
-        followUpQuestions: storedFollowUps.length
+        status: snapshot?.status || textValue(metadata.status),
+        citations: snapshot?.citations || normalizeCitations(metadata.citations),
+        relatedResources: snapshot?.relatedResources || normalizeStringList(metadata.relatedResources, 8),
+        retrievalStatus: snapshot?.retrievalStatus || textValue(metadata.retrievalStatus),
+        retrievalMethods: snapshot?.retrievalMethods || normalizeStringList(metadata.retrievalMethods, 8),
+        generationStatus: snapshot?.generationStatus || textValue(metadata.generationStatus),
+        fallbackLevel: snapshot?.fallbackLevel ?? null,
+        memoryApplied: snapshot?.memoryApplied || normalizeMemoryApplied(metadata.memoryApplied),
+        followUpQuestions: snapshot
           ? storedFollowUps
-          : previousUser ? buildFollowUpQuestions(previousUser.content) : []
+          : storedFollowUps.length
+          ? storedFollowUps
+          : previousUser ? buildFollowUpQuestions(previousUser.content) : [],
+        toolExecutions,
+        contextCompacted: snapshot?.contextCompacted || false,
+        effectiveModel: snapshot?.model
+          ? `${snapshot.provider || "LLM"} / ${snapshot.model}` : undefined,
+        traceEvents,
+        traceExpanded: false,
+        streamStatus: traceEvents.length ? "历史执行摘要" : undefined,
       };
     });
     threadId.value = detail.threadId;
@@ -212,6 +275,7 @@ function startNewConversation(): void {
   messages.value = [];
   question.value = "";
   error.value = "";
+  clearComposerMemoryFeedback();
   if (wasArchivedMode) {
     history.value = [];
     void loadHistory("active");
@@ -296,7 +360,21 @@ function loadMessages(): AssistantMessage[] {
   }
 }
 
-function retrievalStatusLabel(status?: string | null): string {
+function retrievalStatusLabel(status?: string | null, methods: string[] = []): string {
+  const methodSet = new Set(methods);
+  if (methodSet.has("keyword-fallback")) {
+    return status === "degraded"
+      ? "向量检索未启用或暂不可用，已使用关键词检索"
+      : "已使用关键词检索并完成证据校验";
+  }
+  if (methodSet.has("vector+hybrid-rerank")) {
+    return status === "degraded"
+      ? "向量检索已完成，其他知识组件部分不可用"
+      : "已完成向量检索与证据校验";
+  }
+  if (methodSet.has("knowledge-graph")) {
+    return status === "degraded" ? "图谱证据可用，其他知识组件部分不可用" : "已完成图谱证据校验";
+  }
   const labels: Record<string, string> = {
     ok: "已结合知识检索证据",
     empty: "未检索到直接匹配的知识证据",
@@ -349,6 +427,7 @@ async function ask(text: string = question.value): Promise<void> {
 async function requestAssistant(userText: string, attachments: AgentAttachment[] = []): Promise<void> {
   if (readOnlyConversation.value) return;
   error.value = "";
+  clearComposerMemoryFeedback();
   messages.value.push({ role: "user", text: userText, attachments });
   const assistantMessage = reactive<AssistantMessage>({
     role: "assistant", answer: "", relatedResources: [], citations: [], followUpQuestions: [],
@@ -512,6 +591,7 @@ function applyAssistantResult(message: AssistantMessage, result: Partial<AgentQa
     citations: result?.citations || [],
     followUpQuestions: serverFollowUps.length ? serverFollowUps : buildFollowUpQuestions(userText, relatedResources),
     retrievalStatus: result?.retrievalStatus || null,
+    retrievalMethods: normalizeStringList(result?.retrievalMethods, 8),
     generationStatus: result?.generationStatus || null,
     clarificationRequired: Boolean(result?.clarificationRequired),
     clarificationMessage: result?.clarificationMessage || "",
@@ -519,13 +599,311 @@ function applyAssistantResult(message: AssistantMessage, result: Partial<AgentQa
     conversationId: result?.conversationId || message.conversationId,
     threadId: result?.threadId || message.threadId,
     runId: result?.runId || message.runId,
-    fallbackLevel: result?.fallbackLevel || null,
+    fallbackLevel: result?.fallbackLevel ?? null,
+    memoryCandidates: Array.isArray(result?.memoryCandidates) ? result.memoryCandidates : [],
+    memoryApplied: result?.memoryApplied || null,
+    contextCompacted: Boolean(result?.contextCompacted),
     effectiveModel: result?.model ? `${result.provider || "LLM"} / ${result.model}` : message.effectiveModel,
     streamStatus: result?.generationStatus === "degraded" ? "已使用降级回答" : "回答完成",
     isStreaming: false
   });
   if (result?.conversationId) conversationId.value = result.conversationId;
   if (result?.threadId) threadId.value = result.threadId;
+}
+
+function normalizeMemoryApplied(value: unknown): AgentMemoryApplied | null {
+  if (!value || typeof value !== "object") return null;
+  const candidate = value as { count?: unknown; memoryIds?: unknown };
+  const count = typeof candidate.count === "number" ? candidate.count : 0;
+  const memoryIds = Array.isArray(candidate.memoryIds)
+    ? candidate.memoryIds.filter((item): item is string => typeof item === "string")
+    : [];
+  return count > 0 ? { count, memoryIds } : null;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function textValue(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function normalizeStringList(value: unknown, limit = 8): string[] {
+  if (!Array.isArray(value)) return [];
+  return [...new Set(value
+    .filter((item): item is string => typeof item === "string")
+    .map((item) => item.trim())
+    .filter(Boolean))].slice(0, limit);
+}
+
+function normalizeCitations(value: unknown): AgentCitation[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item) => {
+    if (!isRecord(item)) return [];
+    const citation: AgentCitation = {
+      citationId: textValue(item.citationId) || undefined,
+      title: textValue(item.title),
+      excerpt: textValue(item.excerpt),
+      sourceType: textValue(item.sourceType),
+      score: typeof item.score === "number" && Number.isFinite(item.score) ? item.score : null,
+    };
+    return citation.citationId || citation.title || citation.excerpt ? [citation] : [];
+  }).slice(0, 5);
+}
+
+function normalizeToolExecutions(value: unknown): AgentToolExecution[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item) => {
+    if (typeof item === "string" && item.trim()) {
+      return [{ name: item.trim(), status: "completed" }];
+    }
+    if (!isRecord(item)) return [];
+    const name = textValue(item.name) || textValue(item.toolName);
+    if (!name) return [];
+    const durationMs = typeof item.durationMs === "number" && Number.isFinite(item.durationMs)
+      ? Math.max(0, item.durationMs) : undefined;
+    return [{
+      name,
+      status: textValue(item.status) || "completed",
+      ...(durationMs === undefined ? {} : { durationMs }),
+    }];
+  }).slice(0, 12);
+}
+
+function normalizeResponseSnapshot(value: unknown): AssistantResponseSnapshot | null {
+  if (!isRecord(value)) return null;
+  const memoryApplied = normalizeMemoryApplied(value.memoryApplied);
+  return {
+    schemaVersion: typeof value.schemaVersion === "number" ? value.schemaVersion : undefined,
+    status: textValue(value.status),
+    generationStatus: textValue(value.generationStatus),
+    retrievalStatus: textValue(value.retrievalStatus),
+    retrievalMethods: normalizeStringList(value.retrievalMethods, 8),
+    citations: normalizeCitations(value.citations),
+    relatedResources: normalizeStringList(value.relatedResources, 8),
+    followUpQuestions: normalizeStringList(value.followUpQuestions, 4),
+    provider: textValue(value.provider),
+    model: textValue(value.model),
+    fallbackLevel: typeof value.fallbackLevel === "number" || typeof value.fallbackLevel === "string"
+      ? value.fallbackLevel : null,
+    toolExecutions: normalizeToolExecutions(value.toolExecutions),
+    contextCompacted: value.contextCompacted === true,
+    memoryApplied,
+  };
+}
+
+function buildHistoricalTrace(
+  snapshot: AssistantResponseSnapshot | null,
+  toolExecutions: AgentToolExecution[],
+): AssistantTraceEvent[] {
+  if (!snapshot && !toolExecutions.length) return [];
+  const startedAt = Date.now();
+  const traces: AssistantTraceEvent[] = [];
+  if (snapshot?.contextCompacted) {
+    traces.push({
+      id: "history-context",
+      kind: "phase",
+      title: "会话上下文已压缩",
+      status: "completed",
+      startedAt,
+    });
+  }
+  toolExecutions.forEach((execution, index) => {
+    traces.push({
+      id: `history-tool-${index}`,
+      kind: "tool",
+      title: toolLabel(execution.name || execution.toolName),
+      status: execution.status === "failed" ? "failed" : "completed",
+      durationMs: execution.durationMs,
+      startedAt,
+    });
+  });
+  if (snapshot?.model) {
+    traces.push({
+      id: "history-model",
+      kind: "model",
+      title: "生成模型已响应",
+      detail: `${snapshot.provider || "LLM"} / ${snapshot.model}`,
+      status: "completed",
+      startedAt,
+    });
+  }
+  if (snapshot) {
+    traces.push({
+      id: "history-response",
+      kind: "response",
+      title: "回答生成完成",
+      status: snapshot.status === "incomplete" ? "failed" : "completed",
+      startedAt,
+    });
+  }
+  return traces;
+}
+
+async function confirmMemoryCandidate(
+  message: AssistantMessage,
+  candidate: AgentMemoryItem,
+): Promise<void> {
+  if (memoryBusyId.value || memoryConflict.value) return;
+  memoryBusyId.value = candidate.id;
+  clearComposerMemoryFeedback();
+  try {
+    const preview = await memoryApi.confirmationPreview(candidate.id);
+    if (preview.duplicate) {
+      const result = await memoryApi.confirm(candidate.id);
+      await completeMemoryCandidateConfirmation(message, candidate, result);
+      return;
+    }
+    if (preview.conflicts.length) {
+      memoryConflictError.value = "";
+      memoryConflict.value = { message, candidate, preview };
+      return;
+    }
+    const result = await memoryApi.confirm(candidate.id);
+    await completeMemoryCandidateConfirmation(message, candidate, result);
+  } catch (candidateError) {
+    if (await reopenMemoryConflictIfNeeded(message, candidate)) return;
+    showComposerMemoryFeedback(
+      "error",
+      candidateError instanceof Error ? candidateError.message : "确认记忆失败，请稍后重试。",
+    );
+  } finally {
+    memoryBusyId.value = "";
+  }
+}
+
+async function ignoreMemoryCandidate(
+  message: AssistantMessage,
+  candidate: AgentMemoryItem,
+): Promise<void> {
+  if (memoryBusyId.value || memoryConflict.value) return;
+  memoryBusyId.value = candidate.id;
+  clearComposerMemoryFeedback();
+  try {
+    await memoryApi.recycle(candidate.id);
+    removeMemoryCandidate(message, candidate.id);
+    showComposerMemoryFeedback("success", "已忽略这条候选记忆，可在个人中心回收站恢复。");
+    await focusComposerAfterLastMemoryCandidate();
+  } catch (candidateError) {
+    showComposerMemoryFeedback(
+      "error",
+      candidateError instanceof Error ? candidateError.message : "忽略记忆失败，请稍后重试。",
+    );
+  } finally {
+    memoryBusyId.value = "";
+  }
+}
+
+async function completeMemoryCandidateConfirmation(
+  message: AssistantMessage,
+  candidate: AgentMemoryItem,
+  result: AgentMemoryItem,
+): Promise<void> {
+  removeMemoryCandidate(message, candidate.id);
+  showComposerMemoryFeedback(
+    "success",
+    result.status === "deleted"
+      ? "该记忆已存在，已保留已有值并将候选移入回收站。"
+      : "已确认并保存这条记忆。",
+  );
+  await focusComposerAfterLastMemoryCandidate();
+}
+
+async function reopenMemoryConflictIfNeeded(
+  message: AssistantMessage,
+  candidate: AgentMemoryItem,
+): Promise<boolean> {
+  try {
+    const preview = await memoryApi.confirmationPreview(candidate.id);
+    if (!preview.duplicate && preview.conflicts.length) {
+      memoryConflictError.value = "";
+      memoryConflict.value = { message, candidate, preview };
+      return true;
+    }
+  } catch {
+    // 保留原始请求错误，避免二次预检错误覆盖可读的失败原因。
+  }
+  return false;
+}
+
+function closeMemoryConflict(): void {
+  if (memoryConflictBusy.value) return;
+  memoryConflictError.value = "";
+  memoryConflict.value = null;
+}
+
+async function keepExistingMemoryConflict(): Promise<void> {
+  const conflict = memoryConflict.value;
+  if (!conflict || memoryConflictBusy.value) return;
+  memoryConflictBusy.value = true;
+  memoryConflictError.value = "";
+  try {
+    await memoryApi.recycle(conflict.candidate.id);
+    removeMemoryCandidate(conflict.message, conflict.candidate.id);
+    memoryConflict.value = null;
+    showComposerMemoryFeedback("success", "已保留了原有记忆，这条候选已移入回收站。");
+    await focusComposerAfterLastMemoryCandidate();
+  } catch (candidateError) {
+    memoryConflictError.value = candidateError instanceof Error ? candidateError.message : "保留旧值失败，请稍后重试。";
+  } finally {
+    memoryConflictBusy.value = false;
+  }
+}
+
+async function replaceMemoryConflict(): Promise<void> {
+  const conflict = memoryConflict.value;
+  if (!conflict || memoryConflictBusy.value) return;
+  memoryConflictBusy.value = true;
+  memoryConflictError.value = "";
+  try {
+    const result = await memoryApi.confirm(conflict.candidate.id, true);
+    removeMemoryCandidate(conflict.message, conflict.candidate.id);
+    memoryConflict.value = null;
+    showComposerMemoryFeedback(
+      "success",
+      result.status === "deleted"
+        ? "该记忆已存在，已保留已有值并将候选移入回收站。"
+        : "已用新值替换旧记忆，旧值已移入回收站。",
+    );
+    await focusComposerAfterLastMemoryCandidate();
+  } catch (candidateError) {
+    memoryConflictError.value = candidateError instanceof Error ? candidateError.message : "替换旧值失败，请稍后重试。";
+  } finally {
+    memoryConflictBusy.value = false;
+  }
+}
+
+function removeMemoryCandidate(message: AssistantMessage, id: string): void {
+  message.memoryCandidates = (message.memoryCandidates || []).filter((item) => item.id !== id);
+}
+
+function clearComposerMemoryFeedback(): void {
+  if (composerMemoryFeedbackTimer !== null) {
+    window.clearTimeout(composerMemoryFeedbackTimer);
+    composerMemoryFeedbackTimer = null;
+  }
+  composerMemoryFeedback.message = "";
+}
+
+function showComposerMemoryFeedback(tone: "success" | "error", message: string): void {
+  clearComposerMemoryFeedback();
+  composerMemoryFeedback.tone = tone;
+  composerMemoryFeedback.message = message;
+  if (tone === "success") {
+    composerMemoryFeedbackTimer = window.setTimeout(() => {
+      composerMemoryFeedbackTimer = null;
+      if (composerMemoryFeedback.tone === "success" && composerMemoryFeedback.message === message) {
+        composerMemoryFeedback.message = "";
+      }
+    }, 5_000);
+  }
+}
+
+async function focusComposerAfterLastMemoryCandidate(): Promise<void> {
+  if (pendingMemoryCandidates.value.length) return;
+  await nextTick();
+  composerTextarea.value?.focus();
 }
 
 function getStreamRenderState(message: AssistantMessage): StreamRenderState {
@@ -680,6 +1058,7 @@ function traceIcon(kind: AssistantTraceEvent["kind"]) {
 function toolLabel(toolName?: string): string {
   const labels: Record<string, string> = {
     "get_scope_context": "查看学校上下文",
+    "get_school_context": "查看学校上下文",
     "search_approved_resources": "检索已审核资源",
     "retrieve_knowledge": "检索知识库",
     "query_graph_relations": "查询知识关系",
@@ -836,6 +1215,7 @@ function clearChat(): void {
   pendingImages.value = [];
   speakingIndex.value = null;
   copiedIndex.value = null;
+  clearComposerMemoryFeedback();
   messages.value = [];
   threadId.value = "";
   readOnlyConversation.value = false;
@@ -919,8 +1299,11 @@ function clearChat(): void {
                 </div>
               </section>
               <div v-else-if="message.streamStatus" class="agent-stream-status">{{ message.streamStatus }}</div>
-              <div v-if="message.effectiveModel" class="agent-stream-status">实际模型：{{ message.effectiveModel }}</div>
-              <p v-if="message.retrievalStatus" class="retrieval-status" :class="retrievalStatusClass(message.retrievalStatus)">{{ retrievalStatusLabel(message.retrievalStatus) }}</p>
+              <div v-if="message.isStreaming && message.effectiveModel" class="agent-stream-status">实际模型：{{ message.effectiveModel }}</div>
+              <p v-if="message.memoryApplied?.count" class="memory-applied">
+                <BrainCircuit :size="14" />本次参考 {{ message.memoryApplied.count }} 条记忆
+              </p>
+              <p v-if="message.retrievalStatus" class="retrieval-status" :class="retrievalStatusClass(message.retrievalStatus)">{{ retrievalStatusLabel(message.retrievalStatus, message.retrievalMethods) }}</p>
               <p v-if="message.generationStatus" class="generation-status" :class="generationStatusClass(message.generationStatus)">{{ generationStatusLabel(message.generationStatus) }}</p>
               <div v-if="message.clarificationRequired" class="clarification"><strong>需要补充：</strong>{{ message.clarificationMessage || "请补充具体学校名称。" }}<span v-if="message.clarificationOptions?.length">可选：{{ message.clarificationOptions.join("、") }}</span></div>
               <p v-if="message.relatedResources?.length" class="related"><strong>关联资源：</strong>{{ message.relatedResources.join("、") }}</p>
@@ -948,6 +1331,46 @@ function clearChat(): void {
           <div v-if="!messages.length && !loading" class="empty-state"><MessageCircleQuestion :size="42" /><span>选择建议问题或输入你想了解的内容</span></div>
           </div>
         </div>
+        <section
+          v-if="pendingMemoryCandidates.length || composerMemoryFeedback.message"
+          class="composer-memory-suggestions"
+          :class="{ 'composer-memory-suggestions-error': composerMemoryFeedback.tone === 'error' }"
+          aria-label="待确认的记忆建议"
+        >
+          <div v-if="pendingMemoryCandidates.length" class="composer-memory-heading">
+            <div>
+              <strong><BrainCircuit :size="17" />待确认的记忆建议（{{ pendingMemoryCandidates.length }}）</strong>
+              <p>确认后才会作为跨会话记忆使用。</p>
+            </div>
+          </div>
+          <div v-if="pendingMemoryCandidates.length" class="composer-memory-candidates">
+            <article
+              v-for="item in pendingMemoryCandidates"
+              :key="item.candidate.id"
+              class="composer-memory-candidate-card"
+              :data-memory-id="item.candidate.id"
+            >
+              <div class="composer-memory-candidate-content">
+                <span class="composer-memory-type">{{ item.candidate.memoryType === "PROFILE" ? "用户画像" : "阶段任务" }}</span>
+                <p>{{ item.candidate.content }}</p>
+              </div>
+              <div class="composer-memory-candidate-actions">
+                <button data-action="confirm" type="button" :disabled="Boolean(memoryBusyId) || Boolean(memoryConflict) || readOnlyConversation" @click="confirmMemoryCandidate(item.message, item.candidate)">
+                  <Check :size="14" />确认
+                </button>
+                <button data-action="ignore" type="button" :disabled="Boolean(memoryBusyId) || Boolean(memoryConflict) || readOnlyConversation" @click="ignoreMemoryCandidate(item.message, item.candidate)">
+                  <X :size="14" />忽略
+                </button>
+              </div>
+            </article>
+          </div>
+          <p
+            v-if="composerMemoryFeedback.message"
+            class="composer-memory-feedback"
+            :class="`composer-memory-feedback-${composerMemoryFeedback.tone}`"
+            :role="composerMemoryFeedback.tone === 'error' ? 'alert' : 'status'"
+          >{{ composerMemoryFeedback.message }}</p>
+        </section>
         <form class="chat-composer" :class="{ 'chat-composer-readonly': readOnlyConversation }" @submit.prevent="ask()">
           <div v-if="pendingImages.length" class="pending-images">
             <div v-for="(attachment,index) in pendingImages" :key="attachment.name + index">
@@ -955,7 +1378,7 @@ function clearChat(): void {
               <button type="button" title="移除图片" aria-label="移除图片" :disabled="readOnlyConversation" @click="removeImage(index)"><X :size="14" /></button>
             </div>
           </div>
-          <textarea v-model="question" rows="2" :disabled="readOnlyConversation || loading" :placeholder="readOnlyConversation ? '归档对话仅供查看，请先恢复对话' : '输入关于学校资源或教学活动的问题'" @keydown.ctrl.enter.prevent="ask()"></textarea>
+          <textarea ref="composerTextarea" v-model="question" rows="2" :disabled="readOnlyConversation || loading" :placeholder="readOnlyConversation ? '归档对话仅供查看，请先恢复对话' : '输入关于学校资源或教学活动的问题'" @keydown.ctrl.enter.prevent="ask()"></textarea>
           <div class="composer-toolbar">
             <div class="composer-tools">
               <input ref="imageInput" class="visually-hidden" type="file" accept="image/jpeg,image/png,image/webp,image/gif" multiple @change="addImages" />
@@ -979,6 +1402,16 @@ function clearChat(): void {
       </div>
     </section>
   </AppShell>
+  <MemoryConflictDialog
+    :open="Boolean(memoryConflict)"
+    :candidate="memoryConflict?.candidate || null"
+    :conflicts="memoryConflict?.preview.conflicts || []"
+    :busy="memoryConflictBusy"
+    :error-message="memoryConflictError"
+    @cancel="closeMemoryConflict"
+    @keep="keepExistingMemoryConflict"
+    @replace="replaceMemoryConflict"
+  />
 </template>
 
 <style scoped>
@@ -1014,7 +1447,7 @@ function clearChat(): void {
 .history-restore:hover { background: var(--green-soft); }
 .assistant-side-actions { display: flex; flex: 0 0 auto; flex-direction: column; gap: 8px; margin-top: auto; }
 .clear-button { justify-content: flex-start; margin-top: 0; color: var(--muted); }
-.chat-area { min-width: 0; min-height: 0; display: grid; grid-template-rows: minmax(0,1fr) auto; overflow: hidden; }
+.chat-area { min-width: 0; min-height: 0; display: grid; grid-template-rows: minmax(0,1fr) auto auto; overflow: hidden; }
 .chat-main { min-width: 0; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
 .archived-banner { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 14px; border-bottom: 1px solid var(--line); background: #fff9e8; color: #75602a; font-size: 12px; }
 .archived-banner > span { display: flex; align-items: center; gap: 6px; }
@@ -1057,6 +1490,7 @@ function clearChat(): void {
 .message-action:hover, .message-action.copied { color: var(--green); background: #fff; }
 .message-audio { margin-top: 0; }
 .agent-stream-status { margin-top: 8px; color: var(--muted); font-size: 12px; }
+.memory-applied { display: flex; align-items: center; gap: 5px; margin-top: 9px !important; color: var(--green); font-size: 12px; font-weight: 650; }
 .agent-trace { margin-top: 10px; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
 .agent-trace-toggle { display: flex; width: 100%; min-height: 38px; align-items: center; justify-content: space-between; gap: 10px; padding: 0; border: 0; background: transparent; color: #526158; font-size: 12px; cursor: pointer; }
 .agent-trace-toggle > span { display: flex; min-width: 0; align-items: center; gap: 7px; overflow-wrap: anywhere; }
@@ -1096,6 +1530,25 @@ function clearChat(): void {
 .follow-ups button { min-height: 30px; padding: 0 9px; border: 1px solid #bdd1c3; border-radius: 4px; background: #fff; color: var(--green); cursor: pointer; font-size: 12px; }
 .follow-ups button:hover:not(:disabled) { border-color: var(--green); background: var(--green-soft); }
 .follow-ups button:disabled { cursor: not-allowed; opacity: .58; }
+.composer-memory-suggestions { display: grid; gap: 9px; padding: 12px 14px; border-top: 1px solid #bbd8c2; border-bottom: 1px solid #cfe0d3; background: linear-gradient(90deg, #edf7ef 0%, #f8fbf8 68%); }
+.composer-memory-suggestions-error { border-color: #efc7c2; background: linear-gradient(90deg, #fff4f2 0%, #fffafa 68%); }
+.composer-memory-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.composer-memory-heading strong { display: flex; align-items: center; gap: 7px; color: #275f44; font-size: 14px; }
+.composer-memory-heading p { margin: 4px 0 0; color: #587060; font-size: 12px; line-height: 1.5; }
+.composer-memory-candidates { display: grid; gap: 7px; }
+.composer-memory-candidate-card { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 10px 11px; border: 1px solid #b8d5bf; border-radius: 8px; background: #fff; box-shadow: 0 1px 2px rgba(31, 75, 51, .05); }
+.composer-memory-candidate-content { min-width: 0; }
+.composer-memory-type { display: inline-flex; align-items: center; min-height: 20px; padding: 0 7px; border-radius: 999px; background: #e4f1e7; color: #2b704c; font-size: 11px; font-weight: 700; }
+.composer-memory-candidate-content p { margin: 5px 0 0; color: var(--text); font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
+.composer-memory-candidate-actions { display: flex; flex: none; gap: 6px; }
+.composer-memory-candidate-actions button { display: inline-flex; min-height: 32px; align-items: center; justify-content: center; gap: 5px; padding: 0 10px; border: 1px solid #2e7650; border-radius: 6px; background: var(--green); color: #fff; cursor: pointer; font-size: 12px; font-weight: 650; }
+.composer-memory-candidate-actions button:last-child { border-color: #c7d3c9; background: #fff; color: #5d6a61; }
+.composer-memory-candidate-actions button:hover:not(:disabled) { filter: brightness(.96); }
+.composer-memory-candidate-actions button:focus-visible { outline: 3px solid rgba(46, 118, 80, .25); outline-offset: 2px; }
+.composer-memory-candidate-actions button:disabled { cursor: not-allowed; opacity: .52; }
+.composer-memory-feedback { margin: 0; font-size: 12px; line-height: 1.5; }
+.composer-memory-feedback-success { color: #28704b; }
+.composer-memory-feedback-error { color: #ad3e35; }
 .chat-composer { display: grid; grid-template-columns: minmax(0,1fr); gap: 8px; padding: 10px 14px 12px; border-top: 1px solid var(--line); background: #fff; }
 .chat-composer-readonly { background: #f8f9f7; }
 .pending-images { grid-column: 1 / -1; display: flex; gap: 8px; overflow-x: auto; }
@@ -1138,5 +1591,9 @@ function clearChat(): void {
   .composer-icon { width: 32px; height: 36px; }
   .send-button { width: 40px; min-height: 40px; }
   .message-images img { width: 108px; height: 80px; }
+  .composer-memory-suggestions { padding: 10px; }
+  .composer-memory-candidate-card { align-items: stretch; flex-direction: column; }
+  .composer-memory-candidate-actions { width: 100%; }
+  .composer-memory-candidate-actions button { flex: 1 1 0; }
 }
 </style>

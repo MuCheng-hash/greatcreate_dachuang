@@ -138,6 +138,7 @@ public class DatabaseKnowledgeRetriever implements KnowledgeRetriever {
                     !chunks.isEmpty() || !context.graphFacts().isEmpty() || !candidates.isEmpty(),
                     context.graphUnavailable() || chunkLoad.degraded()
             ));
+            result.refreshRetrievalMethods();
             return result;
         } catch (RuntimeException exception) {
             return KnowledgeRetrieveResult.degraded();

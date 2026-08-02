@@ -36,7 +36,9 @@ TEACHING_PLAN_STRING_FIELDS = frozenset({
 })
 
 
-def task_context(request: AgentMessageRequest) -> dict[str, Any]:
+def task_context(
+    request: AgentMessageRequest, memory_prompt: str = ""
+) -> dict[str, Any]:
     trusted = request.context
     retrieval = trusted.retrieval or {}
     payload = request.task_payload or {}
@@ -54,6 +56,8 @@ def task_context(request: AgentMessageRequest) -> dict[str, Any]:
     }
     if request.task_type == "RESOURCE_DISCOVERY":
         context["candidates"] = (payload.get("candidates") or [])[:20]
+    elif request.task_type == "TEACHING_PLAN" and memory_prompt:
+        context["userMemory"] = memory_prompt
     return context
 
 

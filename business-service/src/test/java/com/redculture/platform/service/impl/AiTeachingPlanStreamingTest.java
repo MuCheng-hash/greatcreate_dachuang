@@ -54,7 +54,12 @@ class AiTeachingPlanStreamingTest {
                     + "\"llmModel\":\"qwen-plus\",\"provider\":\"openai-compatible\"}}\n\n"
                     + "event: final\ndata: {\"threadId\":\"thread-1\",\"response\":{"
                     + "\"taskType\":\"TEACHING_PLAN\",\"answer\":\"done\",\"status\":\"completed\","
-                    + "\"generationStatus\":\"success\",\"teachingPlan\":{"
+                    + "\"generationStatus\":\"success\","
+                    + "\"memoryApplied\":{\"count\":2,\"memoryIds\":[\"profile-1\",\"task-1\"]},"
+                    + "\"memoryCandidates\":[{\"id\":\"candidate-1\",\"memoryType\":\"TASK\","
+                    + "\"content\":\"本月完成一次成果展\",\"status\":\"pending\","
+                    + "\"source\":\"teaching_plan\",\"createdAt\":\"2026-08-01T00:00:00Z\","
+                    + "\"updatedAt\":\"2026-08-01T00:00:00Z\"}],\"teachingPlan\":{"
                     + "\"generationStatus\":\"success\",\"message\":\"done\","
                     + "\"theme\":\"家乡文化\",\"grade\":\"四年级\",\"citations\":[],"
                     + "\"activityFlow\":[{\"time\":\"0-20分钟\",\"content\":\"校内集合并完成导入\"}]}}}\n\n"
@@ -119,6 +124,8 @@ class AiTeachingPlanStreamingTest {
                     .andExpect(content().string(containsString("\"teachingPlan\"")))
                     .andExpect(content().string(containsString("\"generationStatus\":\"completed\"")))
                     .andExpect(content().string(containsString("\"retrievalStatus\":\"ok\"")))
+                    .andExpect(content().string(containsString("\"memoryApplied\"")))
+                    .andExpect(content().string(containsString("\"memoryCandidates\"")))
                     .andReturn();
             String responseBody = streamingResult.getResponse().getContentAsString();
             assertFalse(responseBody.contains("event:token"));

@@ -22,6 +22,8 @@ public class StatefulAgentResponse {
 
     private String retrievalStatus;
 
+    private List<String> retrievalMethods = new ArrayList<>();
+
     private String provider;
 
     private String model;
@@ -41,6 +43,10 @@ public class StatefulAgentResponse {
     private boolean contextCompacted;
 
     private GeneratedTeachingPlanResponse teachingPlan;
+
+    private List<AgentMemoryItem> memoryCandidates = new ArrayList<>();
+
+    private AgentMemoryApplied memoryApplied;
 
     @Data
     public static class ToolExecutionResponse {

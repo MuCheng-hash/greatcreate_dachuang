@@ -25,6 +25,8 @@ import com.redculture.platform.vo.LocalEduResourceSummaryVO;
 import com.redculture.platform.vo.SchoolMapDetailVO;
 import com.redculture.platform.vo.SchoolResourceItemVO;
 import com.redculture.platform.vo.SchoolSummaryVO;
+import com.redculture.platform.vo.ai.AgentMemoryApplied;
+import com.redculture.platform.vo.ai.AgentMemoryItem;
 import com.redculture.platform.vo.ai.KnowledgeRetrieveRequest;
 import com.redculture.platform.vo.ai.KnowledgeRetrieveResult;
 import com.redculture.platform.vo.ai.KnowledgeRetrievalStatus;
@@ -329,6 +331,12 @@ public class AgentQaServiceImpl implements AgentQaService {
         response.setRetrievalStatus("degraded".equalsIgnoreCase(remoteRetrievalStatus)
                 || StringUtils.hasText(response.getDegradedReason())
                 ? KnowledgeRetrievalStatus.DEGRADED : retrieval.getRetrievalStatus());
+        List<String> remoteRetrievalMethods = textList(responseMap.get("retrievalMethods"));
+        response.setRetrievalMethods(remoteRetrievalMethods.isEmpty()
+                ? retrieval.getRetrievalMethods() : remoteRetrievalMethods);
+        response.setProvider(textValue(responseMap.get("provider")));
+        response.setModel(textValue(responseMap.get("model")));
+        response.setFallbackLevel(textValue(responseMap.get("fallbackLevel")));
         AgentGenerationStatus generationStatus = "completed".equalsIgnoreCase(response.getStatus())
                 ? AgentGenerationStatus.COMPLETED : AgentGenerationStatus.DEGRADED;
         response.setGenerationStatus(generationStatus);
@@ -342,6 +350,8 @@ public class AgentQaServiceImpl implements AgentQaService {
         response.setRelatedResources(textList(responseMap.get("relatedResources")));
         response.setFollowUpQuestions(followUps);
         response.setToolExecutions(toolNames(responseMap.get("toolExecutions")));
+        response.setMemoryCandidates(memoryItems(responseMap.get("memoryCandidates")));
+        response.setMemoryApplied(memoryApplied(responseMap.get("memoryApplied")));
         normalized.put("threadId", response.getThreadId());
         normalized.put("response", response);
         return normalized;
@@ -391,6 +401,61 @@ public class AgentQaServiceImpl implements AgentQaService {
                 .map(this::textValue)
                 .filter(StringUtils::hasText)
                 .toList();
+    }
+
+    private List<AgentMemoryItem> memoryItems(Object value) {
+        if (!(value instanceof List<?> values)) {
+            return new ArrayList<>();
+        }
+        List<AgentMemoryItem> items = new ArrayList<>();
+        for (Object valueItem : values) {
+            if (!(valueItem instanceof Map<?, ?> map)) {
+                continue;
+            }
+            AgentMemoryItem item = new AgentMemoryItem();
+            item.setId(textValue(map.get("id")));
+            item.setMemoryType(textValue(map.get("memoryType")));
+            item.setFieldKey(textValue(map.get("fieldKey")));
+            item.setContent(textValue(map.get("content")));
+            item.setStatus(textValue(map.get("status")));
+            item.setSource(textValue(map.get("source")));
+            item.setSourceThreadId(textValue(map.get("sourceThreadId")));
+            item.setConfidence(doubleValue(map.get("confidence")));
+            item.setExpiresAt(textValue(map.get("expiresAt")));
+            item.setDeletedAt(textValue(map.get("deletedAt")));
+            item.setPurgeAfter(textValue(map.get("purgeAfter")));
+            item.setCreatedAt(textValue(map.get("createdAt")));
+            item.setUpdatedAt(textValue(map.get("updatedAt")));
+            items.add(item);
+        }
+        return items;
+    }
+
+    private AgentMemoryApplied memoryApplied(Object value) {
+        if (!(value instanceof Map<?, ?> map)) {
+            return null;
+        }
+        AgentMemoryApplied applied = new AgentMemoryApplied();
+        Object count = map.get("count");
+        if (count instanceof Number number) {
+            applied.setCount(number.intValue());
+        }
+        applied.setMemoryIds(textList(map.get("memoryIds")));
+        return applied;
+    }
+
+    private Double doubleValue(Object value) {
+        if (value instanceof Number number) {
+            return number.doubleValue();
+        }
+        if (value instanceof String text && StringUtils.hasText(text)) {
+            try {
+                return Double.valueOf(text);
+            } catch (NumberFormatException ignored) {
+                return null;
+            }
+        }
+        return null;
     }
 
     private String firstText(Object first, Object fallback) {
@@ -493,6 +558,12 @@ public class AgentQaServiceImpl implements AgentQaService {
         response.setAnswer(StringUtils.hasText(generated.getAnswer()) ? generated.getAnswer() : "暂时无法生成回答。");
         response.setIntent(intent);
         response.setRetrievalStatus(retrieval.getRetrievalStatus());
+        response.setRetrievalMethods(remote == null || remote.getRetrievalMethods() == null
+                || remote.getRetrievalMethods().isEmpty()
+                ? retrieval.getRetrievalMethods() : remote.getRetrievalMethods());
+        response.setProvider(remote == null ? null : remote.getProvider());
+        response.setModel(remote == null ? null : remote.getModel());
+        response.setFallbackLevel(remote == null ? null : remote.getFallbackLevel());
         response.setGenerationStatus(generated.getGenerationStatus() == null
                 ? AgentGenerationStatus.COMPLETED
                 : generated.getGenerationStatus());
@@ -509,6 +580,9 @@ public class AgentQaServiceImpl implements AgentQaService {
             response.setRetrievalStatus(KnowledgeRetrievalStatus.DEGRADED);
         }
         response.setToolExecutions(remote == null ? new ArrayList<>() : nonNullList(remote.getToolExecutions()));
+        response.setMemoryCandidates(remote == null || remote.getMemoryCandidates() == null
+                ? new ArrayList<>() : remote.getMemoryCandidates());
+        response.setMemoryApplied(remote == null ? null : remote.getMemoryApplied());
         return response;
     }
 
@@ -732,6 +806,7 @@ public class AgentQaServiceImpl implements AgentQaService {
                     || !result.getCitationCandidates().isEmpty();
             result.setRetrievalStatus(hasEvidence ? KnowledgeRetrievalStatus.OK : KnowledgeRetrievalStatus.EMPTY);
         }
+        result.refreshRetrievalMethods();
         return result;
     }
 

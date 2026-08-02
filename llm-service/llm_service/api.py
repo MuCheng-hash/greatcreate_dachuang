@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import hmac
+import logging
 import secrets
 import sqlite3
+from contextlib import asynccontextmanager, suppress
 from typing import Any, Literal
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse, StreamingResponse
 
@@ -21,8 +24,32 @@ from .observability import FallbackAlertManager, LlmObservability
 from .repository import ThreadNotFoundError, ThreadScopeError
 from .routes import health_router
 from .runtime import AgentRuntime
-from .schemas import AgentMessageRequest, AgentMessageResponse, StoredMessage, ThreadCreateRequest, ThreadResponse, ThreadSummaryResponse
+from .schemas import (
+    AgentMessageRequest,
+    AgentMessageResponse,
+    MemoryConflictPreviewResponse,
+    MemoryCreateRequest,
+    MemoryItem,
+    MemoryResolutionRequest,
+    MemorySettingResponse,
+    MemorySettingUpdateRequest,
+    MemoryUpdateRequest,
+    StoredMessage,
+    ThreadCreateRequest,
+    ThreadResponse,
+    ThreadSummaryResponse,
+)
 from .settings import Settings, get_settings
+from .user_memory import (
+    MemoryConflictError,
+    MemoryNotFoundError,
+    MemoryRecord,
+    MemoryStateError,
+    MemoryValidationError,
+)
+
+
+LOGGER = logging.getLogger("llm.stateful_agent.api")
 
 
 def _thread_response(runtime: AgentRuntime, record: Any, include_messages: bool = True) -> ThreadResponse:
@@ -38,6 +65,52 @@ def _thread_response(runtime: AgentRuntime, record: Any, include_messages: bool 
         scopeId=record.scope_id, status=record.status, summary=record.summary,
         createdAt=record.created_at, updatedAt=record.updated_at, messages=messages,
     )
+
+
+def _memory_response(record: MemoryRecord) -> MemoryItem:
+    return MemoryItem(
+        id=record.id,
+        memoryType=record.memory_type,
+        fieldKey=record.field_key,
+        content=record.content,
+        status=record.status,
+        source=record.source,
+        sourceThreadId=record.source_thread_id,
+        confidence=record.confidence,
+        expiresAt=record.expires_at,
+        deletedAt=record.deleted_at,
+        purgeAfter=record.purge_after,
+        createdAt=record.created_at,
+        updatedAt=record.updated_at,
+    )
+
+
+def _memory_conflict_preview_response(preview: Any) -> MemoryConflictPreviewResponse:
+    return MemoryConflictPreviewResponse(
+        candidate=_memory_response(preview.candidate),
+        conflicts=[_memory_response(item) for item in preview.conflicts],
+        duplicate=preview.duplicate,
+    )
+
+
+def _raise_memory_http_error(exc: Exception) -> None:
+    if isinstance(exc, MemoryConflictError):
+        preview = _memory_conflict_preview_response(exc.preview)
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "memory_conflict",
+                "message": str(exc),
+                "preview": preview.model_dump(mode="json", by_alias=True),
+            },
+        ) from exc
+    if isinstance(exc, MemoryNotFoundError):
+        raise HTTPException(status_code=404, detail="memory not found") from exc
+    if isinstance(exc, MemoryStateError):
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if isinstance(exc, MemoryValidationError):
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    raise exc
 
 
 def create_app(
@@ -58,11 +131,39 @@ def create_app(
     model = container.model_gateway
     prompts = container.prompts
     runtime = container.runtime
+    memory_repository = container.memory_repository
     legacy_runtime = container.legacy_agent_runtime
-    app = FastAPI(title="Red Culture Stateful Agent", version="2.0.0")
+
+    async def memory_cleanup_loop() -> None:
+        interval = max(1, settings.agent_memory_cleanup_interval_seconds)
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                memory_repository.cleanup_expired()
+            except Exception:
+                LOGGER.exception("agent_memory_cleanup_failed")
+
+    @asynccontextmanager
+    async def lifespan(application: FastAPI):
+        memory_repository.cleanup_expired()
+        cleanup_task = asyncio.create_task(memory_cleanup_loop())
+        application.state.memory_cleanup_task = cleanup_task
+        try:
+            yield
+        finally:
+            cleanup_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await cleanup_task
+
+    app = FastAPI(
+        title="Red Culture Stateful Agent",
+        version="2.0.0",
+        lifespan=lifespan,
+    )
     app.state.container = container
     app.state.settings = settings
     app.state.runtime = runtime
+    app.state.memory_repository = memory_repository
     app.state.model = model
     app.state.prompts = prompts
     app.state.observability = observability
@@ -103,7 +204,7 @@ def create_app(
             CORSMiddleware,
             allow_origins=settings.allowed_origins,
             allow_credentials=True,
-            allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+            allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
             allow_headers=[
                 "Authorization", "Content-Type", "X-Agent-Service-Token",
                 "X-Prompt-Admin-Token", "X-Observability-Admin-Token",
@@ -116,6 +217,244 @@ def create_app(
     )
     async def list_models() -> dict[str, list[dict[str, Any]]]:
         return {"models": model.model_catalog()}
+
+    @app.get(
+        "/agent/memory-settings",
+        response_model=MemorySettingResponse,
+        dependencies=[Depends(require_internal_agent_token)],
+    )
+    async def get_memory_setting(
+        owner_id: str = Query(alias="ownerId"),
+        scope_type: Literal["SCHOOL", "REGION", "RESOURCE"] = Query(alias="scopeType"),
+        scope_id: str = Query(alias="scopeId"),
+    ) -> MemorySettingResponse:
+        try:
+            record = memory_repository.get_setting(owner_id, scope_type, scope_id)
+        except MemoryValidationError as exc:
+            _raise_memory_http_error(exc)
+        return MemorySettingResponse(
+            available=settings.agent_memory_enabled,
+            enabled=record.enabled,
+            effectiveEnabled=settings.agent_memory_enabled and record.enabled,
+            createdAt=record.created_at,
+            updatedAt=record.updated_at,
+        )
+
+    @app.put(
+        "/agent/memory-settings",
+        response_model=MemorySettingResponse,
+        dependencies=[Depends(require_internal_agent_token)],
+    )
+    async def update_memory_setting(
+        request: MemorySettingUpdateRequest,
+    ) -> MemorySettingResponse:
+        try:
+            record = memory_repository.update_setting(
+                request.owner_id,
+                request.scope_type,
+                request.scope_id,
+                request.enabled,
+            )
+        except MemoryValidationError as exc:
+            _raise_memory_http_error(exc)
+        return MemorySettingResponse(
+            available=settings.agent_memory_enabled,
+            enabled=record.enabled,
+            effectiveEnabled=settings.agent_memory_enabled and record.enabled,
+            createdAt=record.created_at,
+            updatedAt=record.updated_at,
+        )
+
+    @app.get(
+        "/agent/memories",
+        response_model=list[MemoryItem],
+        dependencies=[Depends(require_internal_agent_token)],
+    )
+    async def list_memories(
+        owner_id: str = Query(alias="ownerId"),
+        scope_type: Literal["SCHOOL", "REGION", "RESOURCE"] = Query(alias="scopeType"),
+        scope_id: str = Query(alias="scopeId"),
+        status: Literal["pending", "active", "deleted"] | None = Query(default=None),
+        memory_type: Literal["PROFILE", "TASK"] | None = Query(
+            default=None, alias="memoryType"
+        ),
+        limit: int = Query(default=200, ge=1, le=500),
+    ) -> list[MemoryItem]:
+        try:
+            memory_repository.maybe_cleanup()
+            records = memory_repository.list_memories(
+                owner_id,
+                scope_type,
+                scope_id,
+                status=status,
+                memory_type=memory_type,
+                limit=limit,
+            )
+        except MemoryValidationError as exc:
+            _raise_memory_http_error(exc)
+        return [_memory_response(record) for record in records]
+
+    @app.post(
+        "/agent/memories",
+        response_model=MemoryItem,
+        status_code=201,
+        dependencies=[Depends(require_internal_agent_token)],
+    )
+    async def create_memory(request: MemoryCreateRequest) -> MemoryItem:
+        try:
+            record = memory_repository.create_memory(
+                request.owner_id,
+                request.scope_type,
+                request.scope_id,
+                memory_type=request.memory_type,
+                field_key=request.field_key,
+                content=request.content,
+                status=request.status,
+                source=request.source,
+                source_thread_id=request.source_thread_id,
+                confidence=request.confidence,
+                replace_conflicts=request.replace_conflicts,
+            )
+        except (MemoryConflictError, MemoryValidationError) as exc:
+            _raise_memory_http_error(exc)
+        return _memory_response(record)
+
+    @app.get(
+        "/agent/memories/{memory_id}/confirmation-preview",
+        response_model=MemoryConflictPreviewResponse,
+        dependencies=[Depends(require_internal_agent_token)],
+    )
+    async def confirmation_preview(
+        memory_id: str,
+        owner_id: str = Query(alias="ownerId"),
+        scope_type: Literal["SCHOOL", "REGION", "RESOURCE"] = Query(alias="scopeType"),
+        scope_id: str = Query(alias="scopeId"),
+    ) -> MemoryConflictPreviewResponse:
+        try:
+            preview = memory_repository.confirmation_preview(
+                owner_id, scope_type, scope_id, memory_id
+            )
+        except (MemoryNotFoundError, MemoryValidationError) as exc:
+            _raise_memory_http_error(exc)
+        return _memory_conflict_preview_response(preview)
+
+    @app.patch(
+        "/agent/memories/{memory_id}",
+        response_model=MemoryItem,
+        dependencies=[Depends(require_internal_agent_token)],
+    )
+    async def update_memory(
+        memory_id: str,
+        request: MemoryUpdateRequest,
+        owner_id: str = Query(alias="ownerId"),
+        scope_type: Literal["SCHOOL", "REGION", "RESOURCE"] = Query(alias="scopeType"),
+        scope_id: str = Query(alias="scopeId"),
+    ) -> MemoryItem:
+        updates: dict[str, Any] = {}
+        if "content" in request.model_fields_set:
+            updates["content"] = request.content
+        if "memory_type" in request.model_fields_set:
+            updates["memory_type"] = request.memory_type
+        if "field_key" in request.model_fields_set:
+            updates["field_key"] = request.field_key
+        try:
+            record = memory_repository.update_memory(
+                owner_id,
+                scope_type,
+                scope_id,
+                memory_id,
+                replace_conflicts=request.replace_conflicts,
+                **updates,
+            )
+        except (MemoryConflictError, MemoryNotFoundError, MemoryStateError, MemoryValidationError) as exc:
+            _raise_memory_http_error(exc)
+        return _memory_response(record)
+
+    @app.post(
+        "/agent/memories/{memory_id}/confirm",
+        response_model=MemoryItem,
+        dependencies=[Depends(require_internal_agent_token)],
+    )
+    async def confirm_memory(
+        memory_id: str,
+        request: MemoryResolutionRequest | None = None,
+        owner_id: str = Query(alias="ownerId"),
+        scope_type: Literal["SCHOOL", "REGION", "RESOURCE"] = Query(alias="scopeType"),
+        scope_id: str = Query(alias="scopeId"),
+    ) -> MemoryItem:
+        try:
+            record = memory_repository.confirm_memory(
+                owner_id,
+                scope_type,
+                scope_id,
+                memory_id,
+                replace_conflicts=request.replace_conflicts if request else False,
+            )
+        except (MemoryConflictError, MemoryNotFoundError, MemoryStateError, MemoryValidationError) as exc:
+            _raise_memory_http_error(exc)
+        return _memory_response(record)
+
+    @app.delete(
+        "/agent/memories/{memory_id}",
+        response_model=MemoryItem,
+        dependencies=[Depends(require_internal_agent_token)],
+    )
+    async def delete_memory(
+        memory_id: str,
+        owner_id: str = Query(alias="ownerId"),
+        scope_type: Literal["SCHOOL", "REGION", "RESOURCE"] = Query(alias="scopeType"),
+        scope_id: str = Query(alias="scopeId"),
+    ) -> MemoryItem:
+        try:
+            record = memory_repository.delete_memory(
+                owner_id, scope_type, scope_id, memory_id
+            )
+        except (MemoryNotFoundError, MemoryValidationError) as exc:
+            _raise_memory_http_error(exc)
+        return _memory_response(record)
+
+    @app.post(
+        "/agent/memories/{memory_id}/restore",
+        response_model=MemoryItem,
+        dependencies=[Depends(require_internal_agent_token)],
+    )
+    async def restore_memory(
+        memory_id: str,
+        request: MemoryResolutionRequest | None = None,
+        owner_id: str = Query(alias="ownerId"),
+        scope_type: Literal["SCHOOL", "REGION", "RESOURCE"] = Query(alias="scopeType"),
+        scope_id: str = Query(alias="scopeId"),
+    ) -> MemoryItem:
+        try:
+            record = memory_repository.restore_memory(
+                owner_id,
+                scope_type,
+                scope_id,
+                memory_id,
+                replace_conflicts=request.replace_conflicts if request else False,
+            )
+        except (MemoryConflictError, MemoryNotFoundError, MemoryStateError, MemoryValidationError) as exc:
+            _raise_memory_http_error(exc)
+        return _memory_response(record)
+
+    @app.delete(
+        "/agent/memories/{memory_id}/permanent",
+        status_code=204,
+        dependencies=[Depends(require_internal_agent_token)],
+    )
+    async def permanently_delete_memory(
+        memory_id: str,
+        owner_id: str = Query(alias="ownerId"),
+        scope_type: Literal["SCHOOL", "REGION", "RESOURCE"] = Query(alias="scopeType"),
+        scope_id: str = Query(alias="scopeId"),
+    ) -> Response:
+        try:
+            memory_repository.permanent_delete(
+                owner_id, scope_type, scope_id, memory_id
+            )
+        except (MemoryNotFoundError, MemoryStateError, MemoryValidationError) as exc:
+            _raise_memory_http_error(exc)
+        return Response(status_code=204)
 
     @app.get("/metrics", response_class=PlainTextResponse)
     async def metrics() -> str:
@@ -171,6 +510,12 @@ def create_app(
         _admin: None = Depends(require_observability_admin),
     ) -> list[dict[str, Any]]:
         return repository.list_tool_audits(tool_name, status, limit)
+
+    @app.get("/admin/memory-metrics")
+    async def memory_metrics(
+        _admin: None = Depends(require_observability_admin),
+    ) -> dict[str, Any]:
+        return memory_repository.aggregate_metrics()
 
     @app.post(
         "/agent/threads", response_model=ThreadResponse, status_code=201,
@@ -232,6 +577,8 @@ def create_app(
             return await runtime.handle(request)
         except (ThreadNotFoundError, ThreadScopeError) as exc:
             raise HTTPException(status_code=404, detail="thread not found") from exc
+        except MemoryValidationError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     @app.post(
         "/agent/messages", response_model=AgentMessageResponse,
@@ -243,6 +590,8 @@ def create_app(
             return await runtime.handle(request)
         except (ThreadNotFoundError, ThreadScopeError) as exc:
             raise HTTPException(status_code=404, detail="thread not found") from exc
+        except MemoryValidationError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     @app.post(
         "/agent/messages/stream", response_class=StreamingResponse,

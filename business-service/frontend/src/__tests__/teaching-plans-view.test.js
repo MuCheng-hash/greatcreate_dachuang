@@ -24,10 +24,15 @@ describe("teaching plans view", () => {
       : { records: [] });
   });
 
-  it("forwards the selected model for teaching plan generation", async () => {
+  it("shows the selected actual model only while the teaching plan is generating", async () => {
+    let releaseFinal;
+    const finalGate = new Promise((resolve) => {
+      releaseFinal = resolve;
+    });
     apiMock.stream.mockImplementation(async (_path, body, options) => {
       expect(body.modelId).toBe("ernie");
       options.onEvent("model.completed", { provider: "qianfan", model: "ernie-test" });
+      await finalGate;
       options.onEvent("final", {
         response: { teachingPlan: { generationStatus: "completed", theme: "测试", grade: "四年级", durationMinutes: 40 } }
       });
@@ -37,10 +42,50 @@ describe("teaching plans view", () => {
     });
     await flushPromises();
     await wrapper.findAll("select")[1].setValue("ernie");
+    const submission = wrapper.get("form").trigger("submit.prevent");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(wrapper.text()).toContain("qianfan / ernie-test");
+
+    releaseFinal();
+    await submission;
+    await flushPromises();
+
+    expect(wrapper.text()).not.toContain("qianfan / ernie-test");
+  });
+
+  it("hides the actual model after teaching-plan generation fails", async () => {
+    apiMock.stream.mockImplementation(async (_path, _body, options) => {
+      options.onEvent("model.completed", { provider: "qianfan", model: "ernie-test" });
+      throw new Error("stream unavailable");
+    });
+    const wrapper = mount(TeachingPlansView, {
+      global: { stubs: { AppShell: { template: "<div><slot /></div>" }, InlineNotice: true, LoadingBlock: true } }
+    });
+    await flushPromises();
     await wrapper.get("form").trigger("submit.prevent");
     await flushPromises();
 
-    expect(wrapper.text()).toContain("qianfan / ernie-test");
+    expect(wrapper.text()).not.toContain("实际模型：qianfan / ernie-test");
+  });
+
+  it("hides the actual model immediately when teaching-plan generation is stopped", async () => {
+    apiMock.stream.mockImplementation(async (_path, _body, options) => {
+      options.onEvent("model.completed", { provider: "qianfan", model: "ernie-test" });
+      await new Promise(() => {});
+    });
+    const wrapper = mount(TeachingPlansView, {
+      global: { stubs: { AppShell: { template: "<div><slot /></div>" }, InlineNotice: true, LoadingBlock: true } }
+    });
+    await flushPromises();
+    await wrapper.get("form").trigger("submit.prevent");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(wrapper.text()).toContain("实际模型：qianfan / ernie-test");
+    await wrapper.get(".secondary-button.full-button").trigger("click");
+    await flushPromises();
+
+    expect(wrapper.text()).not.toContain("实际模型：qianfan / ernie-test");
   });
 
   it("renders structured plan patches before the stream finishes", async () => {
@@ -110,7 +155,7 @@ describe("teaching plans view", () => {
 
   it("uses a Chinese degraded notice without exposing backend model errors", async () => {
     apiMock.stream.mockImplementation(async (path, body, options) => {
-      options.onEvent("model.started", { model: "qwen-plus" });
+      options.onEvent("model.completed", { provider: "qianfan", model: "qwen-plus" });
       options.onEvent("final", {
         threadId: "thread-teaching-plan-degraded",
         response: {

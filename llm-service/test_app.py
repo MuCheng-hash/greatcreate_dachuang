@@ -18,7 +18,7 @@ from llm_service.prompt_manager import PromptManager
 from llm_service.planner import AgentPlan
 from llm_service.runtime import AgentRuntime
 from llm_service.model_gateway import ModelGateway
-from llm_service.schemas import AgentMessageRequest, TrustedContext
+from llm_service.schemas import AgentMessageRequest, MemoryApplied, ToolExecution, TrustedContext
 from llm_service.settings import Settings
 from llm_service.structured_tasks import (
     IncrementalTeachingPlanParser,
@@ -109,7 +109,10 @@ def message_payload(**overrides):
             "resources": [{"resource": {"resourceName": "红色纪念馆"}}],
             "retrieval": {
                 "retrievalStatus": "ok",
-                "chunks": [{"citationId": "chunk:1", "title": "馆史", "text": "纪念馆资料"}],
+                "chunks": [{
+                    "citationId": "chunk:1", "title": "馆史", "text": "纪念馆资料",
+                    "retrievalMethod": "vector+hybrid-rerank",
+                }],
             },
             "citationCandidates": [{"citationId": "chunk:1", "title": "馆史", "excerpt": "纪念馆资料"}],
         },
@@ -340,8 +343,12 @@ def test_new_thread_and_multiturn_persistence(tmp_path: Path):
             params={"ownerId": "school-user:1", "scopeType": "SCHOOL", "scopeId": 1},
         ).json()
         assert [item["role"] for item in stored["messages"]] == ["user", "assistant", "user", "assistant"]
-        assert data["followUpQuestions"]
-        assert stored["messages"][1]["metadata"]["followUpQuestions"] == data["followUpQuestions"]
+    assert data["followUpQuestions"]
+    assert stored["messages"][1]["metadata"]["followUpQuestions"] == data["followUpQuestions"]
+    snapshot = stored["messages"][1]["metadata"]["responseSnapshot"]
+    assert snapshot["schemaVersion"] == 1
+    assert snapshot["retrievalMethods"] == ["vector+hybrid-rerank"]
+    assert snapshot["generationStatus"] == data["generationStatus"]
 
 
 def test_unknown_greeting_creates_and_persists_thread(tmp_path: Path):
@@ -409,9 +416,10 @@ def test_stateful_stream_emits_events_and_persists_final_response(tmp_path: Path
             params={"ownerId": "school-user:1", "scopeType": "SCHOOL", "scopeId": 1},
         ).json()
         assert [item["role"] for item in stored["messages"]] == ["user", "assistant"]
-        assert stored["messages"][-1]["content"] == final_data["response"]["answer"]
-        assert final_data["response"]["followUpQuestions"]
-        assert stored["messages"][-1]["metadata"]["followUpQuestions"] == final_data["response"]["followUpQuestions"]
+    assert stored["messages"][-1]["content"] == final_data["response"]["answer"]
+    assert final_data["response"]["followUpQuestions"]
+    assert stored["messages"][-1]["metadata"]["followUpQuestions"] == final_data["response"]["followUpQuestions"]
+    assert stored["messages"][-1]["metadata"]["responseSnapshot"]["schemaVersion"] == 1
 
 
 def test_teaching_plan_and_resource_discovery_streams_use_unified_protocol(tmp_path: Path):
@@ -851,6 +859,74 @@ def test_model_output_filters_invented_citations(tmp_path: Path):
     response = asyncio.run(runtime.handle(AgentMessageRequest.model_validate(message_payload())))
     assert response.status == "completed"
     assert [item.citation_id for item in response.citations] == ["chunk:1"]
+
+
+def test_grounded_response_persists_deterministic_sanitized_snapshot(tmp_path: Path):
+    settings = settings_for(tmp_path)
+    repository = ConversationRepository(settings.database_path)
+    runtime = AgentRuntime(settings, repository)
+    thread = repository.create_thread("school-user:1", "SCHOOL", 1)
+    trusted = TrustedContext.model_validate({
+        "retrieval": {
+            "retrievalStatus": "degraded",
+            "chunks": [{
+                "citationId": "chunk:1",
+                "title": "关键词资料",
+                "text": "可信的关键词资料",
+                "retrievalMethod": "keyword-fallback",
+            }],
+            "graphFacts": [{"citationId": "graph:1", "text": "可信图谱事实"}],
+        },
+        "citationCandidates": [{
+            "citationId": "source:1",
+            "title": "审核来源",
+            "excerpt": "审核摘要",
+            "sourceType": "approved_source",
+        }],
+    })
+    result = runtime._response_from_model_result(
+        {"messages": [AIMessage(content=json.dumps({
+            "answer": "基于可信证据回答。",
+            "citationIds": [],
+            "relatedResources": ["常安镇敬老院"],
+            "followUpQuestions": ["还能如何开展活动？"],
+        }, ensure_ascii=False))]},
+        trusted,
+        thread.thread_id,
+        True,
+        [ToolExecution(name="get_school_context", status="completed", durationMs=7)],
+    )
+    result.provider = "openai-compatible"
+    result.model = "qwen-test"
+    result.fallback_level = 0
+    result.memory_applied = MemoryApplied(count=2, memoryIds=["profile-1", "task-1"])
+
+    runtime._persist_response(thread, result)
+    stored = repository.list_messages(thread.thread_id)[-1]
+    snapshot = stored["metadata"]["responseSnapshot"]
+
+    assert [item.citation_id for item in result.citations] == ["chunk:1", "graph:1", "source:1"]
+    assert result.retrieval_methods == ["keyword-fallback", "knowledge-graph"]
+    assert snapshot == {
+        "schemaVersion": 1,
+        "status": "completed",
+        "generationStatus": "completed",
+        "retrievalStatus": "degraded",
+        "retrievalMethods": ["keyword-fallback", "knowledge-graph"],
+        "citations": [item.model_dump(by_alias=True) for item in result.citations],
+        "relatedResources": ["常安镇敬老院"],
+        "followUpQuestions": result.follow_up_questions,
+        "provider": "openai-compatible",
+        "model": "qwen-test",
+        "fallbackLevel": 0,
+        "toolExecutions": [{"name": "get_school_context", "status": "completed", "durationMs": 7}],
+        "contextCompacted": True,
+        "memoryApplied": {"count": 2, "memoryIds": ["profile-1", "task-1"]},
+    }
+    serialized = json.dumps(snapshot, ensure_ascii=False)
+    assert "outputSummary" not in serialized
+    assert "traceEvents" not in serialized
+    assert "正在" not in serialized
 
 
 def test_agent_prompt_allows_markdown_answer_without_changing_json_contract(tmp_path: Path):

@@ -18,6 +18,8 @@ public class KnowledgeRetrieveResult {
 
     private List<KnowledgeCitationCandidateVO> citationCandidates = new ArrayList<>();
 
+    private List<String> retrievalMethods = new ArrayList<>();
+
     public static KnowledgeRetrieveResult empty() {
         KnowledgeRetrieveResult result = new KnowledgeRetrieveResult();
         result.setRetrievalStatus(KnowledgeRetrievalStatus.EMPTY);
@@ -43,6 +45,20 @@ public class KnowledgeRetrieveResult {
                     .filter(this::hasText).forEach(ids::add);
         }
         return ids;
+    }
+
+    public void refreshRetrievalMethods() {
+        Set<String> methods = new LinkedHashSet<>();
+        if (chunks != null) {
+            chunks.stream()
+                    .map(KnowledgeChunkVO::getRetrievalMethod)
+                    .filter(this::hasText)
+                    .forEach(methods::add);
+        }
+        if (graphFacts != null && !graphFacts.isEmpty()) {
+            methods.add("knowledge-graph");
+        }
+        retrievalMethods = new ArrayList<>(methods);
     }
 
     private boolean hasText(String value) {

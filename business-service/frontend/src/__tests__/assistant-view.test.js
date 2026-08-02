@@ -16,6 +16,14 @@ vi.mock("@/stores/school", () => ({ useSchoolStore: () => schoolMock }));
 
 import AssistantView from "@/views/AssistantView.vue";
 
+function memoryConflictControl(action) {
+  const element = document.body.querySelector(`[data-memory-conflict-${action}]`);
+  if (!(element instanceof HTMLButtonElement)) {
+    throw new Error(`未找到记忆冲突弹窗按钮：${action}`);
+  }
+  return element;
+}
+
 describe("assistant view", () => {
   beforeEach(() => {
     sessionStorage.clear();
@@ -24,7 +32,7 @@ describe("assistant view", () => {
     schoolMock.load.mockResolvedValue(schoolMock);
     apiMock.get.mockImplementation(async (path) => path === "/api/ai/models" ? [
       { id: "deepseek", displayName: "DeepSeek", provider: "deepseek", model: "deepseek-chat", isDefault: true }
-    ] : []);
+    ] : path.includes("/confirmation-preview") ? { candidate: {}, conflicts: [], duplicate: false } : []);
     apiMock.delete.mockResolvedValue(undefined);
     apiMock.post.mockResolvedValue({
       threadId: "thread-1",
@@ -86,6 +94,82 @@ describe("assistant view", () => {
     await flushPromises();
     expect(apiMock.delete).toHaveBeenCalledWith("/api/ai/qa/history/history-1");
     expect(wrapper.find(".history-row").exists()).toBe(false);
+  });
+
+  it("restores rich result snapshots after switching conversations without exposing raw tool output", async () => {
+    const summaries = [
+      { threadId: "history-a", title: "问题 A", preview: "回答 A", messageCount: 2, scopeType: "SCHOOL", scopeId: "1", createdAt: "2026-07-28T00:00:00Z", updatedAt: "2026-07-28T02:00:00Z" },
+      { threadId: "history-b", title: "问题 B", preview: "回答 B", messageCount: 2, scopeType: "SCHOOL", scopeId: "1", createdAt: "2026-07-28T00:00:00Z", updatedAt: "2026-07-28T01:00:00Z" },
+    ];
+    const richMetadata = {
+      responseSnapshot: {
+        schemaVersion: 1,
+        status: "completed",
+        generationStatus: "completed",
+        retrievalStatus: "degraded",
+        retrievalMethods: ["keyword-fallback"],
+        citations: [{ citationId: "chunk:1", title: "历史来源", excerpt: "可信摘要" }],
+        relatedResources: ["常安镇敬老院"],
+        followUpQuestions: ["历史追问 A"],
+        provider: "openai-compatible",
+        model: "qwen-test",
+        fallbackLevel: 0,
+        toolExecutions: [{ name: "get_school_context", status: "completed", durationMs: 7, outputSummary: "RAW_SCHOOL_JSON" }],
+        contextCompacted: true,
+        memoryApplied: { count: 2, memoryIds: ["profile-1", "task-1"] },
+      },
+      memoryCandidates: [{
+        id: "historical-candidate",
+        memoryType: "PROFILE",
+        fieldKey: "grade",
+        content: "不应由历史恢复的候选",
+        status: "pending",
+        source: "inferred_chat",
+      }],
+    };
+    apiMock.get.mockImplementation(async (path) => {
+      if (path === "/api/ai/models") return [];
+      if (path === "/api/ai/qa/history") return summaries;
+      if (path === "/api/ai/qa/history/history-a") return {
+        ...summaries[0], status: "active", messages: [
+          { id: 1, role: "user", content: "问题 A", createdAt: "2026-07-28T00:00:00Z" },
+          { id: 2, role: "assistant", content: "回答 A", createdAt: "2026-07-28T00:01:00Z", metadata: richMetadata },
+        ],
+      };
+      if (path === "/api/ai/qa/history/history-b") return {
+        ...summaries[1], status: "active", messages: [
+          { id: 3, role: "user", content: "问题 B", createdAt: "2026-07-28T01:00:00Z" },
+          { id: 4, role: "assistant", content: "回答 B", createdAt: "2026-07-28T01:01:00Z", metadata: {} },
+        ],
+      };
+      return [];
+    });
+    const wrapper = mount(AssistantView, {
+      global: { stubs: { AppShell: { template: "<div><slot /></div>" }, InlineNotice: true } },
+    });
+    await flushPromises();
+    const historyButtons = wrapper.findAll(".history-open");
+
+    await historyButtons[0].trigger("click");
+    await flushPromises();
+    expect(wrapper.text()).toContain("历史来源");
+    expect(wrapper.text()).toContain("向量检索未启用或暂不可用，已使用关键词检索");
+    expect(wrapper.text()).not.toContain("实际模型：openai-compatible / qwen-test");
+    expect(wrapper.text()).toContain("本次参考 2 条记忆");
+    expect(wrapper.find(".composer-memory-suggestions").exists()).toBe(false);
+    expect(wrapper.text()).toContain("常安镇敬老院");
+    expect(wrapper.text()).toContain("历史追问 A");
+    expect(wrapper.get(".agent-trace-toggle").attributes("aria-expanded")).toBe("false");
+    expect(wrapper.find(".agent-trace-list").exists()).toBe(false);
+
+    await historyButtons[1].trigger("click");
+    await flushPromises();
+    expect(wrapper.text()).toContain("回答 B");
+    await historyButtons[0].trigger("click");
+    await flushPromises();
+    await wrapper.get(".agent-trace-toggle").trigger("click");
+    expect(wrapper.text()).toContain("查看学校上下文");
+    expect(wrapper.text()).not.toContain("RAW_SCHOOL_JSON");
   });
 
   it("groups school explanation and clear actions at the bottom of the sidebar", async () => {
@@ -220,10 +304,15 @@ describe("assistant view", () => {
     expect(apiMock.post).toHaveBeenCalled();
   });
 
-  it("loads and forwards the selected model", async () => {
+  it("shows the selected actual model only while the answer is streaming", async () => {
+    let releaseFinal;
+    const finalGate = new Promise((resolve) => {
+      releaseFinal = resolve;
+    });
     apiMock.stream = vi.fn(async (_path, body, options) => {
       expect(body.modelId).toBe("deepseek");
       options.onEvent("model.completed", { provider: "deepseek", model: "deepseek-chat" });
+      await finalGate;
       options.onEvent("final", { response: { answer: "模型回答", generationStatus: "completed" } });
     });
     const wrapper = mount(AssistantView, {
@@ -234,10 +323,38 @@ describe("assistant view", () => {
     expect(wrapper.find(".assistant-side .composer-model-select").exists()).toBe(false);
     await wrapper.get(".composer-model-select").setValue("deepseek");
     await wrapper.get("textarea").setValue("测试模型切换");
-    await wrapper.get("form").trigger("submit.prevent");
+    const submission = wrapper.get("form").trigger("submit.prevent");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(wrapper.text()).toContain("实际模型：deepseek / deepseek-chat");
+
+    releaseFinal();
+    await submission;
     await flushPromises();
 
-    expect(wrapper.text()).toContain("deepseek / deepseek-chat");
+    expect(wrapper.text()).not.toContain("实际模型：deepseek / deepseek-chat");
+  });
+
+  it("hides the actual model after stopping an active stream", async () => {
+    apiMock.stream = vi.fn(async (_path, _body, options) => {
+      options.onEvent("model.completed", { provider: "deepseek", model: "deepseek-chat" });
+      options.onEvent("token", { delta: "部分回答" });
+      await new Promise(() => {});
+    });
+    const wrapper = mount(AssistantView, {
+      global: { stubs: { AppShell: { template: "<div><slot /></div>" }, InlineNotice: true } }
+    });
+    await flushPromises();
+    await wrapper.get("textarea").setValue("请介绍资源");
+    await wrapper.get("form").trigger("submit.prevent");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(wrapper.text()).toContain("实际模型：deepseek / deepseek-chat");
+    await wrapper.get(".stop-button").trigger("click");
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("已停止生成");
+    expect(wrapper.text()).not.toContain("实际模型：deepseek / deepseek-chat");
   });
 
   it("renders answer-specific follow-ups and removes the sidebar suggestions", async () => {
@@ -627,10 +744,13 @@ describe("assistant view", () => {
   });
 
   it.each([
-    ["empty", "未检索到直接匹配的知识证据"],
-    ["degraded", "知识检索部分不可用，当前回答基于可用业务数据"]
-  ])("renders the %s retrieval status", async (retrievalStatus, statusText) => {
-    apiMock.post.mockResolvedValueOnce({ answer: "回答", citations: [], retrievalStatus });
+    ["empty", [], "未检索到直接匹配的知识证据"],
+    ["degraded", [], "知识检索部分不可用，当前回答基于可用业务数据"],
+    ["degraded", ["keyword-fallback"], "向量检索未启用或暂不可用，已使用关键词检索"],
+    ["degraded", ["vector+hybrid-rerank"], "向量检索已完成，其他知识组件部分不可用"],
+    ["ok", ["vector+hybrid-rerank"], "已完成向量检索与证据校验"],
+  ])("renders the %s retrieval status", async (retrievalStatus, retrievalMethods, statusText) => {
+    apiMock.post.mockResolvedValueOnce({ answer: "回答", citations: [], retrievalStatus, retrievalMethods });
     const wrapper = mount(AssistantView, {
       global: {
         stubs: {
@@ -699,5 +819,271 @@ describe("assistant view", () => {
       scopeId: 1,
       threadId: "thread-1"
     });
+  });
+
+  it("shows inferred candidates above the composer and lets the user confirm or ignore them", async () => {
+    apiMock.post.mockImplementation(async (path) => {
+      if (path === "/api/ai/qa/ask") {
+        return {
+          threadId: "thread-memory",
+          answer: "我会按项目式教学来组织回答。",
+          citations: [],
+          retrievalStatus: "ok",
+          generationStatus: "completed",
+          memoryApplied: { count: 2, memoryIds: ["profile-1", "task-1"] },
+          memoryCandidates: [
+            {
+              id: "candidate-1",
+              memoryType: "PROFILE",
+              fieldKey: "response_format",
+              content: "偏好表格回答",
+              status: "pending",
+              source: "inferred_chat",
+            },
+            {
+              id: "candidate-2",
+              memoryType: "TASK",
+              fieldKey: null,
+              content: "正在准备红色研学活动",
+              status: "pending",
+              source: "inferred_chat",
+            },
+          ],
+        };
+      }
+      return { id: "candidate-1", status: "active" };
+    });
+
+    const wrapper = mount(AssistantView, {
+      attachTo: document.body,
+      global: { stubs: { AppShell: { template: "<div><slot /></div>" }, InlineNotice: true } },
+    });
+    await flushPromises();
+    await wrapper.get("textarea").setValue("帮我设计一个活动");
+    await wrapper.get("form").trigger("submit.prevent");
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("本次参考 2 条记忆");
+    const suggestions = wrapper.get(".composer-memory-suggestions");
+    expect(suggestions.text()).toContain("待确认的记忆建议（2）");
+    expect(suggestions.text()).toContain("偏好表格回答");
+    expect(suggestions.findAll(".composer-memory-candidate-card")).toHaveLength(2);
+    expect(wrapper.find(".chat-message .composer-memory-candidate-card").exists()).toBe(false);
+    expect(wrapper.get(".chat-composer").element.previousElementSibling).toBe(suggestions.element);
+
+    await wrapper.get('[data-memory-id="candidate-1"] [data-action="confirm"]').trigger("click");
+    await flushPromises();
+    expect(apiMock.post).toHaveBeenCalledWith("/api/ai/memories/candidate-1/confirm");
+    expect(wrapper.findAll(".composer-memory-candidate-card")).toHaveLength(1);
+    expect(wrapper.get(".composer-memory-feedback").text()).toContain("已确认并保存这条记忆");
+
+    await wrapper.get('[data-memory-id="candidate-2"] [data-action="ignore"]').trigger("click");
+    await flushPromises();
+    expect(apiMock.delete).toHaveBeenCalledWith("/api/ai/memories/candidate-2");
+    expect(wrapper.find(".composer-memory-candidate-card").exists()).toBe(false);
+    expect(wrapper.get(".composer-memory-feedback").text()).toContain("已忽略这条候选记忆");
+    expect(document.activeElement).toBe(wrapper.get("textarea").element);
+    wrapper.unmount();
+  });
+
+  it("asks before replacing an active conflicting memory and keeps the candidate pending on cancel", async () => {
+    apiMock.post.mockImplementation(async (path, body) => {
+      if (path === "/api/ai/qa/ask") {
+        return {
+          threadId: "thread-memory-conflict",
+          answer: "这是带冲突候选的回答。",
+          citations: [],
+          retrievalStatus: "ok",
+          generationStatus: "completed",
+          memoryCandidates: [{
+            id: "candidate-conflict",
+            memoryType: "PROFILE",
+            fieldKey: "teacher_gender_age",
+            content: "26岁男教师",
+            status: "pending",
+            source: "inferred_chat",
+          }],
+        };
+      }
+      if (path === "/api/ai/memories/candidate-conflict/confirm") {
+        expect(body).toEqual({ replaceConflicts: true });
+        return { id: "candidate-conflict", status: "active" };
+      }
+      return {};
+    });
+    apiMock.get.mockImplementation(async (path) => {
+      if (path === "/api/ai/models") return [];
+      if (path === "/api/ai/memories/candidate-conflict/confirmation-preview") {
+        return {
+          candidate: { id: "candidate-conflict", content: "26岁男教师", fieldKey: "teacher_gender_age" },
+          conflicts: [{ id: "active-old", content: "28岁女教师", fieldKey: "teacher_gender_age" }],
+          duplicate: false,
+        };
+      }
+      return [];
+    });
+
+    const wrapper = mount(AssistantView, {
+      attachTo: document.body,
+      global: { stubs: { AppShell: { template: "<div><slot /></div>" }, InlineNotice: true } },
+    });
+    await flushPromises();
+    await wrapper.get("textarea").setValue("确认我的资料");
+    await wrapper.get("form").trigger("submit.prevent");
+    await flushPromises();
+
+    await wrapper.get('[data-memory-id="candidate-conflict"] [data-action="confirm"]').trigger("click");
+    await flushPromises();
+    expect(document.body.querySelector('[data-memory-conflict-dialog]')?.textContent).toContain("28岁女教师");
+    expect(apiMock.post).not.toHaveBeenCalledWith("/api/ai/memories/candidate-conflict/confirm", expect.anything());
+
+    await memoryConflictControl("cancel").click();
+    await flushPromises();
+    expect(wrapper.find('[data-memory-id="candidate-conflict"]').exists()).toBe(true);
+
+    await wrapper.get('[data-memory-id="candidate-conflict"] [data-action="confirm"]').trigger("click");
+    await flushPromises();
+    await memoryConflictControl("replace").click();
+    await flushPromises();
+    expect(wrapper.find('[data-memory-id="candidate-conflict"]').exists()).toBe(false);
+    expect(wrapper.get(".composer-memory-feedback").text()).toContain("已用新值替换旧记忆");
+    wrapper.unmount();
+  });
+
+  it("recycles a conflicting candidate when the user keeps the active value", async () => {
+    apiMock.post.mockImplementation(async (path) => {
+      if (path === "/api/ai/qa/ask") {
+        return {
+          threadId: "thread-memory-keep",
+          answer: "这是带冲突候选的回答。",
+          citations: [],
+          memoryCandidates: [{
+            id: "candidate-keep",
+            memoryType: "PROFILE",
+            fieldKey: "grade",
+            content: "常教五年级",
+            status: "pending",
+            source: "inferred_chat",
+          }],
+        };
+      }
+      return {};
+    });
+    apiMock.get.mockImplementation(async (path) => {
+      if (path === "/api/ai/models") return [];
+      if (path === "/api/ai/memories/candidate-keep/confirmation-preview") {
+        return {
+          candidate: { id: "candidate-keep", content: "常教五年级", fieldKey: "grade" },
+          conflicts: [{ id: "grade-old", content: "常教四年级", fieldKey: "grade" }],
+          duplicate: false,
+        };
+      }
+      return [];
+    });
+
+    const wrapper = mount(AssistantView, {
+      attachTo: document.body,
+      global: { stubs: { AppShell: { template: "<div><slot /></div>" }, InlineNotice: true } },
+    });
+    await flushPromises();
+    await wrapper.get("textarea").setValue("确认年级");
+    await wrapper.get("form").trigger("submit.prevent");
+    await flushPromises();
+
+    await wrapper.get('[data-memory-id="candidate-keep"] [data-action="confirm"]').trigger("click");
+    await flushPromises();
+    await memoryConflictControl("keep").click();
+    await flushPromises();
+    expect(apiMock.delete).toHaveBeenCalledWith("/api/ai/memories/candidate-keep");
+    expect(wrapper.find('[data-memory-id="candidate-keep"]').exists()).toBe(false);
+    expect(wrapper.get(".composer-memory-feedback").text()).toContain("保留了原有记忆");
+    wrapper.unmount();
+  });
+
+  it("clears successful composer memory feedback after five seconds", async () => {
+    apiMock.post.mockImplementation(async (path) => {
+      if (path === "/api/ai/qa/ask") {
+        return {
+          threadId: "thread-memory-feedback",
+          answer: "这是带候选的回答。",
+          citations: [],
+          retrievalStatus: "ok",
+          generationStatus: "completed",
+          memoryCandidates: [{
+            id: "candidate-feedback",
+            memoryType: "PROFILE",
+            fieldKey: "grade",
+            content: "主要任教三年级数学",
+            status: "pending",
+            source: "inferred_chat",
+          }],
+        };
+      }
+      return { id: "candidate-feedback", status: "active" };
+    });
+
+    const wrapper = mount(AssistantView, {
+      global: { stubs: { AppShell: { template: "<div><slot /></div>" }, InlineNotice: true } },
+    });
+    await flushPromises();
+    await wrapper.get("textarea").setValue("请记住我的任教情况");
+    await wrapper.get("form").trigger("submit.prevent");
+    await flushPromises();
+
+    vi.useFakeTimers();
+    try {
+      await wrapper.get('[data-memory-id="candidate-feedback"] [data-action="confirm"]').trigger("click");
+      await flushPromises();
+      expect(wrapper.get(".composer-memory-feedback").text()).toContain("已确认并保存这条记忆");
+
+      await vi.advanceTimersByTimeAsync(4_999);
+      expect(wrapper.find(".composer-memory-feedback").exists()).toBe(true);
+
+      await vi.advanceTimersByTimeAsync(1);
+      await flushPromises();
+      expect(wrapper.find(".composer-memory-feedback").exists()).toBe(false);
+    } finally {
+      vi.useRealTimers();
+      wrapper.unmount();
+    }
+  });
+
+  it("keeps an inferred candidate in the composer region when its action fails", async () => {
+    apiMock.post.mockImplementation(async (path) => {
+      if (path === "/api/ai/qa/ask") {
+        return {
+          threadId: "thread-memory-error",
+          answer: "这是带候选的回答。",
+          citations: [],
+          retrievalStatus: "ok",
+          generationStatus: "completed",
+          memoryCandidates: [{
+            id: "candidate-error",
+            memoryType: "PROFILE",
+            fieldKey: "grade",
+            content: "主要任教三年级数学",
+            status: "pending",
+            source: "inferred_chat",
+          }],
+        };
+      }
+      if (path === "/api/ai/memories/candidate-error/confirm") {
+        throw new Error("记忆服务暂不可用");
+      }
+      return { id: "candidate-error", status: "active" };
+    });
+
+    const wrapper = mount(AssistantView, {
+      global: { stubs: { AppShell: { template: "<div><slot /></div>" }, InlineNotice: true } },
+    });
+    await flushPromises();
+    await wrapper.get("textarea").setValue("请记住我的任教情况");
+    await wrapper.get("form").trigger("submit.prevent");
+    await flushPromises();
+
+    await wrapper.get('[data-memory-id="candidate-error"] [data-action="confirm"]').trigger("click");
+    await flushPromises();
+    expect(wrapper.findAll(".composer-memory-candidate-card")).toHaveLength(1);
+    expect(wrapper.get(".composer-memory-feedback").text()).toContain("记忆服务暂不可用");
   });
 });

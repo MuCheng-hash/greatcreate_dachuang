@@ -49,6 +49,10 @@ public class AgentAdminClient {
         return getList("/admin/observability/tool-traces", filters, this::applyObservabilityToken);
     }
 
+    public Map<String, Object> memoryMetrics() {
+        return getMap("/admin/memory-metrics", Map.of(), this::applyObservabilityToken);
+    }
+
     public List<Map<String, Object>> promptVersions(String promptKey) {
         return restClient.get()
                 .uri(uriBuilder -> uriBuilder.path("/admin/prompts/{promptKey}/versions").build(promptKey))
