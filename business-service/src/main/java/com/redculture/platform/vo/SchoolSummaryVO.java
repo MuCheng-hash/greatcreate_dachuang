@@ -9,27 +9,23 @@ public class SchoolSummaryVO {
 
     private Long schoolId;
 
-    private String schoolCode;
-
     private String schoolName;
 
-    private String schoolLevel;
+    private Long provinceRegionId;
+
+    private Long cityRegionId;
+
+    private Long countyRegionId;
+
+    private Long townshipRegionId;
 
     private String schoolType;
-
-    private String schoolNature;
-
-    private Boolean ruralSchool;
-
-    private Boolean teachingPoint;
 
     private String address;
 
     private BigDecimal longitude;
 
     private BigDecimal latitude;
-
-    private String geoConfidence;
 
     private Double distanceKm;
 }

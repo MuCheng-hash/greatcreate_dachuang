@@ -26,6 +26,10 @@ body {
     min-height: 100%;
 }
 
+body.modal-open {
+    overflow: hidden;
+}
+
 body {
     margin: 0;
     color: var(--ink);
@@ -390,6 +394,39 @@ textarea {
     overflow: auto;
     border: 1px solid rgba(125, 97, 65, 0.1);
     border-radius: 18px;
+}
+
+.modal-shell[hidden] {
+    display: none;
+}
+
+.modal-shell {
+    position: fixed;
+    inset: 0;
+    z-index: 30;
+    display: grid;
+    place-items: center;
+    padding: 24px;
+}
+
+.modal-backdrop {
+    position: absolute;
+    inset: 0;
+    background: rgba(33, 37, 56, 0.46);
+    backdrop-filter: blur(6px);
+}
+
+.modal-card {
+    position: relative;
+    z-index: 1;
+    width: min(760px, 100%);
+    max-height: min(86vh, 820px);
+    overflow: auto;
+    padding: 20px;
+    border: 1px solid rgba(125, 97, 65, 0.16);
+    border-radius: 24px;
+    background: var(--paper-strong);
+    box-shadow: 0 24px 64px rgba(33, 37, 56, 0.26);
 }
 
 table {

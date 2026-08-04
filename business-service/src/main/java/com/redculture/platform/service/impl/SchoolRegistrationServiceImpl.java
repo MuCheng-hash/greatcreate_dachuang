@@ -5,14 +5,10 @@ import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.redculture.platform.common.PageResult;
 import com.redculture.platform.entity.School;
-import com.redculture.platform.entity.SchoolGeoRecord;
 import com.redculture.platform.entity.SchoolRegistration;
 import com.redculture.platform.entity.SchoolUserAccount;
 import com.redculture.platform.enums.AccountStatus;
-import com.redculture.platform.enums.GeoReviewResult;
 import com.redculture.platform.enums.RegistrationReviewStatus;
-import com.redculture.platform.enums.ReviewStatus;
-import com.redculture.platform.mapper.SchoolGeoRecordMapper;
 import com.redculture.platform.mapper.SchoolRegistrationMapper;
 import com.redculture.platform.service.SchoolRegistrationService;
 import com.redculture.platform.service.SchoolService;
@@ -24,7 +20,6 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
 
 import java.time.LocalDateTime;
-import java.util.concurrent.ThreadLocalRandom;
 
 @Service
 public class SchoolRegistrationServiceImpl extends ServiceImpl<SchoolRegistrationMapper, SchoolRegistration>
@@ -36,14 +31,11 @@ public class SchoolRegistrationServiceImpl extends ServiceImpl<SchoolRegistratio
 
     private final SchoolService schoolService;
     private final SchoolUserAccountService schoolUserAccountService;
-    private final SchoolGeoRecordMapper schoolGeoRecordMapper;
 
     public SchoolRegistrationServiceImpl(SchoolService schoolService,
-                                         SchoolUserAccountService schoolUserAccountService,
-                                         SchoolGeoRecordMapper schoolGeoRecordMapper) {
+                                         SchoolUserAccountService schoolUserAccountService) {
         this.schoolService = schoolService;
         this.schoolUserAccountService = schoolUserAccountService;
-        this.schoolGeoRecordMapper = schoolGeoRecordMapper;
     }
 
     @Override
@@ -134,52 +126,18 @@ public class SchoolRegistrationServiceImpl extends ServiceImpl<SchoolRegistratio
         }
 
         School school = new School();
-        school.setSchoolCode(generateSchoolCode());
         school.setSchoolName(registration.getSchoolName());
-        school.setSchoolAlias(registration.getSchoolAlias());
-        school.setRegionId(registration.getTownshipRegionId() != null ? registration.getTownshipRegionId() : registration.getCountyRegionId());
         school.setCountyRegionId(registration.getCountyRegionId());
         school.setTownshipRegionId(registration.getTownshipRegionId());
-        school.setSchoolLevel(registration.getSchoolLevel());
         school.setSchoolType(registration.getSchoolType());
-        school.setSchoolNature(registration.getSchoolNature());
-        school.setRuralSchool(true);
-        school.setTeachingPoint(false);
         school.setAddress(registration.getAddress());
         school.setContactPhone(registration.getContactPhone());
         school.setLongitude(registration.getLongitude());
         school.setLatitude(registration.getLatitude());
-        school.setGeoSourceType(registration.getGeoSourceType());
-        school.setGeoConfidence(registration.getGeoConfidence());
-        school.setGeoVerified(true);
         school.setIntro(registration.getIntro());
-        school.setReviewStatus(ReviewStatus.APPROVED);
         school.setActive(true);
         schoolService.save(school);
-        saveSchoolGeoRecord(school);
         return school;
-    }
-
-    private void saveSchoolGeoRecord(School school) {
-        if (school.getSchoolId() == null || school.getLongitude() == null || school.getLatitude() == null) {
-            return;
-        }
-        SchoolGeoRecord record = new SchoolGeoRecord();
-        record.setSchoolId(school.getSchoolId());
-        record.setLongitude(school.getLongitude());
-        record.setLatitude(school.getLatitude());
-        record.setSourceType(school.getGeoSourceType());
-        record.setPoiName(school.getSchoolName());
-        record.setPoiAddress(school.getAddress());
-        record.setPoiType("学校注册审核定位");
-        record.setConfidenceLevel(school.getGeoConfidence());
-        record.setManualReviewed(true);
-        record.setReviewResult(GeoReviewResult.CONFIRMED);
-        record.setReviewerName("school-registration-approve");
-        record.setReviewedAt(LocalDateTime.now());
-        record.setCurrent(true);
-        record.setRemark("学校注册审核通过后自动生成");
-        schoolGeoRecordMapper.insert(record);
     }
 
     private void ensureSchoolHasNoAccount(Long schoolId, Long registrationId) {
@@ -212,14 +170,6 @@ public class SchoolRegistrationServiceImpl extends ServiceImpl<SchoolRegistratio
         } else {
             schoolUserAccountService.updateById(account);
         }
-    }
-
-    private String generateSchoolCode() {
-        String code;
-        do {
-            code = "SCH_REG_" + System.currentTimeMillis() + ThreadLocalRandom.current().nextInt(100, 1000);
-        } while (schoolService.count(new LambdaQueryWrapper<School>().eq(School::getSchoolCode, code)) > 0);
-        return code;
     }
 
     private SchoolRegistrationAdminVO toAdminVO(SchoolRegistration registration) {

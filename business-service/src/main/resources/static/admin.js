@@ -3,6 +3,17 @@ const adminState = {
     registrations: [],
     schools: [],
     resources: [],
+    schoolProvinceRegions: [],
+    schoolCityRegions: [],
+    schoolCountyRegions: [],
+    schoolTownshipRegions: [],
+    schoolRegions: [],
+    appConfig: {
+        amapKey: "",
+        amapSecurityJsCode: ""
+    },
+    amapSdkLoading: null,
+    amapGeocoder: null,
     discoveryCandidates: [],
     selectedSchoolIdForRelations: null,
     selectedSchoolIdForPlans: null,
@@ -44,27 +55,25 @@ const adminElements = {
 
     schoolForm: document.querySelector("#schoolForm"),
     schoolIdInput: document.querySelector("#schoolIdInput"),
-    schoolCodeInput: document.querySelector("#schoolCodeInput"),
     schoolNameInput: document.querySelector("#schoolNameInput"),
-    schoolAliasInput: document.querySelector("#schoolAliasInput"),
     schoolTypeInput: document.querySelector("#schoolTypeInput"),
-    schoolLevelInput: document.querySelector("#schoolLevelInput"),
-    schoolNatureInput: document.querySelector("#schoolNatureInput"),
+    schoolProvinceRegionIdInput: document.querySelector("#schoolProvinceRegionIdInput"),
+    schoolCityRegionIdInput: document.querySelector("#schoolCityRegionIdInput"),
     schoolCountyRegionIdInput: document.querySelector("#schoolCountyRegionIdInput"),
     schoolTownshipRegionIdInput: document.querySelector("#schoolTownshipRegionIdInput"),
     schoolLongitudeInput: document.querySelector("#schoolLongitudeInput"),
     schoolLatitudeInput: document.querySelector("#schoolLatitudeInput"),
-    schoolGeoSourceInput: document.querySelector("#schoolGeoSourceInput"),
-    schoolGeoConfidenceInput: document.querySelector("#schoolGeoConfidenceInput"),
     schoolAddressInput: document.querySelector("#schoolAddressInput"),
+    schoolGeocodeButton: document.querySelector("#schoolGeocodeButton"),
     schoolIntroInput: document.querySelector("#schoolIntroInput"),
-    schoolRuralInput: document.querySelector("#schoolRuralInput"),
-    schoolTeachingPointInput: document.querySelector("#schoolTeachingPointInput"),
-    schoolGeoVerifiedInput: document.querySelector("#schoolGeoVerifiedInput"),
     schoolKeywordInput: document.querySelector("#schoolKeywordInput"),
     schoolSearchButton: document.querySelector("#schoolSearchButton"),
     schoolRefreshButton: document.querySelector("#schoolRefreshButton"),
+    schoolAddButton: document.querySelector("#schoolAddButton"),
     schoolResetButton: document.querySelector("#schoolResetButton"),
+    schoolModal: document.querySelector("#schoolModal"),
+    schoolModalTitle: document.querySelector("#schoolModalTitle"),
+    schoolModalCloseButton: document.querySelector("#schoolModalCloseButton"),
     schoolTableBody: document.querySelector("#schoolTableBody"),
     schoolListCount: document.querySelector("#schoolListCount"),
 
@@ -210,6 +219,19 @@ function bindAdminEvents() {
     adminElements.schoolSearchButton?.addEventListener("click", () => void loadSchools());
     adminElements.schoolRefreshButton?.addEventListener("click", () => void loadSchools());
     adminElements.schoolResetButton?.addEventListener("click", resetSchoolForm);
+    adminElements.schoolAddButton?.addEventListener("click", () => void openCreateSchoolModal());
+    adminElements.schoolModalCloseButton?.addEventListener("click", closeSchoolModal);
+    adminElements.schoolModal?.querySelector("[data-school-modal-close]")?.addEventListener("click", closeSchoolModal);
+    adminElements.schoolProvinceRegionIdInput?.addEventListener("change", () => {
+        void loadSchoolCityOptions(adminElements.schoolProvinceRegionIdInput.value);
+    });
+    adminElements.schoolCityRegionIdInput?.addEventListener("change", () => {
+        void loadSchoolCountyOptions(adminElements.schoolCityRegionIdInput.value);
+    });
+    adminElements.schoolCountyRegionIdInput?.addEventListener("change", () => {
+        void loadSchoolTownshipOptions(adminElements.schoolCountyRegionIdInput.value);
+    });
+    adminElements.schoolGeocodeButton?.addEventListener("click", () => void geocodeSchoolAddress());
 
     adminElements.resourceForm?.addEventListener("submit", async event => {
         event.preventDefault();
@@ -247,6 +269,11 @@ function bindAdminEvents() {
     adminElements.agentTraceFeatureFilter?.addEventListener("change", () => void loadAgentOps());
     adminElements.agentToolNameFilter?.addEventListener("change", () => void loadAgentOps());
     adminElements.agentPromptKeySelect?.addEventListener("change", () => void loadAgentPrompts());
+    document.addEventListener("keydown", event => {
+        if (event.key === "Escape" && !adminElements.schoolModal?.hidden) {
+            closeSchoolModal();
+        }
+    });
 }
 
 async function bootstrapAdmin() {
@@ -261,6 +288,9 @@ async function bootstrapAdmin() {
             throw new Error("当前账号无后台管理权限，请使用管理员账号登录。");
         }
         await Promise.all([
+            loadClientMapConfig(),
+            loadSchoolRegionNames(),
+            loadSchoolProvinceOptions(),
             loadRegistrations(),
             loadSchools(),
             loadResources(),
@@ -842,6 +872,285 @@ async function loadSchools() {
     syncSelectOptions();
 }
 
+async function openCreateSchoolModal() {
+    resetSchoolForm();
+    if (adminElements.schoolModalTitle) {
+        adminElements.schoolModalTitle.textContent = "新增学校";
+    }
+    openSchoolModal();
+    await loadSchoolProvinceOptions();
+}
+
+function openEditSchoolModal(record) {
+    fillSchoolForm(record);
+    if (adminElements.schoolModalTitle) {
+        adminElements.schoolModalTitle.textContent = "修改学校";
+    }
+    openSchoolModal();
+}
+
+function openSchoolModal() {
+    if (!adminElements.schoolModal) return;
+    adminElements.schoolModal.hidden = false;
+    document.body.classList.add("modal-open");
+    setTimeout(() => adminElements.schoolNameInput?.focus(), 0);
+}
+
+function closeSchoolModal() {
+    if (!adminElements.schoolModal) return;
+    adminElements.schoolModal.hidden = true;
+    document.body.classList.remove("modal-open");
+}
+
+async function loadClientMapConfig() {
+    try {
+        const config = await requestJson("/api/map/client-config");
+        adminState.appConfig = {
+            amapKey: String(config?.amapKey || "").trim(),
+            amapSecurityJsCode: String(config?.amapSecurityJsCode || "").trim()
+        };
+    } catch (error) {
+        setGlobalStatus("地图配置异常", error.message || "高德地图配置读取失败。");
+    }
+}
+
+async function loadSchoolRegionNames() {
+    const regions = await requestJson("/api/regions");
+    adminState.schoolRegions = Array.isArray(regions) ? regions : [];
+}
+
+async function loadSchoolProvinceOptions(selectedProvinceId = null,
+                                         selectedCityId = null,
+                                         selectedCountyId = null,
+                                         selectedTownshipId = null) {
+    const provinces = await requestJson("/api/regions?regionLevel=PROVINCE");
+    adminState.schoolProvinceRegions = Array.isArray(provinces) ? provinces : [];
+    fillOptionSelect(adminElements.schoolProvinceRegionIdInput, adminState.schoolProvinceRegions, "regionId", "regionName", "请选择省份");
+    if (selectedProvinceId != null && String(selectedProvinceId) !== "") {
+        adminElements.schoolProvinceRegionIdInput.value = String(selectedProvinceId);
+    }
+    await loadSchoolCityOptions(adminElements.schoolProvinceRegionIdInput?.value, selectedCityId, selectedCountyId, selectedTownshipId);
+}
+
+async function loadSchoolCityOptions(provinceRegionId = null,
+                                     selectedCityId = null,
+                                     selectedCountyId = null,
+                                     selectedTownshipId = null) {
+    const citySelect = adminElements.schoolCityRegionIdInput;
+    resetRegionSelect(citySelect, provinceRegionId ? "请选择城市" : "请先选择省份", !provinceRegionId);
+    resetRegionSelect(adminElements.schoolCountyRegionIdInput, "请先选择城市", true);
+    resetRegionSelect(adminElements.schoolTownshipRegionIdInput, "请先选择区县", true);
+    adminState.schoolCityRegions = [];
+    adminState.schoolCountyRegions = [];
+    adminState.schoolTownshipRegions = [];
+    if (!provinceRegionId) return;
+
+    const cities = await requestJson(`/api/regions?parentRegionId=${encodeURIComponent(provinceRegionId)}&regionLevel=CITY`);
+    adminState.schoolCityRegions = Array.isArray(cities) ? cities : [];
+    fillOptionSelect(citySelect, adminState.schoolCityRegions, "regionId", "regionName", "请选择城市");
+    citySelect.disabled = false;
+    if (selectedCityId != null && String(selectedCityId) !== "") {
+        citySelect.value = String(selectedCityId);
+    }
+    await loadSchoolCountyOptions(citySelect.value, selectedCountyId, selectedTownshipId);
+}
+
+async function loadSchoolCountyOptions(cityRegionId = null,
+                                       selectedCountyId = null,
+                                       selectedTownshipId = null) {
+    const countySelect = adminElements.schoolCountyRegionIdInput;
+    resetRegionSelect(countySelect, cityRegionId ? "请选择区县" : "请先选择城市", !cityRegionId);
+    resetRegionSelect(adminElements.schoolTownshipRegionIdInput, "请先选择区县", true);
+    adminState.schoolCountyRegions = [];
+    adminState.schoolTownshipRegions = [];
+    if (!cityRegionId) return;
+
+    const counties = await requestJson(`/api/regions?parentRegionId=${encodeURIComponent(cityRegionId)}&regionLevel=COUNTY`);
+    adminState.schoolCountyRegions = Array.isArray(counties) ? counties : [];
+    fillOptionSelect(countySelect, adminState.schoolCountyRegions, "regionId", "regionName", "请选择区县");
+    countySelect.disabled = false;
+    if (selectedCountyId != null && String(selectedCountyId) !== "") {
+        countySelect.value = String(selectedCountyId);
+    }
+    await loadSchoolTownshipOptions(countySelect.value, selectedTownshipId);
+}
+
+async function loadSchoolTownshipOptions(countyRegionId = null, selectedTownshipId = null) {
+    const townshipSelect = adminElements.schoolTownshipRegionIdInput;
+    resetRegionSelect(townshipSelect, countyRegionId ? "请选择乡镇" : "请先选择区县", !countyRegionId);
+    adminState.schoolTownshipRegions = [];
+    if (!countyRegionId) return;
+
+    const townships = await requestJson(`/api/regions?parentRegionId=${encodeURIComponent(countyRegionId)}&regionLevel=TOWNSHIP`);
+    adminState.schoolTownshipRegions = Array.isArray(townships) ? townships : [];
+    fillOptionSelect(townshipSelect, adminState.schoolTownshipRegions, "regionId", "regionName", "请选择乡镇");
+    townshipSelect.disabled = false;
+    if (selectedTownshipId != null && String(selectedTownshipId) !== "") {
+        townshipSelect.value = String(selectedTownshipId);
+    }
+}
+
+function resetRegionSelect(select, label, disabled) {
+    if (!select) return;
+    select.innerHTML = "";
+    const option = document.createElement("option");
+    option.value = "";
+    option.textContent = label;
+    select.appendChild(option);
+    select.disabled = Boolean(disabled);
+}
+
+async function geocodeSchoolAddress() {
+    const query = buildSchoolAddressText();
+    if (!query) {
+        setGlobalStatus("地址不完整", "请先填写学校名称或详细地址。");
+        return;
+    }
+    const button = adminElements.schoolGeocodeButton;
+    const originalLabel = button?.textContent || "按地址定位坐标";
+    if (button) {
+        button.disabled = true;
+        button.textContent = "定位中...";
+    }
+    try {
+        console.info("School geocode query:", query);
+        const result = await geocodeAddressWithAmap(query);
+        if (!result) {
+            setGlobalStatus("定位失败", "高德地图没有返回可用坐标，请补充更详细地址后重试。");
+            return;
+        }
+        adminElements.schoolLongitudeInput.value = result.longitude.toFixed(7);
+        adminElements.schoolLatitudeInput.value = result.latitude.toFixed(7);
+        setGlobalStatus("定位成功", `已回填坐标：${result.longitude.toFixed(7)}, ${result.latitude.toFixed(7)}`);
+    } catch (error) {
+        setGlobalStatus("定位失败", error.message || "高德地图定位失败。");
+    } finally {
+        if (button) {
+            button.disabled = false;
+            button.textContent = originalLabel;
+        }
+    }
+}
+
+function buildSchoolAddressText() {
+    return [
+        selectedOptionText(adminElements.schoolProvinceRegionIdInput),
+        selectedOptionText(adminElements.schoolCityRegionIdInput),
+        selectedOptionText(adminElements.schoolCountyRegionIdInput),
+        selectedOptionText(adminElements.schoolTownshipRegionIdInput),
+        adminElements.schoolAddressInput?.value,
+        adminElements.schoolNameInput?.value
+    ]
+            .map(value => String(value || "").trim())
+            .filter(Boolean)
+            .join("");
+}
+
+function selectedOptionText(select) {
+    if (!select || !select.value) return "";
+    return select.selectedOptions?.[0]?.textContent || "";
+}
+
+async function geocodeAddressWithAmap(address) {
+    const geocoder = await ensureAmapGeocoder();
+    return withTimeout(new Promise((resolve, reject) => {
+        geocoder.getLocation(address, (status, result) => {
+            if (status !== "complete") {
+                reject(new Error(result?.info || "高德地图定位请求失败。"));
+                return;
+            }
+            const location = result?.geocodes?.[0]?.location;
+            if (!location) {
+                resolve(null);
+                return;
+            }
+            const longitude = Number(location.lng ?? location.getLng?.());
+            const latitude = Number(location.lat ?? location.getLat?.());
+            if (!Number.isFinite(longitude) || !Number.isFinite(latitude)) {
+                resolve(null);
+                return;
+            }
+            resolve({ longitude, latitude });
+        });
+    }), 12000, "高德地图地址解析超时，请检查 Key、网络或域名白名单配置。");
+}
+
+async function ensureAmapGeocoder() {
+    await ensureAmapSdk();
+    if (adminState.amapGeocoder) {
+        return adminState.amapGeocoder;
+    }
+    return withTimeout(new Promise((resolve, reject) => {
+        window.AMap.plugin("AMap.Geocoder", () => {
+            try {
+                if (!window.AMap?.Geocoder) {
+                    reject(new Error("高德地图 Geocoder 插件不可用。"));
+                    return;
+                }
+                adminState.amapGeocoder = new window.AMap.Geocoder();
+                resolve(adminState.amapGeocoder);
+            } catch (error) {
+                reject(error);
+            }
+        });
+    }), 12000, "高德地图 Geocoder 插件加载超时，请检查 Key、网络或域名白名单配置。");
+}
+
+async function ensureAmapSdk() {
+    if (window.AMap) return;
+    const key = adminState.appConfig?.amapKey;
+    if (!key) {
+        throw new Error("未配置高德地图 Key。");
+    }
+    if (adminState.appConfig?.amapSecurityJsCode) {
+        window._AMapSecurityConfig = { securityJsCode: adminState.appConfig.amapSecurityJsCode };
+    }
+    if (!adminState.amapSdkLoading) {
+        adminState.amapSdkLoading = new Promise((resolve, reject) => {
+            const script = document.createElement("script");
+            script.src = `https://webapi.amap.com/maps?v=2.0&key=${encodeURIComponent(key)}`;
+            script.async = true;
+            script.onload = () => resolve();
+            script.onerror = () => reject(new Error("高德地图 SDK 加载失败。"));
+            document.head.appendChild(script);
+        });
+    }
+    await adminState.amapSdkLoading;
+    if (!window.AMap?.plugin) {
+        adminState.amapSdkLoading = null;
+        throw new Error("高德地图 SDK 加载异常，请检查 Key 是否可用。");
+    }
+}
+
+function withTimeout(promise, timeoutMs, message) {
+    let timer = null;
+    const timeout = new Promise((_, reject) => {
+        timer = window.setTimeout(() => reject(new Error(message)), timeoutMs);
+    });
+    return Promise.race([promise, timeout]).finally(() => {
+        if (timer) {
+            window.clearTimeout(timer);
+        }
+    });
+}
+
+function regionPathText(record) {
+    const names = [
+        regionNameById(adminState.schoolProvinceRegions, record.provinceRegionId),
+        regionNameById(adminState.schoolCityRegions, record.cityRegionId),
+        regionNameById(adminState.schoolCountyRegions, record.countyRegionId),
+        regionNameById(adminState.schoolTownshipRegions, record.townshipRegionId)
+    ].filter(Boolean);
+    return names.length ? names.join(" / ") : "未选择行政区划";
+}
+
+function regionNameById(regions, regionId) {
+    if (regionId == null) return "";
+    const match = [...regions, ...adminState.schoolRegions]
+            .find(region => String(region.regionId) === String(regionId));
+    return match?.regionName || `ID ${regionId}`;
+}
+
 function renderSchoolTable(records) {
     adminElements.schoolListCount.textContent = `${records.length} 条`;
     adminElements.schoolTableBody.innerHTML = "";
@@ -853,59 +1162,61 @@ function renderSchoolTable(records) {
     records.forEach(record => {
         const tr = document.createElement("tr");
         tr.innerHTML = `
-            <td>${escapeHtml(record.schoolCode || "-")}</td>
             <td>
                 <strong>${escapeHtml(record.schoolName || "-")}</strong>
-                <div class="status-box">${escapeHtml(record.address || "未填写地址")}</div>
+                <div class="status-box">${escapeHtml(regionPathText(record))}</div>
             </td>
-            <td>${escapeHtml(record.schoolLevel || "-")}</td>
-            <td>${renderStatus(record.reviewStatus)}</td>
+            <td>${escapeHtml(record.schoolType || "-")}</td>
+            <td>${escapeHtml(record.address || "未填写详细地址")}</td>
+            <td>${record.active === false ? '<span class="status-pill status-draft">未启用</span>' : '<span class="status-pill status-approved">已启用</span>'}</td>
             <td>
                 <div class="table-actions">
                     <button class="action-button" data-action="edit">编辑</button>
-                    <button class="action-button" data-action="submit">提交审核</button>
-                    <button class="action-button" data-action="approve">通过</button>
-                    <button class="action-button" data-action="reject">驳回</button>
+                    <button class="action-button" data-action="delete">删除</button>
                 </div>
             </td>
         `;
-        tr.querySelector('[data-action="edit"]').addEventListener("click", () => fillSchoolForm(record));
-        tr.querySelector('[data-action="submit"]').addEventListener("click", () => void runSchoolAction(record.schoolId, "submit-review"));
-        tr.querySelector('[data-action="approve"]').addEventListener("click", () => void runSchoolAction(record.schoolId, "approve"));
-        tr.querySelector('[data-action="reject"]').addEventListener("click", () => void runSchoolAction(record.schoolId, "reject"));
+        tr.querySelector('[data-action="edit"]').addEventListener("click", () => openEditSchoolModal(record));
+        tr.querySelector('[data-action="delete"]').addEventListener("click", () => void deleteSchool(record));
         adminElements.schoolTableBody.appendChild(tr);
     });
+}
+
+async function deleteSchool(record) {
+    if (!record?.schoolId) {
+        return;
+    }
+    const confirmed = window.confirm(`确认删除学校“${record.schoolName || "未命名学校"}”吗？`);
+    if (!confirmed) {
+        return;
+    }
+    await requestJson(`/api/admin/schools/${record.schoolId}`, { method: "DELETE" });
+    setGlobalStatus("已删除", "学校已删除。");
+    await loadSchools();
 }
 
 async function submitSchoolForm() {
     const schoolId = parseNullableNumber(adminElements.schoolIdInput.value);
     const body = {
-        schoolCode: adminElements.schoolCodeInput.value.trim(),
         schoolName: adminElements.schoolNameInput.value.trim(),
-        schoolAlias: optionalText(adminElements.schoolAliasInput.value),
-        schoolType: optionalText(adminElements.schoolTypeInput.value),
-        schoolLevel: adminElements.schoolLevelInput.value,
-        schoolNature: adminElements.schoolNatureInput.value,
+        provinceRegionId: parseNullableNumber(adminElements.schoolProvinceRegionIdInput.value),
+        cityRegionId: parseNullableNumber(adminElements.schoolCityRegionIdInput.value),
         countyRegionId: parseNullableNumber(adminElements.schoolCountyRegionIdInput.value),
         townshipRegionId: parseNullableNumber(adminElements.schoolTownshipRegionIdInput.value),
+        schoolType: optionalText(adminElements.schoolTypeInput.value),
+        address: optionalText(adminElements.schoolAddressInput.value),
         longitude: parseNullableNumber(adminElements.schoolLongitudeInput.value),
         latitude: parseNullableNumber(adminElements.schoolLatitudeInput.value),
-        geoSourceType: adminElements.schoolGeoSourceInput.value,
-        geoConfidence: adminElements.schoolGeoConfidenceInput.value,
-        address: optionalText(adminElements.schoolAddressInput.value),
         intro: optionalText(adminElements.schoolIntroInput.value),
-        ruralSchool: adminElements.schoolRuralInput.checked,
-        teachingPoint: adminElements.schoolTeachingPointInput.checked,
-        geoVerified: adminElements.schoolGeoVerifiedInput.checked
+        active: true
     };
 
-    if (!body.schoolCode || !body.schoolName) {
-        setGlobalStatus("校验失败", "学校编码和学校名称不能为空。");
+    if (!body.schoolName) {
+        setGlobalStatus("校验失败", "学校名称不能为空。");
         return;
     }
 
     if (schoolId) {
-        delete body.schoolCode;
         await requestJson(`/api/admin/schools/${schoolId}`, { method: "PUT", body });
         setGlobalStatus("已更新", "学校信息已更新。");
     } else {
@@ -914,42 +1225,30 @@ async function submitSchoolForm() {
     }
 
     resetSchoolForm();
+    closeSchoolModal();
     await loadSchools();
 }
 
 function fillSchoolForm(record) {
     adminElements.schoolIdInput.value = record.schoolId || "";
-    adminElements.schoolCodeInput.value = record.schoolCode || "";
-    adminElements.schoolCodeInput.disabled = true;
     adminElements.schoolNameInput.value = record.schoolName || "";
-    adminElements.schoolAliasInput.value = record.schoolAlias || "";
     adminElements.schoolTypeInput.value = record.schoolType || "";
-    adminElements.schoolLevelInput.value = record.schoolLevel || "primary";
-    adminElements.schoolNatureInput.value = record.schoolNature || "public";
-    adminElements.schoolCountyRegionIdInput.value = record.countyRegionId || "";
-    adminElements.schoolTownshipRegionIdInput.value = record.townshipRegionId || "";
     adminElements.schoolLongitudeInput.value = record.longitude || "";
     adminElements.schoolLatitudeInput.value = record.latitude || "";
-    adminElements.schoolGeoSourceInput.value = record.geoSourceType || "government_doc";
-    adminElements.schoolGeoConfidenceInput.value = record.geoConfidence || "unknown";
     adminElements.schoolAddressInput.value = record.address || "";
     adminElements.schoolIntroInput.value = record.intro || "";
-    adminElements.schoolRuralInput.checked = Boolean(record.ruralSchool);
-    adminElements.schoolTeachingPointInput.checked = Boolean(record.teachingPoint);
-    adminElements.schoolGeoVerifiedInput.checked = Boolean(record.geoVerified);
+    void loadSchoolProvinceOptions(
+            record.provinceRegionId,
+            record.cityRegionId,
+            record.countyRegionId,
+            record.townshipRegionId
+    );
 }
 
 function resetSchoolForm() {
     adminElements.schoolForm.reset();
     adminElements.schoolIdInput.value = "";
-    adminElements.schoolCodeInput.disabled = false;
-    adminElements.schoolRuralInput.checked = true;
-}
-
-async function runSchoolAction(schoolId, action) {
-    await requestJson(`/api/admin/schools/${schoolId}/${action}`, { method: "POST", body: {} });
-    setGlobalStatus("操作成功", "学校审核状态已更新。");
-    await loadSchools();
+    void loadSchoolProvinceOptions();
 }
 
 async function loadResources() {

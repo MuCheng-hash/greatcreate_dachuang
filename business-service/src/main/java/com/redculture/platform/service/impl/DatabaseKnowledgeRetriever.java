@@ -185,7 +185,7 @@ public class DatabaseKnowledgeRetriever implements KnowledgeRetriever {
                 SchoolSummaryVO school = detail.getSchool();
                 addEntityHint(entityHints, EntityType.SCHOOL, request.getScopeId(),
                         school == null ? null : school.getSchoolName(),
-                        school == null ? null : school.getSchoolCode());
+                        school == null ? null : school.getSchoolName());
                 if (detail.getResources() != null) {
                     for (SchoolResourceItemVO item : detail.getResources()) {
                         if (item == null || item.getResourceId() == null) {

@@ -71,8 +71,6 @@ public class SchoolMapServiceImpl implements SchoolMapService {
             String cleanKeyword = keyword.trim();
             wrapper.and(item -> item.like(School::getSchoolName, cleanKeyword)
                     .or()
-                    .like(School::getSchoolAlias, cleanKeyword)
-                    .or()
                     .like(School::getAddress, cleanKeyword));
         }
         wrapper.last("LIMIT " + effectiveLimit(limit, MAX_LIMIT));
@@ -117,8 +115,7 @@ public class SchoolMapServiceImpl implements SchoolMapService {
         }
 
         School school = schoolService.getById(schoolId);
-        if (school == null || !Boolean.TRUE.equals(school.getActive())
-                || school.getReviewStatus() != ReviewStatus.APPROVED) {
+        if (school == null || !Boolean.TRUE.equals(school.getActive())) {
             return null;
         }
 
@@ -158,7 +155,6 @@ public class SchoolMapServiceImpl implements SchoolMapService {
 
     private LambdaQueryWrapper<School> baseSchoolWrapper() {
         return new LambdaQueryWrapper<School>()
-                .eq(School::getReviewStatus, ReviewStatus.APPROVED)
                 .eq(School::getActive, true);
     }
 
@@ -187,17 +183,15 @@ public class SchoolMapServiceImpl implements SchoolMapService {
     private SchoolSummaryVO toSchoolSummary(School school, Double distanceKm) {
         SchoolSummaryVO vo = new SchoolSummaryVO();
         vo.setSchoolId(school.getSchoolId());
-        vo.setSchoolCode(school.getSchoolCode());
         vo.setSchoolName(school.getSchoolName());
-        vo.setSchoolLevel(enumValue(school.getSchoolLevel()));
+        vo.setProvinceRegionId(school.getProvinceRegionId());
+        vo.setCityRegionId(school.getCityRegionId());
+        vo.setCountyRegionId(school.getCountyRegionId());
+        vo.setTownshipRegionId(school.getTownshipRegionId());
         vo.setSchoolType(school.getSchoolType());
-        vo.setSchoolNature(enumValue(school.getSchoolNature()));
-        vo.setRuralSchool(school.getRuralSchool());
-        vo.setTeachingPoint(school.getTeachingPoint());
         vo.setAddress(school.getAddress());
         vo.setLongitude(school.getLongitude());
         vo.setLatitude(school.getLatitude());
-        vo.setGeoConfidence(enumValue(school.getGeoConfidence()));
         vo.setDistanceKm(distanceKm);
         return vo;
     }
