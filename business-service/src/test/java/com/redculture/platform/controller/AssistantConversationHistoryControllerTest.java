@@ -33,7 +33,7 @@ class AssistantConversationHistoryControllerTest {
             if (path.endsWith("/archive") || path.endsWith("/restore")) {
                 body = "{}";
             } else if (path.equals("/agent/threads/thread-1")) {
-                body = "{\"threadId\":\"thread-1\",\"scopeType\":\"SCHOOL\",\"scopeId\":\"7\",\"status\":\"active\",\"summary\":\"\",\"createdAt\":\"2026-07-28T00:00:00Z\",\"updatedAt\":\"2026-07-28T01:00:00Z\",\"messages\":[{\"id\":1,\"role\":\"user\",\"content\":\"历史问题\",\"createdAt\":\"2026-07-28T00:00:00Z\",\"metadata\":{}},{\"id\":2,\"role\":\"assistant\",\"content\":\"历史回答\",\"createdAt\":\"2026-07-28T00:01:00Z\",\"metadata\":{\"responseSnapshot\":{\"schemaVersion\":1,\"retrievalMethods\":[\"vector+hybrid-rerank\"],\"citations\":[{\"citationId\":\"chunk:1\",\"title\":\"历史来源\"}]}}}]}";
+                body = "{\"threadId\":\"thread-1\",\"scopeType\":\"SCHOOL\",\"scopeId\":\"7\",\"status\":\"active\",\"summary\":\"\",\"createdAt\":\"2026-07-28T00:00:00Z\",\"updatedAt\":\"2026-07-28T01:00:00Z\",\"messages\":[{\"id\":1,\"role\":\"user\",\"content\":\"历史问题\",\"createdAt\":\"2026-07-28T00:00:00Z\",\"metadata\":{}},{\"id\":2,\"role\":\"assistant\",\"content\":\"历史回答\",\"createdAt\":\"2026-07-28T00:01:00Z\",\"metadata\":{\"responseSnapshot\":{\"schemaVersion\":1,\"retrievalMethods\":[\"hybrid-rrf\"],\"citations\":[{\"citationId\":\"chunk:1\",\"title\":\"历史来源\"}]}}}]}";
             } else {
                 body = "[{\"threadId\":\"thread-1\",\"scopeType\":\"SCHOOL\",\"scopeId\":\"7\",\"title\":\"历史问题\",\"preview\":\"历史回答\",\"messageCount\":2,\"createdAt\":\"2026-07-28T00:00:00Z\",\"updatedAt\":\"2026-07-28T01:00:00Z\"}]";
             }
@@ -68,7 +68,7 @@ class AssistantConversationHistoryControllerTest {
             Map<?, ?> snapshot = (Map<?, ?>) detail.getData().getMessages().get(1)
                     .getMetadata().get("responseSnapshot");
             assertEquals(1, snapshot.get("schemaVersion"));
-            assertEquals(List.of("vector+hybrid-rerank"), snapshot.get("retrievalMethods"));
+            assertEquals(List.of("hybrid-rrf"), snapshot.get("retrievalMethods"));
             assertEquals("历史来源", ((Map<?, ?>) ((List<?>) snapshot.get("citations")).get(0)).get("title"));
             assertEquals(200, archived.getCode());
             assertEquals(200, restored.getCode());

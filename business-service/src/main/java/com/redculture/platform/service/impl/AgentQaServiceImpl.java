@@ -774,6 +774,7 @@ public class AgentQaServiceImpl implements AgentQaService {
 
         KnowledgeRetrieveRequest request = new KnowledgeRetrieveRequest();
         request.setQuery(context.getQuestion());
+        request.setIntent(context.getIntent() == null ? null : context.getIntent().name());
         request.setScopeType(context.getScopeType());
         request.setScopeId(context.getScopeId());
         request.setGrade(context.getGrade());

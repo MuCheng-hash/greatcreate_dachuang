@@ -49,10 +49,19 @@ public class KnowledgeRetrieveResult {
 
     public void refreshRetrievalMethods() {
         Set<String> methods = new LinkedHashSet<>();
+        if (retrievalMethods != null) {
+            retrievalMethods.stream()
+                    .filter(this::hasText)
+                    .forEach(methods::add);
+        }
         if (chunks != null) {
             chunks.stream()
                     .map(KnowledgeChunkVO::getRetrievalMethod)
                     .filter(this::hasText)
+                    .filter(method -> !"hybrid-rrf".equals(method)
+                            || !(methods.contains("dense")
+                            && methods.contains("lexical")
+                            && methods.contains("rrf")))
                     .forEach(methods::add);
         }
         if (graphFacts != null && !graphFacts.isEmpty()) {

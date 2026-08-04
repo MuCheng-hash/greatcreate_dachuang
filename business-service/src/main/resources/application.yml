@@ -72,6 +72,9 @@ app:
     qdrant-api-key: ${QDRANT_API_KEY:}
     qdrant-collection: ${QDRANT_COLLECTION:red_culture_content_chunks}
     candidate-multiplier: ${RAG_CANDIDATE_MULTIPLIER:4}
+    rrf-k: ${RAG_RRF_K:60}
+    dense-rrf-weight: ${RAG_DENSE_RRF_WEIGHT:1.0}
+    lexical-rrf-weight: ${RAG_LEXICAL_RRF_WEIGHT:1.0}
     minimum-vector-score: ${RAG_MINIMUM_VECTOR_SCORE:0.2}
     connect-timeout-ms: ${RAG_CONNECT_TIMEOUT_MS:3000}
     read-timeout-ms: ${RAG_READ_TIMEOUT_MS:15000}
