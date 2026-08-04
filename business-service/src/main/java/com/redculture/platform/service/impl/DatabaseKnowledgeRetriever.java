@@ -15,11 +15,16 @@ import com.redculture.platform.service.TownMapService;
 import com.redculture.platform.service.rag.ChunkVectorStore;
 import com.redculture.platform.service.rag.EmbeddingClient;
 import com.redculture.platform.service.rag.VectorSearchCandidate;
+import com.redculture.platform.vo.AgentIntent;
 import com.redculture.platform.vo.EventSummaryVO;
 import com.redculture.platform.vo.HeroSummaryVO;
+import com.redculture.platform.vo.LocalEduResourceSummaryVO;
 import com.redculture.platform.vo.MapResourceMarkerVO;
 import com.redculture.platform.vo.SchoolMapDetailVO;
+import com.redculture.platform.vo.SchoolResourceItemVO;
+import com.redculture.platform.vo.SchoolSummaryVO;
 import com.redculture.platform.vo.StorySummaryVO;
+import com.redculture.platform.vo.TeachingActivityPlanVO;
 import com.redculture.platform.vo.TownMapDetailVO;
 import com.redculture.platform.vo.ai.KnowledgeChunkVO;
 import com.redculture.platform.vo.ai.KnowledgeCitationCandidateVO;
@@ -52,9 +57,9 @@ import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 /**
- * Retrieves approved evidence with scoped ANN recall and second-stage hybrid reranking.
+ * Retrieves approved evidence with deterministic planning and scoped hybrid recall.
  * Agent and teaching-plan generation both consume this implementation through
- * {@link KnowledgeRetriever}; keyword matching is only an explicit degraded fallback.
+ * {@link KnowledgeRetriever}; Dense and MySQL Lexical candidates are fused by RRF.
  */
 @Component
 @Profile("!mock-rag")
@@ -64,11 +69,17 @@ public class DatabaseKnowledgeRetriever implements KnowledgeRetriever {
     private static final int DEFAULT_TOP_K = 5;
     private static final int MAX_TOP_K = 8;
     private static final int MAX_CHUNKS = 8;
+    private static final int MAX_CANDIDATES = 32;
     private static final int MAX_CITATIONS = 8;
     private static final int MAX_GRAPH_FACTS = 8;
     private static final int MAX_TEXT_LENGTH = 700;
     private static final int MAX_EXCERPT_LENGTH = 180;
-    private static final Pattern TERM_SPLITTER = Pattern.compile("[\\s,，。！？、；：:()（）\\[\\]{}<>《》【】\"'‘’“”]+" );
+    private static final Pattern FULLTEXT_SPECIAL_CHARACTERS =
+            Pattern.compile("[+\\-~*<>()\\[\\]@\"']+");
+    private static final String RETRIEVAL_METHOD_DENSE = "dense";
+    private static final String RETRIEVAL_METHOD_LEXICAL = "lexical";
+    private static final String RETRIEVAL_METHOD_RRF = "rrf";
+    private static final String RETRIEVAL_METHOD_HYBRID_RRF = "hybrid-rrf";
 
     private final ContentChunkMapper contentChunkMapper;
     private final EntitySourceRelMapper entitySourceRelMapper;
@@ -112,10 +123,11 @@ public class DatabaseKnowledgeRetriever implements KnowledgeRetriever {
                 return KnowledgeRetrieveResult.empty();
             }
 
-            ChunkLoad chunkLoad = loadChunks(request, context.entityIds());
+            RetrievalPlan plan = buildPlan(request, context);
+            ChunkLoad chunkLoad = loadChunks(plan);
             List<ScoredChunk> scoredChunks = chunkLoad.chunks();
             List<KnowledgeChunkVO> chunks = scoredChunks.stream()
-                    .limit(normalizeTopK(request.getTopK()))
+                    .limit(plan.topK())
                     .map(ScoredChunk::chunk)
                     .collect(Collectors.toList());
 
@@ -126,7 +138,7 @@ public class DatabaseKnowledgeRetriever implements KnowledgeRetriever {
                             .collect(Collectors.toCollection(LinkedHashSet::new))
             );
             List<KnowledgeCitationCandidateVO> candidates = buildChunkCandidates(chunks, sources);
-            candidates.addAll(buildSourceCandidates(context.entityIds(), sources));
+            candidates.addAll(buildSourceCandidates(plan.entityIds(), sources));
             candidates.addAll(buildGraphCandidates(context.graphFacts()));
             candidates = deduplicateCandidates(candidates);
 
@@ -134,6 +146,7 @@ public class DatabaseKnowledgeRetriever implements KnowledgeRetriever {
             result.setChunks(chunks);
             result.setGraphFacts(limitList(context.graphFacts(), MAX_GRAPH_FACTS));
             result.setCitationCandidates(limitList(candidates, MAX_CITATIONS));
+            result.setRetrievalMethods(new ArrayList<>(chunkLoad.retrievalMethods()));
             result.setRetrievalStatus(resolveStatus(
                     !chunks.isEmpty() || !context.graphFacts().isEmpty() || !candidates.isEmpty(),
                     context.graphUnavailable() || chunkLoad.degraded()
@@ -141,6 +154,7 @@ public class DatabaseKnowledgeRetriever implements KnowledgeRetriever {
             result.refreshRetrievalMethods();
             return result;
         } catch (RuntimeException exception) {
+            log.warn("Knowledge retrieval failed", exception);
             return KnowledgeRetrieveResult.degraded();
         }
     }
@@ -155,75 +169,116 @@ public class DatabaseKnowledgeRetriever implements KnowledgeRetriever {
 
     private RetrievalContext loadContext(KnowledgeRetrieveRequest request) {
         Map<EntityType, Set<Long>> entityIds = new LinkedHashMap<>();
+        List<EntityHint> entityHints = new ArrayList<>();
         List<KnowledgeGraphFactVO> graphFacts = new ArrayList<>();
         boolean graphUnavailable = false;
+        boolean needGraph = needsGraph(resolveIntent(request));
 
         switch (request.getScopeType()) {
             case SCHOOL -> {
                 SchoolMapDetailVO detail = schoolMapService.getSchoolDetail(request.getScopeId());
                 if (detail == null) {
-                    return new RetrievalContext(Collections.emptyMap(), Collections.emptyList(), false);
+                    return new RetrievalContext(Collections.emptyMap(), Collections.emptyList(),
+                            Collections.emptyList(), false);
                 }
                 addEntity(entityIds, EntityType.SCHOOL, request.getScopeId());
+                SchoolSummaryVO school = detail.getSchool();
+                addEntityHint(entityHints, EntityType.SCHOOL, request.getScopeId(),
+                        school == null ? null : school.getSchoolName(),
+                        school == null ? null : school.getSchoolCode());
                 if (detail.getResources() != null) {
-                    detail.getResources().stream()
-                            .filter(item -> item != null && item.getResourceId() != null)
-                            .forEach(item -> addEntity(entityIds, EntityType.RESOURCE, item.getResourceId()));
+                    for (SchoolResourceItemVO item : detail.getResources()) {
+                        if (item == null || item.getResourceId() == null) {
+                            continue;
+                        }
+                        addEntity(entityIds, EntityType.RESOURCE, item.getResourceId());
+                        LocalEduResourceSummaryVO resource = item.getResource();
+                        addEntityHint(entityHints, EntityType.RESOURCE, item.getResourceId(),
+                                resource == null ? null : resource.getResourceName(),
+                                resource == null ? null : resource.getResourceCode());
+                    }
                 }
                 if (detail.getActivityPlans() != null) {
-                    detail.getActivityPlans().stream()
-                            .filter(plan -> plan != null && plan.getPlanId() != null)
-                            .forEach(plan -> addEntity(entityIds, EntityType.ACTIVITY_PLAN, plan.getPlanId()));
+                    for (TeachingActivityPlanVO plan : detail.getActivityPlans()) {
+                        if (plan == null || plan.getPlanId() == null) {
+                            continue;
+                        }
+                        addEntity(entityIds, EntityType.ACTIVITY_PLAN, plan.getPlanId());
+                        addEntityHint(entityHints, EntityType.ACTIVITY_PLAN, plan.getPlanId(),
+                                plan.getPlanCode(), plan.getTheme());
+                    }
                 }
-                GraphLoad graphLoad = loadSchoolGraphFacts(request);
-                graphFacts.addAll(graphLoad.facts());
-                graphUnavailable = graphLoad.unavailable();
+                if (needGraph) {
+                    GraphLoad graphLoad = loadSchoolGraphFacts(request);
+                    graphFacts.addAll(graphLoad.facts());
+                    addGraphResourceEntities(entityIds, graphLoad.facts());
+                    graphUnavailable = graphLoad.unavailable();
+                }
             }
             case REGION -> {
                 TownMapDetailVO detail = townMapService.getTownMapDetail(request.getScopeId());
                 if (detail == null) {
-                    return new RetrievalContext(Collections.emptyMap(), Collections.emptyList(), false);
+                    return new RetrievalContext(Collections.emptyMap(), Collections.emptyList(),
+                            Collections.emptyList(), false);
                 }
-                addRegionEntities(entityIds, detail);
-                GraphLoad graphLoad = loadRegionGraphFacts(request.getScopeId(), detail);
-                graphFacts.addAll(graphLoad.facts());
-                graphUnavailable = graphLoad.unavailable();
+                addEntityHint(entityHints, null, request.getScopeId(), detail.getRegionName());
+                addRegionEntities(entityIds, entityHints, detail);
+                if (needGraph) {
+                    GraphLoad graphLoad = loadRegionGraphFacts(request.getScopeId(), detail);
+                    graphFacts.addAll(graphLoad.facts());
+                    graphUnavailable = graphLoad.unavailable();
+                }
             }
             case RESOURCE -> {
                 addEntity(entityIds, EntityType.RESOURCE, request.getScopeId());
-                if (isRelationQuery(request.getQuery())) {
+                addEntityHint(entityHints, EntityType.RESOURCE, request.getScopeId());
+                if (needGraph) {
                     GraphLoad graphLoad = loadResourceGraphFacts(request.getScopeId());
                     graphFacts.addAll(graphLoad.facts());
                     graphUnavailable = graphLoad.unavailable();
                 }
             }
         }
-        return new RetrievalContext(entityIds, graphFacts, graphUnavailable);
+        return new RetrievalContext(freezeEntityIds(entityIds), List.copyOf(entityHints),
+                List.copyOf(graphFacts), graphUnavailable);
     }
 
-    private void addRegionEntities(Map<EntityType, Set<Long>> entityIds, TownMapDetailVO detail) {
+    private void addRegionEntities(Map<EntityType, Set<Long>> entityIds,
+                                   List<EntityHint> entityHints,
+                                   TownMapDetailVO detail) {
         if (detail.getMarkers() != null) {
             for (MapResourceMarkerVO marker : detail.getMarkers()) {
                 if (marker == null || marker.getId() == null) {
                     continue;
                 }
-                addEntity(entityIds, entityType(marker.getType()), marker.getId());
+                EntityType type = entityType(marker.getType());
+                addEntity(entityIds, type, marker.getId());
+                addEntityHint(entityHints, type, marker.getId(), marker.getName());
             }
         }
         if (detail.getHeroes() != null) {
             detail.getHeroes().stream()
                     .filter(item -> item != null && item.getHeroId() != null)
-                    .forEach(item -> addEntity(entityIds, EntityType.HERO, item.getHeroId()));
+                    .forEach(item -> {
+                        addEntity(entityIds, EntityType.HERO, item.getHeroId());
+                        addEntityHint(entityHints, EntityType.HERO, item.getHeroId(), item.getHeroName());
+                    });
         }
         if (detail.getStories() != null) {
             detail.getStories().stream()
                     .filter(item -> item != null && item.getStoryId() != null)
-                    .forEach(item -> addEntity(entityIds, EntityType.STORY, item.getStoryId()));
+                    .forEach(item -> {
+                        addEntity(entityIds, EntityType.STORY, item.getStoryId());
+                        addEntityHint(entityHints, EntityType.STORY, item.getStoryId(), item.getStoryTitle());
+                    });
         }
         if (detail.getEvents() != null) {
             detail.getEvents().stream()
                     .filter(item -> item != null && item.getEventId() != null)
-                    .forEach(item -> addEntity(entityIds, EntityType.EVENT, item.getEventId()));
+                    .forEach(item -> {
+                        addEntity(entityIds, EntityType.EVENT, item.getEventId());
+                        addEntityHint(entityHints, EntityType.EVENT, item.getEventId(), item.getEventName());
+                    });
         }
     }
 
@@ -246,105 +301,383 @@ public class DatabaseKnowledgeRetriever implements KnowledgeRetriever {
         }
     }
 
-    private ChunkLoad loadChunks(KnowledgeRetrieveRequest request,
-                                 Map<EntityType, Set<Long>> entityIds) {
-        if (entityIds.isEmpty()) {
-            return new ChunkLoad(Collections.emptyList(), false);
+    private void addGraphResourceEntities(Map<EntityType, Set<Long>> entityIds,
+                                          List<KnowledgeGraphFactVO> graphFacts) {
+        if (graphFacts == null) {
+            return;
         }
-        Set<Long> ids = entityIds.values().stream()
-                .flatMap(Collection::stream)
-                .collect(Collectors.toCollection(LinkedHashSet::new));
-        if (ids.isEmpty()) {
-            return new ChunkLoad(Collections.emptyList(), false);
-        }
-
-        if (ragProperties.isEnabled()) {
-            try {
-                List<ScoredChunk> vectorChunks = loadVectorChunks(request, entityIds);
-                if (!vectorChunks.isEmpty()) {
-                    return new ChunkLoad(vectorChunks, false);
-                }
-                log.warn("Vector retrieval returned no chunks; using keyword fallback");
-            } catch (RuntimeException exception) {
-                log.warn("Vector retrieval failed; using keyword fallback", exception);
-            }
-        }
-
-        return new ChunkLoad(loadKeywordChunks(request, entityIds, ids), true);
+        graphFacts.stream()
+                .filter(Objects::nonNull)
+                .filter(fact -> "SCHOOL_NEAR_RESOURCE".equals(fact.getPredicate()))
+                .map(KnowledgeGraphFactVO::getObjectId)
+                .filter(Objects::nonNull)
+                .forEach(resourceId -> addEntity(entityIds, EntityType.RESOURCE, resourceId));
     }
 
-    private List<ScoredChunk> loadVectorChunks(KnowledgeRetrieveRequest request,
-                                                Map<EntityType, Set<Long>> entityIds) {
-        Set<String> entityKeys = entityIds.entrySet().stream()
+    private RetrievalPlan buildPlan(KnowledgeRetrieveRequest request, RetrievalContext context) {
+        AgentIntent intent = resolveIntent(request);
+        List<EntityHint> matchedHints = context.entityHints().stream()
+                .filter(hint -> matchesEntity(request.getQuery(), hint))
+                .collect(Collectors.toCollection(ArrayList::new));
+
+        Map<EntityType, Set<Long>> scopedEntityIds = copyEntityIds(context.entityIds());
+        Set<Long> matchedResourceIds = matchedHints.stream()
+                .filter(hint -> hint.entityType() == EntityType.RESOURCE)
+                .map(EntityHint::entityId)
+                .filter(Objects::nonNull)
+                .collect(Collectors.toCollection(LinkedHashSet::new));
+        if (matchedResourceIds.size() == 1) {
+            scopedEntityIds = new LinkedHashMap<>();
+            scopedEntityIds.put(EntityType.RESOURCE, new LinkedHashSet<>(matchedResourceIds));
+        }
+
+        List<String> entityNames = matchedHints.stream()
+                .map(EntityHint::canonicalName)
+                .filter(StringUtils::hasText)
+                .distinct()
+                .collect(Collectors.toCollection(ArrayList::new));
+        if (entityNames.isEmpty()) {
+            context.entityHints().stream()
+                    .filter(hint -> hint.entityType() == null
+                            || hint.entityType() == scopeEntityType(request.getScopeType()))
+                    .map(EntityHint::canonicalName)
+                    .filter(StringUtils::hasText)
+                    .distinct()
+                    .limit(3)
+                    .forEach(entityNames::add);
+        }
+
+        String searchQuery = Stream.concat(
+                        Stream.of(request.getQuery()),
+                        Stream.concat(entityNames.stream(), Stream.of(request.getGrade(), request.getTheme()))
+                )
+                .filter(StringUtils::hasText)
+                .map(String::trim)
+                .distinct()
+                .collect(Collectors.joining(" "));
+        int topK = normalizeTopK(request.getTopK());
+        int multiplier = Math.max(1, ragProperties.getCandidateMultiplier());
+        int candidateLimit = Math.min(MAX_CANDIDATES, topK * multiplier);
+        Set<String> entityKeys = scopedEntityIds.entrySet().stream()
                 .flatMap(entry -> entry.getValue().stream()
                         .map(id -> entry.getKey().getValue() + ":" + id))
                 .collect(Collectors.toCollection(LinkedHashSet::new));
-        float[] queryVector = embeddingClient.embed(retrievalQuery(request));
-        int candidateLimit = Math.min(
-                MAX_CHUNKS * Math.max(2, ragProperties.getCandidateMultiplier()),
-                normalizeTopK(request.getTopK()) * Math.max(2, ragProperties.getCandidateMultiplier())
+
+        return new RetrievalPlan(
+                request.getQuery().trim(),
+                searchQuery,
+                intent,
+                request.getScopeType(),
+                request.getScopeId(),
+                request.getGrade(),
+                request.getTheme(),
+                Set.copyOf(entityKeys),
+                freezeEntityIds(scopedEntityIds),
+                topK,
+                candidateLimit,
+                ragProperties.isEnabled(),
+                true,
+                needsGraph(intent)
         );
-        List<VectorSearchCandidate> candidates = vectorStore.search(queryVector, entityKeys, candidateLimit);
-        if (candidates.isEmpty()) {
-            return Collections.emptyList();
-        }
-
-        Map<Long, Double> semanticScores = candidates.stream()
-                .collect(Collectors.toMap(
-                        VectorSearchCandidate::chunkId,
-                        VectorSearchCandidate::score,
-                        Math::max,
-                        LinkedHashMap::new
-                ));
-        Map<Long, ContentChunk> chunksById = contentChunkMapper.selectBatchIds(semanticScores.keySet()).stream()
-                .filter(Objects::nonNull)
-                .filter(chunk -> chunk.getChunkId() != null)
-                .filter(chunk -> entityIds.getOrDefault(chunk.getEntityType(), Collections.emptySet())
-                        .contains(chunk.getEntityId()))
-                .collect(Collectors.toMap(ContentChunk::getChunkId, Function.identity(), (first, second) -> first));
-        Set<String> terms = retrievalTerms(request);
-
-        return candidates.stream()
-                .map(candidate -> {
-                    ContentChunk chunk = chunksById.get(candidate.chunkId());
-                    if (chunk == null) {
-                        return null;
-                    }
-                    double rerankedScore = rerankScore(chunk, candidate.score(), terms);
-                    return new ScoredChunk(toChunk(chunk, rerankedScore, "vector+hybrid-rerank"), rerankedScore);
-                })
-                .filter(Objects::nonNull)
-                .sorted(Comparator.comparing(ScoredChunk::score).reversed()
-                        .thenComparing(item -> item.chunk().getChunkId(), Comparator.nullsLast(Long::compareTo)))
-                .limit(MAX_CHUNKS)
-                .collect(Collectors.toList());
     }
 
-    private List<ScoredChunk> loadKeywordChunks(KnowledgeRetrieveRequest request,
-                                                 Map<EntityType, Set<Long>> entityIds,
-                                                 Set<Long> ids) {
+    private boolean matchesEntity(String query, EntityHint hint) {
+        if (!StringUtils.hasText(query) || hint == null || hint.aliases().isEmpty()) {
+            return false;
+        }
+        String normalizedQuery = normalize(query);
+        return hint.aliases().stream()
+                .map(this::normalize)
+                .filter(alias -> !alias.isEmpty())
+                .anyMatch(normalizedQuery::contains);
+    }
 
-        List<ContentChunk> chunks = contentChunkMapper.selectList(new LambdaQueryWrapper<ContentChunk>()
-                .in(ContentChunk::getEntityType, entityIds.keySet())
-                .in(ContentChunk::getEntityId, ids)
-                .orderByAsc(ContentChunk::getEntityType)
-                .orderByAsc(ContentChunk::getEntityId)
-                .orderByAsc(ContentChunk::getChunkIndex));
+    private EntityType scopeEntityType(KnowledgeScopeType scopeType) {
+        if (scopeType == KnowledgeScopeType.SCHOOL) {
+            return EntityType.SCHOOL;
+        }
+        if (scopeType == KnowledgeScopeType.RESOURCE) {
+            return EntityType.RESOURCE;
+        }
+        return null;
+    }
 
-        Set<String> terms = retrievalTerms(request);
-        return chunks.stream()
-                .filter(chunk -> chunk != null
-                        && entityIds.getOrDefault(chunk.getEntityType(), Collections.emptySet())
+    private AgentIntent resolveIntent(KnowledgeRetrieveRequest request) {
+        if (request != null && StringUtils.hasText(request.getIntent())) {
+            try {
+                AgentIntent provided = AgentIntent.valueOf(request.getIntent().trim().toUpperCase(Locale.ROOT));
+                return provided;
+            } catch (IllegalArgumentException ignored) {
+                // Fall through to the deterministic keyword recognizer.
+            }
+        }
+        String normalized = normalize(request == null ? null : request.getQuery());
+        if (containsAny(normalized, "关系", "关联", "联系", "教学关联")) {
+            return AgentIntent.RELATION_QUERY;
+        }
+        if (containsAny(normalized, "附近", "周边", "有哪些资源", "资源推荐", "可用资源")) {
+            return AgentIntent.NEARBY_RESOURCE;
+        }
+        if (containsAny(normalized, "怎样", "如何", "怎么开展", "怎么设计", "怎么利用",
+                "开展", "设计", "课堂", "课程", "活动", "实践", "志愿", "思政课", "教学建议")) {
+            return AgentIntent.TEACHING_SUGGESTION;
+        }
+        if (containsAny(normalized, "介绍", "是什么", "详情", "教育价值", "教育意义", "解释", "适合什么年级")) {
+            return AgentIntent.RESOURCE_EXPLANATION;
+        }
+        return AgentIntent.UNKNOWN;
+    }
+
+    private boolean containsAny(String value, String... candidates) {
+        if (!StringUtils.hasText(value)) {
+            return false;
+        }
+        for (String candidate : candidates) {
+            if (value.contains(candidate)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean needsGraph(AgentIntent intent) {
+        return intent == AgentIntent.NEARBY_RESOURCE || intent == AgentIntent.RELATION_QUERY;
+    }
+
+    private void addEntityHint(List<EntityHint> entityHints,
+                               EntityType type,
+                               Long id,
+                               String... names) {
+        if (entityHints == null || id == null || id <= 0) {
+            return;
+        }
+        List<String> aliases = Stream.of(names)
+                .filter(StringUtils::hasText)
+                .map(String::trim)
+                .distinct()
+                .collect(Collectors.toCollection(ArrayList::new));
+        if (aliases.isEmpty()) {
+            return;
+        }
+        entityHints.add(new EntityHint(type, id, aliases.get(0), List.copyOf(aliases)));
+    }
+
+    private Map<EntityType, Set<Long>> copyEntityIds(Map<EntityType, Set<Long>> entityIds) {
+        if (entityIds == null || entityIds.isEmpty()) {
+            return Collections.emptyMap();
+        }
+        Map<EntityType, Set<Long>> copy = new LinkedHashMap<>();
+        entityIds.forEach((type, ids) -> {
+            if (type != null && ids != null && !ids.isEmpty()) {
+                copy.put(type, new LinkedHashSet<>(ids));
+            }
+        });
+        return copy;
+    }
+
+    private Map<EntityType, Set<Long>> freezeEntityIds(Map<EntityType, Set<Long>> entityIds) {
+        if (entityIds == null || entityIds.isEmpty()) {
+            return Collections.emptyMap();
+        }
+        Map<EntityType, Set<Long>> frozen = new LinkedHashMap<>();
+        entityIds.forEach((type, ids) -> {
+            if (type != null && ids != null && !ids.isEmpty()) {
+                frozen.put(type, Set.copyOf(ids));
+            }
+        });
+        return Collections.unmodifiableMap(frozen);
+    }
+
+    private ChunkLoad loadChunks(RetrievalPlan plan) {
+        if (plan.entityIds().isEmpty() || plan.entityKeys().isEmpty()) {
+            return new ChunkLoad(Collections.emptyList(), false, Collections.emptyList());
+        }
+
+        ChannelLoad dense = plan.needDense()
+                ? loadDenseCandidates(plan)
+                : ChannelLoad.notRequested();
+        ChannelLoad lexical = plan.needLexical()
+                ? loadLexicalCandidates(plan)
+                : ChannelLoad.notRequested();
+
+        Map<Long, Integer> denseRanks = ranksByChunkId(dense.candidates());
+        Map<Long, Integer> lexicalRanks = ranksByChunkId(lexical.candidates());
+        Set<Long> candidateIds = new LinkedHashSet<>();
+        candidateIds.addAll(denseRanks.keySet());
+        candidateIds.addAll(lexicalRanks.keySet());
+        if (candidateIds.isEmpty()) {
+            List<String> methods = successfulMethods(plan, dense, lexical);
+            return new ChunkLoad(Collections.emptyList(), !dense.successful() || !lexical.successful(), methods);
+        }
+
+        Map<Long, Double> rrfScores = new LinkedHashMap<>();
+        denseRanks.forEach((chunkId, rank) -> rrfScores.merge(
+                chunkId,
+                ragProperties.getDenseRrfWeight() / (Math.max(1, ragProperties.getRrfK()) + rank),
+                Double::sum
+        ));
+        lexicalRanks.forEach((chunkId, rank) -> rrfScores.merge(
+                chunkId,
+                ragProperties.getLexicalRrfWeight() / (Math.max(1, ragProperties.getRrfK()) + rank),
+                Double::sum
+        ));
+
+        List<Long> orderedIds = rrfScores.entrySet().stream()
+                .sorted(Map.Entry.<Long, Double>comparingByValue().reversed()
+                        .thenComparing(Map.Entry.comparingByKey()))
+                .limit(plan.candidateLimit())
+                .map(Map.Entry::getKey)
+                .collect(Collectors.toCollection(ArrayList::new));
+        Map<Long, ContentChunk> chunksById = contentChunkMapper.selectBatchIds(orderedIds).stream()
+                .filter(Objects::nonNull)
+                .filter(chunk -> chunk.getChunkId() != null)
+                .filter(chunk -> plan.entityIds().getOrDefault(chunk.getEntityType(), Collections.emptySet())
                         .contains(chunk.getEntityId()))
-                .filter(chunk -> StringUtils.hasText(chunk.getChunkText()) || StringUtils.hasText(chunk.getChunkTitle()))
-                .map(chunk -> {
-                    double value = keywordScore(chunk, terms);
-                    return new ScoredChunk(toChunk(chunk, value, "keyword-fallback"), value);
+                .collect(Collectors.toMap(ContentChunk::getChunkId, Function.identity(), (first, second) -> first));
+
+        double maxScore = orderedIds.stream()
+                .map(rrfScores::get)
+                .filter(Objects::nonNull)
+                .mapToDouble(Double::doubleValue)
+                .max()
+                .orElse(1D);
+        List<ScoredChunk> chunks = orderedIds.stream()
+                .map(chunkId -> {
+                    ContentChunk chunk = chunksById.get(chunkId);
+                    Double score = rrfScores.get(chunkId);
+                    if (chunk == null || score == null) {
+                        return null;
+                    }
+                    boolean fromDense = denseRanks.containsKey(chunkId);
+                    boolean fromLexical = lexicalRanks.containsKey(chunkId);
+                    String method = fromDense && fromLexical
+                            ? RETRIEVAL_METHOD_HYBRID_RRF
+                            : fromDense ? RETRIEVAL_METHOD_DENSE : RETRIEVAL_METHOD_LEXICAL;
+                    double normalizedScore = maxScore <= 0D ? 0D : score / maxScore;
+                    return new ScoredChunk(toChunk(chunk, normalizedScore, method), normalizedScore);
                 })
-                .sorted(Comparator.comparing(ScoredChunk::score).reversed()
-                        .thenComparing(item -> item.chunk().getChunkId(), Comparator.nullsLast(Long::compareTo)))
+                .filter(Objects::nonNull)
                 .limit(MAX_CHUNKS)
-                .collect(Collectors.toList());
+                .collect(Collectors.toCollection(ArrayList::new));
+
+        boolean degraded = !dense.successful() || !lexical.successful();
+        return new ChunkLoad(chunks, degraded, successfulMethods(plan, dense, lexical));
+    }
+
+    private ChannelLoad loadDenseCandidates(RetrievalPlan plan) {
+        try {
+            float[] queryVector = embeddingClient.embed(plan.searchQuery());
+            List<VectorSearchCandidate> candidates = vectorStore.search(
+                    queryVector,
+                    plan.entityKeys(),
+                    plan.candidateLimit()
+            );
+            return new ChannelLoad(rankCandidates(candidates), true);
+        } catch (RuntimeException exception) {
+            log.warn("Dense retrieval failed", exception);
+            return new ChannelLoad(Collections.emptyList(), false);
+        }
+    }
+
+    private ChannelLoad loadLexicalCandidates(RetrievalPlan plan) {
+        String query = sanitizeFullTextQuery(plan.searchQuery());
+        if (!StringUtils.hasText(query)) {
+            return new ChannelLoad(Collections.emptyList(), true);
+        }
+        try {
+            Map<String, Collection<Long>> entityIdsByType = plan.entityIds().entrySet().stream()
+                    .collect(Collectors.toMap(
+                            entry -> entry.getKey().getValue(),
+                            entry -> new LinkedHashSet<>(entry.getValue()),
+                            (first, second) -> {
+                                Set<Long> merged = new LinkedHashSet<>(first);
+                                merged.addAll(second);
+                                return merged;
+                            },
+                            LinkedHashMap::new
+                    ));
+            List<ContentChunk> chunks = contentChunkMapper.searchByFullText(
+                    entityIdsByType,
+                    query,
+                    plan.candidateLimit()
+            );
+            return new ChannelLoad(rankChunks(chunks), true);
+        } catch (RuntimeException exception) {
+            log.warn("Lexical retrieval failed", exception);
+            return new ChannelLoad(Collections.emptyList(), false);
+        }
+    }
+
+    private List<RankedCandidate> rankCandidates(List<VectorSearchCandidate> candidates) {
+        if (candidates == null || candidates.isEmpty()) {
+            return Collections.emptyList();
+        }
+        Map<Long, Double> bestScores = new LinkedHashMap<>();
+        candidates.stream()
+                .filter(Objects::nonNull)
+                .filter(candidate -> candidate.chunkId() != null)
+                .forEach(candidate -> bestScores.merge(candidate.chunkId(), candidate.score(), Math::max));
+        return bestScores.entrySet().stream()
+                .sorted(Map.Entry.<Long, Double>comparingByValue().reversed()
+                        .thenComparing(Map.Entry.comparingByKey()))
+                .map(entry -> new RankedCandidate(entry.getKey(), entry.getValue()))
+                .collect(Collectors.toCollection(ArrayList::new));
+    }
+
+    private List<RankedCandidate> rankChunks(List<ContentChunk> chunks) {
+        if (chunks == null || chunks.isEmpty()) {
+            return Collections.emptyList();
+        }
+        List<RankedCandidate> ranked = new ArrayList<>();
+        Set<Long> seen = new LinkedHashSet<>();
+        for (ContentChunk chunk : chunks) {
+            if (chunk != null && chunk.getChunkId() != null && seen.add(chunk.getChunkId())) {
+                ranked.add(new RankedCandidate(chunk.getChunkId(), 0D));
+            }
+        }
+        return ranked;
+    }
+
+    private Map<Long, Integer> ranksByChunkId(List<RankedCandidate> candidates) {
+        Map<Long, Integer> ranks = new LinkedHashMap<>();
+        if (candidates == null) {
+            return ranks;
+        }
+        int rank = 1;
+        for (RankedCandidate candidate : candidates) {
+            if (candidate != null && candidate.chunkId() != null) {
+                ranks.putIfAbsent(candidate.chunkId(), rank++);
+            }
+        }
+        return ranks;
+    }
+
+    private List<String> successfulMethods(RetrievalPlan plan,
+                                            ChannelLoad dense,
+                                            ChannelLoad lexical) {
+        List<String> methods = new ArrayList<>();
+        if (plan.needDense() && dense.successful()) {
+            methods.add(RETRIEVAL_METHOD_DENSE);
+        }
+        if (plan.needLexical() && lexical.successful()) {
+            methods.add(RETRIEVAL_METHOD_LEXICAL);
+        }
+        if (plan.needDense() && plan.needLexical()
+                && dense.successful() && lexical.successful()
+                && (!dense.candidates().isEmpty() || !lexical.candidates().isEmpty())) {
+            methods.add(RETRIEVAL_METHOD_RRF);
+        }
+        return methods;
+    }
+
+    private String sanitizeFullTextQuery(String query) {
+        if (!StringUtils.hasText(query)) {
+            return "";
+        }
+        return FULLTEXT_SPECIAL_CHARACTERS.matcher(query)
+                .replaceAll(" ")
+                .replaceAll("\\s+", " ")
+                .trim();
     }
 
     private KnowledgeChunkVO toChunk(ContentChunk chunk, double score, String retrievalMethod) {
@@ -359,67 +692,6 @@ public class DatabaseKnowledgeRetriever implements KnowledgeRetriever {
         vo.setEntityId(chunk.getEntityId());
         vo.setSourceId(chunk.getSourceId());
         return vo;
-    }
-
-    private double keywordScore(ContentChunk chunk, Set<String> terms) {
-        String title = normalize(chunk.getChunkTitle());
-        String text = normalize(chunk.getChunkText());
-        if (terms.isEmpty()) {
-            return 0.2D;
-        }
-        double value = 0.15D;
-        for (String term : terms) {
-            if (title.contains(term)) {
-                value += 0.18D;
-            }
-            if (text.contains(term)) {
-                value += 0.1D;
-            }
-        }
-        return Math.min(0.99D, value);
-    }
-
-    private double rerankScore(ContentChunk chunk, double semanticScore, Set<String> terms) {
-        double normalizedSemantic = Math.max(0D, Math.min(1D, (semanticScore + 1D) / 2D));
-        double keyword = keywordScore(chunk, terms);
-        double titleCoverage = termCoverage(normalize(chunk.getChunkTitle()), terms);
-        return Math.min(0.999D, normalizedSemantic * 0.75D + keyword * 0.20D + titleCoverage * 0.05D);
-    }
-
-    private double termCoverage(String value, Set<String> terms) {
-        if (terms.isEmpty() || !StringUtils.hasText(value)) {
-            return 0D;
-        }
-        long matches = terms.stream().filter(value::contains).count();
-        return (double) matches / terms.size();
-    }
-
-    private String retrievalQuery(KnowledgeRetrieveRequest request) {
-        return Stream.of(request.getQuery(), request.getTheme(), request.getGrade())
-                .filter(StringUtils::hasText)
-                .map(String::trim)
-                .distinct()
-                .collect(Collectors.joining("\n"));
-    }
-
-    private Set<String> retrievalTerms(KnowledgeRetrieveRequest request) {
-        Set<String> terms = new LinkedHashSet<>();
-        addTerms(terms, request.getQuery());
-        addTerms(terms, request.getGrade());
-        addTerms(terms, request.getTheme());
-        return terms;
-    }
-
-    private void addTerms(Set<String> terms, String value) {
-        if (!StringUtils.hasText(value)) {
-            return;
-        }
-        for (String item : TERM_SPLITTER.split(value.trim())) {
-            String normalized = normalize(item);
-            if (normalized.length() >= 2 && normalized.length() <= 20) {
-                terms.add(normalized);
-            }
-        }
     }
 
     private Map<Long, DataSource> loadSources(Collection<Long> sourceIds) {
@@ -558,7 +830,7 @@ public class DatabaseKnowledgeRetriever implements KnowledgeRetriever {
                 facts.add(fact);
             }
 
-            if (isRelationQuery(request.getQuery())) {
+            if (resolveIntent(request) == AgentIntent.RELATION_QUERY) {
                 facts.addAll(loadSchoolPathFacts(request.getScopeId()));
             }
         } catch (RuntimeException exception) {
@@ -683,11 +955,6 @@ public class DatabaseKnowledgeRetriever implements KnowledgeRetriever {
         }
     }
 
-    private boolean isRelationQuery(String query) {
-        String normalized = normalize(query);
-        return normalized.contains("关系") || normalized.contains("关联") || normalized.contains("联系");
-    }
-
     private List<KnowledgeGraphFactVO> deduplicateFacts(List<KnowledgeGraphFactVO> facts) {
         Map<String, KnowledgeGraphFactVO> unique = new LinkedHashMap<>();
         for (KnowledgeGraphFactVO fact : facts) {
@@ -788,16 +1055,51 @@ public class DatabaseKnowledgeRetriever implements KnowledgeRetriever {
         return value.substring(0, maxLength) + "...";
     }
 
+    private record RetrievalPlan(String originalQuery,
+                                 String searchQuery,
+                                 AgentIntent intent,
+                                 KnowledgeScopeType scopeType,
+                                 Long scopeId,
+                                 String grade,
+                                 String theme,
+                                 Set<String> entityKeys,
+                                 Map<EntityType, Set<Long>> entityIds,
+                                 int topK,
+                                 int candidateLimit,
+                                 boolean needDense,
+                                 boolean needLexical,
+                                 boolean needGraph) {
+    }
+
+    private record EntityHint(EntityType entityType,
+                              Long entityId,
+                              String canonicalName,
+                              List<String> aliases) {
+    }
+
+    private record RankedCandidate(Long chunkId, double score) {
+    }
+
+    private record ChannelLoad(List<RankedCandidate> candidates, boolean successful) {
+
+        private static ChannelLoad notRequested() {
+            return new ChannelLoad(Collections.emptyList(), true);
+        }
+    }
+
     private record ScoredChunk(KnowledgeChunkVO chunk, double score) {
     }
 
-    private record ChunkLoad(List<ScoredChunk> chunks, boolean degraded) {
+    private record ChunkLoad(List<ScoredChunk> chunks,
+                             boolean degraded,
+                             List<String> retrievalMethods) {
     }
 
     private record GraphLoad(List<KnowledgeGraphFactVO> facts, boolean unavailable) {
     }
 
     private record RetrievalContext(Map<EntityType, Set<Long>> entityIds,
+                                    List<EntityHint> entityHints,
                                     List<KnowledgeGraphFactVO> graphFacts,
                                     boolean graphUnavailable) {
     }

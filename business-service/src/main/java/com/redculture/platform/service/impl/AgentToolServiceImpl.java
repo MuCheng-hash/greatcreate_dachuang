@@ -8,6 +8,7 @@ import com.redculture.platform.service.LocalEduResourceService;
 import com.redculture.platform.service.SchoolMapService;
 import com.redculture.platform.service.agent.AgentAccessGuard;
 import com.redculture.platform.vo.SchoolMapDetailVO;
+import com.redculture.platform.vo.AgentIntent;
 import com.redculture.platform.vo.ai.AgentToolRequest;
 import com.redculture.platform.vo.ai.KnowledgeRetrieveRequest;
 import com.redculture.platform.vo.ai.KnowledgeRetrieveResult;
@@ -89,7 +90,7 @@ public class AgentToolServiceImpl implements AgentToolService {
     @Override
     public KnowledgeRetrieveResult knowledgeRetrieve(AgentToolRequest request) {
         accessGuard.assertToolAccess(request);
-        return retrieve(request, request.getQuery());
+        return retrieve(request, request.getQuery(), null);
     }
 
     @Override
@@ -99,12 +100,15 @@ public class AgentToolServiceImpl implements AgentToolService {
         if (!query.contains("关系") && !query.contains("关联") && !query.contains("联系")) {
             query += " 关系";
         }
-        return retrieve(request, query);
+        return retrieve(request, query, AgentIntent.RELATION_QUERY);
     }
 
-    private KnowledgeRetrieveResult retrieve(AgentToolRequest request, String query) {
+    private KnowledgeRetrieveResult retrieve(AgentToolRequest request,
+                                             String query,
+                                             AgentIntent intent) {
         KnowledgeRetrieveRequest retrieveRequest = new KnowledgeRetrieveRequest();
         retrieveRequest.setQuery(query);
+        retrieveRequest.setIntent(intent == null ? null : intent.name());
         retrieveRequest.setScopeType(scopeType(request));
         retrieveRequest.setScopeId(request.getScope().getScopeId());
         retrieveRequest.setGrade(request.getGrade());

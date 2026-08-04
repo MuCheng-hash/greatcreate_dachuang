@@ -401,7 +401,7 @@ CREATE TABLE content_chunk (
     FOREIGN KEY (source_id) REFERENCES data_source(source_id),
   CONSTRAINT uk_content_chunk UNIQUE (entity_type, entity_id, chunk_index),
   KEY idx_chunk_entity (entity_type, entity_id),
-  FULLTEXT KEY ft_chunk_text (chunk_title, chunk_text)
+  FULLTEXT INDEX ft_chunk_text (chunk_title, chunk_text) WITH PARSER ngram
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE audit_log (

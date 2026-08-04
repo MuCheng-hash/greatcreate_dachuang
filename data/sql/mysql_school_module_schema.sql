@@ -20,6 +20,13 @@ MODIFY COLUMN entity_type ENUM('site', 'hero', 'event', 'memorial', 'story', 'sc
 ALTER TABLE content_chunk
 MODIFY COLUMN entity_type ENUM('site', 'hero', 'event', 'memorial', 'story', 'school', 'resource', 'activity_plan') NOT NULL;
 
+-- Existing installations: rebuild the Chinese-capable FULLTEXT index once.
+ALTER TABLE content_chunk
+  DROP INDEX ft_chunk_text;
+CREATE FULLTEXT INDEX ft_chunk_text
+  ON content_chunk (chunk_title, chunk_text)
+  WITH PARSER ngram;
+
 ALTER TABLE audit_log
 MODIFY COLUMN entity_type ENUM('region', 'site', 'hero', 'event', 'memorial', 'story', 'tag', 'school', 'resource', 'activity_plan') NOT NULL;
 

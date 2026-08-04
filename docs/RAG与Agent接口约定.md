@@ -1,6 +1,6 @@
 # RAG 与 Agent 接口约定
 
-> 版本：v1.0
+> 版本：v1.1
 >
 > 状态：待双方确认后冻结
 >
@@ -72,7 +72,8 @@ Agent：校验引用并返回结构化结果
 - Agent 不允许让 LLM 直接生成任意 SQL 或 Cypher 并执行。
 - Agent 不允许信任模型自造的来源名称、URL 或引用 ID。
 - 前端不直接拼接数据库数据作为最终可信上下文。
-- 不因为本协议新增聊天记录表、向量数据库表或其他数据库结构。
+- 不因为本协议新增聊天记录表、向量数据库表或其他业务表；本轮仅为已有
+  `content_chunk` 全文索引补充 MySQL `ngram` parser，索引重建由部署人员按 SQL 脚本一次性执行。
 
 ## 4. RAG 检索接口
 
@@ -110,6 +111,7 @@ Java 内部接口和 HTTP 接口只实现一种即可，不要求同一份代码
   "query": "西柏坡镇适合四年级的红色教育资源",
   "scopeType": "SCHOOL",
   "scopeId": 1,
+  "intent": "NEARBY_RESOURCE",
   "grade": "四年级",
   "theme": "红色文化",
   "topK": 5
@@ -123,6 +125,7 @@ Java 内部接口和 HTTP 接口只实现一种即可，不要求同一份代码
 | `query` | `String` | 是 | 用户原始问题或 Agent 改写后的检索问题，不得作为 SQL/Cypher 执行 |
 | `scopeType` | `String` | 是 | 只允许 `SCHOOL`、`REGION`、`RESOURCE` |
 | `scopeId` | `Long` | 是 | 与 `scopeType` 对应的学校、区域或资源 ID |
+| `intent` | `String` | 否 | Agent 已识别的意图；可选 `NEARBY_RESOURCE`、`TEACHING_SUGGESTION`、`RESOURCE_EXPLANATION`、`RELATION_QUERY`、`UNKNOWN`。为空或无法识别时由 RAG 使用关键词规则兜底 |
 | `grade` | `String` | 否 | 适用年级，例如 `四年级` |
 | `theme` | `String` | 否 | 教学主题，例如 `红色文化`、`敬老志愿服务` |
 | `topK` | `Integer` | 否 | 默认 `5`，最大 `8` |
@@ -148,7 +151,7 @@ Java 内部接口和 HTTP 接口只实现一种即可，不要求同一份代码
       "title": "西柏坡红色教育资料",
       "text": "内容片段……",
       "score": 0.91,
-      "retrievalMethod": "keyword",
+      "retrievalMethod": "hybrid-rrf",
       "entityType": "resource",
       "entityId": 5,
       "sourceId": 3
@@ -173,7 +176,8 @@ Java 内部接口和 HTTP 接口只实现一种即可，不要求同一份代码
       "excerpt": "内容片段……",
       "url": null
     }
-  ]
+  ],
+  "retrievalMethods": ["dense", "lexical", "rrf", "knowledge-graph"]
 }
 ```
 
@@ -185,6 +189,7 @@ Java 内部接口和 HTTP 接口只实现一种即可，不要求同一份代码
 | `chunks` | `Array` | 内容分块证据，无结果时返回 `[]` |
 | `graphFacts` | `Array` | Neo4j 或其他结构化关系事实，无结果时返回 `[]` |
 | `citationCandidates` | `Array` | 给 Agent 和 LLM 使用的可展示引用候选，无结果时返回 `[]` |
+| `retrievalMethods` | `Array<String>` | 实际使用的召回方式，可包含 `dense`、`lexical`、`rrf`、`knowledge-graph` |
 
 响应规则：
 
@@ -204,7 +209,7 @@ Java 内部接口和 HTTP 接口只实现一种即可，不要求同一份代码
 | `title` | `String` | 内容分块标题 |
 | `text` | `String` | 可供 LLM 使用的内容，建议限制长度 |
 | `score` | `Double` | 检索分数；图谱事实可为空 |
-| `retrievalMethod` | `String` | 例如 `keyword`、`fulltext`、`vector` |
+| `retrievalMethod` | `String` | 内容分块的主要召回方式，可为 `dense`、`lexical` 或 `hybrid-rrf` |
 | `entityType` | `String` | 关联实体类型，例如 `school`、`resource` |
 | `entityId` | `Long` | 关联实体 ID |
 | `sourceId` | `Long` | `data_source` 主键，可为空 |
@@ -302,7 +307,7 @@ Java 内部接口和 HTTP 接口只实现一种即可，不要求同一份代码
 
 - RAG 同学不要修改 Agent 的 Controller、前端问答渲染和最终响应结构。
 - Agent 同学不要直接修改 RAG 的检索算法或数据库查询实现。
-- 双方都不要为了本协议修改数据库表结构。
+- 双方都不要为了本协议新增业务表；已有环境的 `content_chunk.ft_chunk_text` 索引按迁移脚本重建为 `ngram` 全文索引。
 - Java 对外的 `/api/ai/teaching-plans/generate` 和
   `/api/ai/teaching-plans/generate/stream` 保持兼容；FastAPI 内部统一调用
   `/agent/messages` 和 `/agent/messages/stream`，不再保留 `/llm/*` 教学方案接口。
@@ -413,10 +418,10 @@ RAG 请求重点：
 
 ## 10. 版本和兼容性
 
-- 本协议版本为 `v1.0`。
+- 本协议版本为 `v1.1`。
 - 新增字段必须保持向后兼容，消费者应忽略未知字段。
 - 不得直接重命名或删除已冻结字段；需要变更时升级协议版本。
-- `retrievalMethod` 可以扩展，例如从 `keyword` 增加 `fulltext`、`vector`，不改变顶层响应结构。
+- `retrievalMethod` 当前使用 `dense`、`lexical`、`hybrid-rrf`；`retrievalMethods` 可报告 `dense`、`lexical`、`rrf`、`knowledge-graph`，不改变顶层响应结构。
 - 后续引入向量数据库时，只替换 RAG 实现，不改变 Agent 请求和响应契约。
 - 如果 RAG 从 Java 内部接口迁移为 Python HTTP 服务，必须保持本文档中的 JSON 字段和语义不变。
 

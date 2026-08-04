@@ -130,7 +130,7 @@ class AiTeachingPlanServiceImplTest {
         assertFalse(response.getObjectives().isEmpty());
         assertFalse(response.getCitations().isEmpty());
         assertEquals("ok", response.getRetrievalStatus());
-        assertEquals(List.of("vector+hybrid-rerank"), response.getRetrievalMethods());
+        assertEquals(List.of("hybrid-rrf"), response.getRetrievalMethods());
         verify(teachingActivityPlanService, never()).createPlan(any());
     }
 
@@ -160,7 +160,7 @@ class AiTeachingPlanServiceImplTest {
             value.setTitle(chunk.getChunkTitle());
             value.setText(chunk.getChunkText());
             value.setSourceId(chunk.getSourceId());
-            value.setRetrievalMethod("vector+hybrid-rerank");
+            value.setRetrievalMethod("hybrid-rrf");
             return value;
         }).toList());
         retrieval.setCitationCandidates(chunks.stream().map(chunk -> {

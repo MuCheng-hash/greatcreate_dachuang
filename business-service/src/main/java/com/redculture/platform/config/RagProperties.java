@@ -18,6 +18,9 @@ public class RagProperties {
     private String qdrantApiKey;
     private String qdrantCollection = "red_culture_content_chunks";
     private int candidateMultiplier = 4;
+    private int rrfK = 60;
+    private double denseRrfWeight = 1.0D;
+    private double lexicalRrfWeight = 1.0D;
     private double minimumVectorScore = 0.2D;
     private int connectTimeoutMs = 3000;
     private int readTimeoutMs = 15000;
