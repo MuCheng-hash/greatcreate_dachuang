@@ -96,6 +96,131 @@ describe("assistant view", () => {
     expect(wrapper.find(".history-row").exists()).toBe(false);
   });
 
+  it("unwraps a valid legacy JSON answer before rendering historical Markdown", async () => {
+    apiMock.get.mockImplementation(async (path) => {
+      if (path === "/api/ai/models") return [];
+      if (path === "/api/ai/qa/history") return [{
+        threadId: "legacy-valid", title: "旧格式问题", preview: "旧格式回答", messageCount: 2,
+        scopeType: "SCHOOL", scopeId: "1", createdAt: "2026-07-30T00:00:00Z", updatedAt: "2026-07-30T00:01:00Z"
+      }];
+      if (path === "/api/ai/qa/history/legacy-valid") return {
+        threadId: "legacy-valid", scopeType: "SCHOOL", scopeId: "1", status: "active",
+        createdAt: "2026-07-30T00:00:00Z", updatedAt: "2026-07-30T00:01:00Z",
+        messages: [
+          { id: 1, role: "user", content: "旧格式问题", createdAt: "2026-07-30T00:00:00Z" },
+          {
+            id: 2,
+            role: "assistant",
+            content: '{"answer":"### 资源建议\\n\\n- 安排实地观察","intent":"TEACHING_SUGGESTION"}',
+            createdAt: "2026-07-30T00:01:00Z",
+            metadata: {},
+          },
+        ],
+      };
+      return [];
+    });
+    const wrapper = mount(AssistantView, {
+      global: { stubs: { AppShell: { template: "<div><slot /></div>" }, InlineNotice: true } },
+    });
+    await flushPromises();
+    await wrapper.get(".history-open").trigger("click");
+    await flushPromises();
+
+    expect(wrapper.find(".assistant-answer h3").text()).toBe("资源建议");
+    expect(wrapper.find(".assistant-answer li").text()).toBe("安排实地观察");
+    expect(wrapper.text()).not.toContain('"answer"');
+  });
+
+  it("recovers the answer from malformed legacy JSON without exposing the envelope", async () => {
+    apiMock.get.mockImplementation(async (path) => {
+      if (path === "/api/ai/models") return [];
+      if (path === "/api/ai/qa/history") return [{
+        threadId: "legacy-malformed", title: "损坏旧格式问题", preview: "损坏旧格式回答", messageCount: 2,
+        scopeType: "SCHOOL", scopeId: "1", createdAt: "2026-07-30T00:00:00Z", updatedAt: "2026-07-30T00:01:00Z"
+      }];
+      if (path === "/api/ai/qa/history/legacy-malformed") return {
+        threadId: "legacy-malformed", scopeType: "SCHOOL", scopeId: "1", status: "active",
+        createdAt: "2026-07-30T00:00:00Z", updatedAt: "2026-07-30T00:01:00Z",
+        messages: [
+          { id: 1, role: "user", content: "损坏旧格式问题", createdAt: "2026-07-30T00:00:00Z" },
+          {
+            id: 2,
+            role: "assistant",
+            content: '{"answer":"第一段\\n围绕"家庭健康"开展讨论。\\n- 保持安全。","intent":"TEACHING_SUGGESTION","retrievalStatus":"degraded"}',
+            createdAt: "2026-07-30T00:01:00Z",
+            metadata: {},
+          },
+        ],
+      };
+      return [];
+    });
+    const wrapper = mount(AssistantView, {
+      global: { stubs: { AppShell: { template: "<div><slot /></div>" }, InlineNotice: true } },
+    });
+    await flushPromises();
+    await wrapper.get(".history-open").trigger("click");
+    await flushPromises();
+
+    expect(wrapper.text()).toContain('围绕"家庭健康"开展讨论。');
+    expect(wrapper.find(".assistant-answer li").text()).toBe("保持安全。");
+    expect(wrapper.text()).not.toContain('"intent"');
+  });
+
+  it("keeps non-envelope JSON history content unchanged", async () => {
+    apiMock.get.mockImplementation(async (path) => {
+      if (path === "/api/ai/models") return [];
+      if (path === "/api/ai/qa/history") return [{
+        threadId: "legacy-plain-json", title: "JSON 问题", preview: "JSON 内容", messageCount: 2,
+        scopeType: "SCHOOL", scopeId: "1", createdAt: "2026-07-30T00:00:00Z", updatedAt: "2026-07-30T00:01:00Z"
+      }];
+      if (path === "/api/ai/qa/history/legacy-plain-json") return {
+        threadId: "legacy-plain-json", scopeType: "SCHOOL", scopeId: "1", status: "active",
+        createdAt: "2026-07-30T00:00:00Z", updatedAt: "2026-07-30T00:01:00Z",
+        messages: [
+          { id: 1, role: "user", content: "JSON 问题", createdAt: "2026-07-30T00:00:00Z" },
+          { id: 2, role: "assistant", content: '{"topic":"保持原样"}', createdAt: "2026-07-30T00:01:00Z", metadata: {} },
+        ],
+      };
+      return [];
+    });
+    const wrapper = mount(AssistantView, {
+      global: { stubs: { AppShell: { template: "<div><slot /></div>" }, InlineNotice: true } },
+    });
+    await flushPromises();
+    await wrapper.get(".history-open").trigger("click");
+    await flushPromises();
+
+    expect(wrapper.text()).toContain('{"topic":"保持原样"}');
+  });
+
+  it("keeps malformed lookalike text unchanged when the legacy envelope tail is not valid JSON", async () => {
+    const opaqueText = '{"answer":"用户粘贴的非结构化文本：","intent": 这里不是可解析的旧信封';
+    apiMock.get.mockImplementation(async (path) => {
+      if (path === "/api/ai/models") return [];
+      if (path === "/api/ai/qa/history") return [{
+        threadId: "legacy-lookalike", title: "原样文本", preview: "原样文本", messageCount: 2,
+        scopeType: "SCHOOL", scopeId: "1", createdAt: "2026-07-30T00:00:00Z", updatedAt: "2026-07-30T00:01:00Z",
+      }];
+      if (path === "/api/ai/qa/history/legacy-lookalike") return {
+        threadId: "legacy-lookalike", scopeType: "SCHOOL", scopeId: "1", status: "active",
+        createdAt: "2026-07-30T00:00:00Z", updatedAt: "2026-07-30T00:01:00Z",
+        messages: [
+          { id: 1, role: "user", content: "原样文本", createdAt: "2026-07-30T00:00:00Z" },
+          { id: 2, role: "assistant", content: opaqueText, createdAt: "2026-07-30T00:01:00Z", metadata: {} },
+        ],
+      };
+      return [];
+    });
+    const wrapper = mount(AssistantView, {
+      global: { stubs: { AppShell: { template: "<div><slot /></div>" }, InlineNotice: true } },
+    });
+    await flushPromises();
+    await wrapper.get(".history-open").trigger("click");
+    await flushPromises();
+
+    expect(wrapper.text()).toContain(opaqueText);
+  });
+
   it("restores rich result snapshots after switching conversations without exposing raw tool output", async () => {
     const summaries = [
       { threadId: "history-a", title: "问题 A", preview: "回答 A", messageCount: 2, scopeType: "SCHOOL", scopeId: "1", createdAt: "2026-07-28T00:00:00Z", updatedAt: "2026-07-28T02:00:00Z" },
@@ -174,7 +299,12 @@ describe("assistant view", () => {
 
   it("groups school explanation and clear actions at the bottom of the sidebar", async () => {
     const wrapper = mount(AssistantView, {
-      global: { stubs: { AppShell: { template: "<div><slot /></div>" }, InlineNotice: true } }
+      global: {
+        stubs: {
+          AppShell: { template: "<div><slot /></div>" },
+          InlineNotice: { template: "<div><slot /></div>" },
+        },
+      },
     });
     await flushPromises();
 
@@ -566,6 +696,7 @@ describe("assistant view", () => {
     apiMock.stream = vi.fn(async (path, body, options) => {
       expect(path).toBe("/api/ai/qa/stream");
       expect(body.conversationId).toBeTruthy();
+      expect(body.clientTurnId).toMatch(/^turn-/);
       options.onEvent("run.started", { runId: "run-1", conversationId: body.conversationId });
       options.onEvent("phase.started", { phase: "reasoning", label: "正在分析问题并规划处理步骤" });
       options.onEvent("phase.completed", { phase: "reasoning", label: "分析完成，开始执行" });
@@ -646,6 +777,61 @@ describe("assistant view", () => {
     expect(wrapper.find(".stream-cursor").exists()).toBe(false);
   });
 
+  it("recovers the exact persisted response when the stream ends before final", async () => {
+    let requestedTurnId = "";
+    apiMock.get.mockImplementation(async (path) => {
+      if (path === "/api/ai/models" || path === "/api/ai/qa/history") return [];
+      if (path.startsWith("/api/ai/qa/history/recovery/")) {
+        requestedTurnId = path.split("/").at(-1);
+        return {
+          found: true,
+          threadId: "recovered-thread",
+          message: {
+            id: 8,
+            role: "assistant",
+            content: '{"answer":"### 已恢复回答\\n\\n- 服务端完整内容","intent":"CHAT"}',
+            createdAt: "2026-08-04T00:00:00Z",
+            metadata: {
+              clientTurnId: requestedTurnId,
+              responseSnapshot: {
+                schemaVersion: 1,
+                status: "completed",
+                generationStatus: "completed",
+                retrievalStatus: "ok",
+                followUpQuestions: ["恢复后的追问"],
+              },
+            },
+          },
+        };
+      }
+      return [];
+    });
+    apiMock.stream = vi.fn(async (_path, body, options) => {
+      expect(body.clientTurnId).toMatch(/^turn-/);
+      options.onEvent("run.started", { runId: "run-lost-final" });
+      options.onEvent("token", { delta: "已显示的片段" });
+    });
+    const wrapper = mount(AssistantView, {
+      global: {
+        stubs: {
+          AppShell: { template: "<div><slot /></div>" },
+          InlineNotice: { template: "<div><slot /></div>" },
+        },
+      },
+    });
+    await flushPromises();
+    await wrapper.get("textarea").setValue("断流恢复问题");
+    await wrapper.get("form").trigger("submit.prevent");
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    await flushPromises();
+
+    expect(requestedTurnId).toMatch(/^turn-/);
+    expect(wrapper.text()).toContain("已恢复回答");
+    expect(wrapper.text()).toContain("服务端完整内容");
+    expect(wrapper.text()).toContain("已从历史记录恢复完整回答");
+    expect(apiMock.post).not.toHaveBeenCalled();
+  });
+
   it("stops streaming and ignores late token events", async () => {
     let rejectStream;
     apiMock.stream = vi.fn(async (_path, _body, options) => {
@@ -661,7 +847,12 @@ describe("assistant view", () => {
       options.onEvent("token", { delta: "不应继续显示" });
     });
     const wrapper = mount(AssistantView, {
-      global: { stubs: { AppShell: { template: "<div><slot /></div>" }, InlineNotice: true } }
+      global: {
+        stubs: {
+          AppShell: { template: "<div><slot /></div>" },
+          InlineNotice: { template: "<div><slot /></div>" },
+        },
+      },
     });
     await flushPromises();
     await wrapper.get("textarea").setValue("停止流式问题");
@@ -675,6 +866,7 @@ describe("assistant view", () => {
     expect(wrapper.text()).toContain("已经显示");
     expect(wrapper.text()).not.toContain("不应继续显示");
     expect(wrapper.find(".stream-cursor").exists()).toBe(false);
+    expect(apiMock.get.mock.calls.some(([path]) => String(path).includes("/history/recovery/"))).toBe(false);
   });
 
   it("keeps a completed greeting conversation in history after starting a new conversation", async () => {
@@ -714,33 +906,53 @@ describe("assistant view", () => {
     expect(wrapper.text()).toContain("问候回答");
   });
 
-  it("refreshes history after the compatibility ask fallback succeeds", async () => {
-    let historyReads = 0;
+  it("keeps partial output and offers an explicit retry when no persisted response can be recovered", async () => {
+    let streamCalls = 0;
+    const turnIds = [];
     apiMock.get.mockImplementation(async (path) => {
       if (path === "/api/ai/models") return [];
-      if (path === "/api/ai/qa/history") {
-        return historyReads++ === 0 ? [] : [{
-          threadId: "thread-1", title: "兼容接口问题", preview: "兼容接口回答", messageCount: 2,
-          scopeType: "SCHOOL", scopeId: "1", createdAt: "2026-07-28T00:00:00Z", updatedAt: "2026-07-28T01:00:00Z"
-        }];
-      }
+      if (path === "/api/ai/qa/history") return [];
+      if (path.startsWith("/api/ai/qa/history/recovery/")) return { found: false };
       return [];
     });
-    apiMock.stream = vi.fn(async () => {
-      throw new Error("stream unavailable");
+    apiMock.stream = vi.fn(async (_path, body, options) => {
+      streamCalls += 1;
+      turnIds.push(body.clientTurnId);
+      if (streamCalls === 1) {
+        options.onEvent("token", { delta: "已显示片段" });
+        return;
+      }
+      options.onEvent("final", {
+        response: { answer: "重新生成后的完整回答", citations: [], followUpQuestions: [], generationStatus: "completed" },
+      });
     });
 
     const wrapper = mount(AssistantView, {
-      global: { stubs: { AppShell: { template: "<div><slot /></div>" }, InlineNotice: true } }
+      global: {
+        stubs: {
+          AppShell: { template: "<div><slot /></div>" },
+          InlineNotice: { template: "<div><slot /></div>" },
+        },
+      },
     });
     await flushPromises();
-    await wrapper.get("textarea").setValue("兼容接口问题");
+    await wrapper.get("textarea").setValue("断流后手动重试问题");
     await wrapper.get("form").trigger("submit.prevent");
+    await new Promise((resolve) => setTimeout(resolve, 500));
     await flushPromises();
 
-    expect(apiMock.post).toHaveBeenCalledWith("/api/ai/qa/ask", expect.objectContaining({ question: "兼容接口问题" }));
-    expect(apiMock.get.mock.calls.filter(([path]) => path === "/api/ai/qa/history")).toHaveLength(2);
-    expect(wrapper.find(".history-row").exists()).toBe(true);
+    expect(wrapper.text()).toContain("已显示片段");
+    expect(wrapper.text()).toContain("未找到可恢复的完整回答");
+    expect(apiMock.post).not.toHaveBeenCalled();
+    expect(apiMock.get.mock.calls.filter(([path]) => String(path).includes("/history/recovery/"))).toHaveLength(3);
+    expect(wrapper.get(".stream-retry-button").text()).toContain("重新生成");
+
+    await wrapper.get(".stream-retry-button").trigger("click");
+    await flushPromises();
+
+    expect(apiMock.stream).toHaveBeenCalledTimes(2);
+    expect(turnIds[1]).not.toBe(turnIds[0]);
+    expect(wrapper.text()).toContain("重新生成后的完整回答");
   });
 
   it.each([
@@ -814,12 +1026,12 @@ describe("assistant view", () => {
     await wrapper.get("textarea").setValue("它适合四年级吗？");
     await wrapper.get("form").trigger("submit.prevent");
     await flushPromises();
-    expect(apiMock.post).toHaveBeenLastCalledWith("/api/ai/qa/ask", {
+    expect(apiMock.post).toHaveBeenLastCalledWith("/api/ai/qa/ask", expect.objectContaining({
       question: "它适合四年级吗？",
       scopeType: "SCHOOL",
       scopeId: 1,
       threadId: "thread-1"
-    });
+    }));
   });
 
   it("shows inferred candidates above the composer and lets the user confirm or ignore them", async () => {

@@ -92,6 +92,12 @@ export interface AssistantConversationDetail {
   messages: AssistantConversationStoredMessage[];
 }
 
+export interface AssistantConversationTurnRecovery {
+  found: boolean;
+  threadId?: string | null;
+  message?: AssistantConversationStoredMessage | null;
+}
+
 export interface AgentCitation {
   citationId?: string;
   title?: string | null;
@@ -213,6 +219,7 @@ export interface AgentQaRequestPayload {
   question: string;
   threadId?: string | null;
   conversationId?: string | null;
+  clientTurnId?: string | null;
   scopeType: string;
   scopeId: number | null;
   grade?: string | null;

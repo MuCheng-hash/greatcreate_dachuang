@@ -23,6 +23,8 @@ import type {
   AgentToolExecution,
   LlmModelOption,
   AssistantConversationDetail,
+  AssistantConversationStoredMessage,
+  AssistantConversationTurnRecovery,
   AssistantResponseSnapshot,
   AssistantConversationSummary,
 } from "@/types/agent";
@@ -54,6 +56,7 @@ interface AssistantMessage extends AgentQaResponse {
   traceExpanded?: boolean;
   attachments?: AgentAttachment[];
   isStreaming?: boolean;
+  clientTurnId?: string;
 }
 
 interface PendingMemoryCandidate {
@@ -63,6 +66,11 @@ interface PendingMemoryCandidate {
 
 interface PendingMemoryConflict extends PendingMemoryCandidate {
   preview: AgentMemoryConflictPreview;
+}
+
+interface PendingAssistantRetry {
+  userText: string;
+  attachments: AgentAttachment[];
 }
 
 interface StreamRenderState {
@@ -114,6 +122,7 @@ const memoryBusyId = ref<string>("");
 const memoryConflict = ref<PendingMemoryConflict | null>(null);
 const memoryConflictBusy = ref(false);
 const memoryConflictError = ref("");
+const interruptedRequest = ref<PendingAssistantRetry | null>(null);
 const recognition = ref<SpeechRecognitionLike | null>(null);
 const streamRenderStates = new WeakMap<object, StreamRenderState>();
 const composerMemoryFeedback = reactive<{
@@ -218,37 +227,7 @@ async function openConversation(selectedThreadId: string, showError = true): Pro
     messages.value = storedMessages.map((item, index) => {
       if (item.role === "user") return { role: "user", text: item.content };
       const previousUser = [...storedMessages.slice(0, index)].reverse().find((candidate) => candidate.role === "user");
-      const metadata = item.metadata || {};
-      const snapshot = normalizeResponseSnapshot(metadata.responseSnapshot);
-      const storedFollowUps = snapshot
-        ? normalizeFollowUpQuestions(snapshot.followUpQuestions, 4, previousUser?.content || "")
-        : normalizeFollowUpQuestions(metadata.followUpQuestions, 4, previousUser?.content || "");
-      const toolExecutions = snapshot?.toolExecutions || normalizeToolExecutions(metadata.toolExecutions);
-      const traceEvents = buildHistoricalTrace(snapshot, toolExecutions);
-      return {
-        role: "assistant",
-        answer: item.content,
-        status: snapshot?.status || textValue(metadata.status),
-        citations: snapshot?.citations || normalizeCitations(metadata.citations),
-        relatedResources: snapshot?.relatedResources || normalizeStringList(metadata.relatedResources, 8),
-        retrievalStatus: snapshot?.retrievalStatus || textValue(metadata.retrievalStatus),
-        retrievalMethods: snapshot?.retrievalMethods || normalizeStringList(metadata.retrievalMethods, 8),
-        generationStatus: snapshot?.generationStatus || textValue(metadata.generationStatus),
-        fallbackLevel: snapshot?.fallbackLevel ?? null,
-        memoryApplied: snapshot?.memoryApplied || normalizeMemoryApplied(metadata.memoryApplied),
-        followUpQuestions: snapshot
-          ? storedFollowUps
-          : storedFollowUps.length
-          ? storedFollowUps
-          : previousUser ? buildFollowUpQuestions(previousUser.content) : [],
-        toolExecutions,
-        contextCompacted: snapshot?.contextCompacted || false,
-        effectiveModel: snapshot?.model
-          ? `${snapshot.provider || "LLM"} / ${snapshot.model}` : undefined,
-        traceEvents,
-        traceExpanded: false,
-        streamStatus: traceEvents.length ? "历史执行摘要" : undefined,
-      };
+      return restoreHistoricalAssistantMessage(item, previousUser?.content || "");
     });
     threadId.value = detail.threadId;
     readOnlyConversation.value = detail.status === "archived";
@@ -275,6 +254,7 @@ function startNewConversation(): void {
   messages.value = [];
   question.value = "";
   error.value = "";
+  interruptedRequest.value = null;
   clearComposerMemoryFeedback();
   if (wasArchivedMode) {
     history.value = [];
@@ -345,6 +325,10 @@ function conversationStorageKey() {
 
 function makeConversationId() {
   return globalThis.crypto?.randomUUID?.() || `conversation-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function makeClientTurnId() {
+  return `turn-${globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`}`;
 }
 
 function loadConversationId() {
@@ -444,11 +428,14 @@ async function ask(text: string = question.value): Promise<void> {
 async function requestAssistant(userText: string, attachments: AgentAttachment[] = []): Promise<void> {
   if (readOnlyConversation.value) return;
   error.value = "";
+  interruptedRequest.value = null;
   clearComposerMemoryFeedback();
+  const clientTurnId = makeClientTurnId();
   messages.value.push({ role: "user", text: userText, attachments });
   const assistantMessage = reactive<AssistantMessage>({
     role: "assistant", answer: "", relatedResources: [], citations: [], followUpQuestions: [],
-    toolEvents: [], traceEvents: [], traceExpanded: true, streamStatus: "正在启动 Agent…", isStreaming: true
+    toolEvents: [], traceEvents: [], traceExpanded: true, streamStatus: "正在启动 Agent…", isStreaming: true,
+    clientTurnId,
   });
   messages.value.push(assistantMessage);
   const streamState = getStreamRenderState(assistantMessage);
@@ -462,6 +449,7 @@ async function requestAssistant(userText: string, attachments: AgentAttachment[]
     const requestBody: AgentQaRequestPayload = {
       question: userText,
       threadId: threadId.value || null,
+      clientTurnId,
       scopeType: "SCHOOL",
       scopeId: schoolStore.school?.schoolId || auth.user?.schoolId || null
     };
@@ -560,33 +548,25 @@ async function requestAssistant(userText: string, attachments: AgentAttachment[]
       if (!assistantMessage.answer) messages.value.pop();
       return;
     }
-    resetStreamRendering(assistantMessage);
-    assistantMessage.answer = "";
-    try {
-      const result = await api.post<AgentQaResponse>("/api/ai/qa/ask", {
-        question: userText,
-        conversationId: conversationId.value,
-        threadId: threadId.value || null,
-        scopeType: "SCHOOL",
-        scopeId: schoolStore.school?.schoolId || auth.user?.schoolId || null,
-        ...(attachments.length ? { attachments } : {}),
-        ...(selectedModelId.value ? { modelId: selectedModelId.value } : {})
-      });
-      applyAssistantResult(assistantMessage, result, userText);
+    flushStreamDelta(assistantMessage);
+    finishStreamRendering(assistantMessage);
+    if (await recoverPersistedAssistantMessage(clientTurnId, assistantMessage, userText)) {
+      error.value = "流式连接异常，已从历史记录恢复完整回答。";
       await loadHistory();
-      error.value = `${requestFailure.message}，已切换到兼容问答接口`;
       return;
-    } catch {
-      finishStreamRendering(assistantMessage);
-      assistantMessage.isStreaming = false;
-      const resourceCount = schoolStore.resources.length;
-      assistantMessage.answer = `${schoolStore.school?.schoolName || "当前学校"}现有 ${resourceCount} 个已关联周边资源。围绕“${userText}”，建议优先选择距离近、可达性高的资源，并按课堂导入、现场观察、实践反思三个阶段组织活动。`;
-      assistantMessage.citations = ["当前为本地兜底回答，智能问答服务恢复后可获得更完整的引用结果。"];
-      assistantMessage.retrievalStatus = "degraded";
-      assistantMessage.generationStatus = "degraded";
-      assistantMessage.followUpQuestions = buildFollowUpQuestions(userText);
-      error.value = requestFailure.message;
     }
+    assistantMessage.isStreaming = false;
+    assistantMessage.streamStatus = assistantMessage.answer
+      ? "连接中断，已保留已显示内容"
+      : "连接中断，未收到完整回答";
+    updateTrace(assistantMessage, "stream-recovery", {
+      kind: "error",
+      title: "流式连接中断",
+      detail: "未找到可恢复的完整回答",
+      status: "failed",
+    });
+    interruptedRequest.value = { userText, attachments: [...attachments] };
+    error.value = "流式连接已中断，未找到可恢复的完整回答。";
   } finally {
     if (assistantMessage.isStreaming) {
       flushStreamDelta(assistantMessage);
@@ -597,6 +577,41 @@ async function requestAssistant(userText: string, attachments: AgentAttachment[]
     activeAbortController.value = null;
     await scrollToBottom();
   }
+}
+
+async function recoverPersistedAssistantMessage(
+  clientTurnId: string,
+  assistantMessage: AssistantMessage,
+  userText: string,
+): Promise<boolean> {
+  for (const delay of [0, 120, 300]) {
+    if (delay) await new Promise<void>((resolve) => window.setTimeout(resolve, delay));
+    try {
+      const recovery = await api.get<AssistantConversationTurnRecovery>(
+        `/api/ai/qa/history/recovery/${encodeURIComponent(clientTurnId)}`,
+      );
+      if (!recovery.found || !recovery.message || recovery.message.role !== "assistant") continue;
+      if (textValue(recovery.message.metadata?.clientTurnId) !== clientTurnId) continue;
+      Object.assign(assistantMessage, restoreHistoricalAssistantMessage(recovery.message, userText), {
+        clientTurnId,
+        traceExpanded: true,
+        streamStatus: "连接中断，已从历史记录恢复完整回答",
+        isStreaming: false,
+      });
+      if (recovery.threadId) threadId.value = recovery.threadId;
+      return true;
+    } catch {
+      // A transient recovery-read failure is retried before exposing manual retry.
+    }
+  }
+  return false;
+}
+
+async function retryInterruptedRequest(): Promise<void> {
+  const retry = interruptedRequest.value;
+  if (!retry || loading.value || readOnlyConversation.value) return;
+  interruptedRequest.value = null;
+  await requestAssistant(retry.userText, [...retry.attachments]);
 }
 
 function applyAssistantResult(message: AssistantMessage, result: Partial<AgentQaResponse>, userText = ""): void {
@@ -707,6 +722,89 @@ function normalizeResponseSnapshot(value: unknown): AssistantResponseSnapshot | 
     toolExecutions: normalizeToolExecutions(value.toolExecutions),
     contextCompacted: value.contextCompacted === true,
     memoryApplied,
+  };
+}
+
+function normalizeHistoricalAnswer(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed.startsWith("{")) return value;
+  try {
+    const parsed = JSON.parse(trimmed) as unknown;
+    if (isRecord(parsed) && typeof parsed.answer === "string") return parsed.answer;
+  } catch {
+    // Early records may contain unescaped quotation marks inside answer.
+  }
+  return extractMalformedLegacyAnswer(value) || value;
+}
+
+function extractMalformedLegacyAnswer(value: string): string | null {
+  const prefix = /^\s*\{\s*"answer"\s*:\s*"/.exec(value);
+  if (!prefix) return null;
+  const boundary = /",\s*"(?:intent|status|taskType|retrievalStatus|generationStatus|retrievalMethods|citationIds|citations|relatedResources|followUpQuestions|memoryCandidates|memoryApplied)"\s*:/g;
+  const marker = boundary.exec(value);
+  if (!marker || marker.index < prefix[0].length) return null;
+  try {
+    const reconstructedEnvelope = JSON.parse(`{"answer":""${value.slice(marker.index + 1)}`) as unknown;
+    if (!isRecord(reconstructedEnvelope)) return null;
+  } catch {
+    return null;
+  }
+  return decodeLegacyJsonString(value.slice(prefix[0].length, marker.index));
+}
+
+function decodeLegacyJsonString(value: string): string {
+  const escapes: Record<string, string> = {
+    '"': '"',
+    "\\": "\\",
+    "/": "/",
+    b: "\b",
+    f: "\f",
+    n: "\n",
+    r: "\r",
+    t: "\t",
+  };
+  return value.replace(/\\(u[0-9a-fA-F]{4}|["\\/bfnrt])/g, (matched, escaped: string) => {
+    if (escaped.startsWith("u")) return String.fromCharCode(Number.parseInt(escaped.slice(1), 16));
+    return escapes[escaped] ?? matched;
+  });
+}
+
+function restoreHistoricalAssistantMessage(
+  item: AssistantConversationStoredMessage,
+  previousUserText = "",
+): AssistantMessage {
+  const metadata = item.metadata || {};
+  const snapshot = normalizeResponseSnapshot(metadata.responseSnapshot);
+  const storedFollowUps = snapshot
+    ? normalizeFollowUpQuestions(snapshot.followUpQuestions, 4, previousUserText)
+    : normalizeFollowUpQuestions(metadata.followUpQuestions, 4, previousUserText);
+  const toolExecutions = snapshot?.toolExecutions || normalizeToolExecutions(metadata.toolExecutions);
+  const traceEvents = buildHistoricalTrace(snapshot, toolExecutions);
+  return {
+    role: "assistant",
+    answer: normalizeHistoricalAnswer(item.content),
+    status: snapshot?.status || textValue(metadata.status),
+    citations: snapshot?.citations || normalizeCitations(metadata.citations),
+    relatedResources: snapshot?.relatedResources || normalizeStringList(metadata.relatedResources, 8),
+    retrievalStatus: snapshot?.retrievalStatus || textValue(metadata.retrievalStatus),
+    retrievalMethods: snapshot?.retrievalMethods || normalizeStringList(metadata.retrievalMethods, 8),
+    generationStatus: snapshot?.generationStatus || textValue(metadata.generationStatus),
+    fallbackLevel: snapshot?.fallbackLevel ?? null,
+    memoryApplied: snapshot?.memoryApplied || normalizeMemoryApplied(metadata.memoryApplied),
+    followUpQuestions: snapshot
+      ? storedFollowUps
+      : storedFollowUps.length
+      ? storedFollowUps
+      : previousUserText ? buildFollowUpQuestions(previousUserText) : [],
+    toolExecutions,
+    contextCompacted: snapshot?.contextCompacted || false,
+    effectiveModel: snapshot?.model
+      ? `${snapshot.provider || "LLM"} / ${snapshot.model}` : undefined,
+    traceEvents,
+    traceExpanded: false,
+    streamStatus: traceEvents.length ? "历史执行摘要" : undefined,
+    clientTurnId: textValue(metadata.clientTurnId) || undefined,
+    isStreaming: false,
   };
 }
 
@@ -1232,6 +1330,8 @@ function clearChat(): void {
   pendingImages.value = [];
   speakingIndex.value = null;
   copiedIndex.value = null;
+  interruptedRequest.value = null;
+  error.value = "";
   clearComposerMemoryFeedback();
   messages.value = [];
   threadId.value = "";
@@ -1288,7 +1388,16 @@ function clearChat(): void {
             <button class="text-button" type="button" :disabled="Boolean(historyBusyId)" @click="restoreConversation(threadId)">恢复对话</button>
           </div>
           <div ref="chatScroll" class="chat-scroll" aria-live="polite" @scroll="handleChatScroll">
-          <InlineNotice v-if="error" tone="info">{{ error }}，已显示本地参考回答。</InlineNotice>
+          <InlineNotice v-if="error" tone="info">
+            <span>{{ error }}</span>
+            <button
+              v-if="interruptedRequest"
+              class="stream-retry-button"
+              type="button"
+              :disabled="loading || readOnlyConversation"
+              @click="retryInterruptedRequest"
+            >重新生成</button>
+          </InlineNotice>
           <article v-for="(message,index) in messages" :key="index" class="chat-message" :class="message.role">
             <span class="chat-avatar"><UserRound v-if="message.role === 'user'" :size="17" /><Bot v-else :size="17" /></span>
             <div>
@@ -1589,6 +1698,8 @@ function clearChat(): void {
 .visually-hidden { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
 .send-button { width: 44px; min-height: 44px; padding: 0; align-self: center; }
 .stop-button { min-height: 44px; padding: 0 10px; align-self: center; color: var(--red); }
+.stream-retry-button { margin-left: 8px; border: 0; border-radius: 5px; padding: 4px 8px; color: #fff; background: var(--green); cursor: pointer; }
+.stream-retry-button:disabled { cursor: not-allowed; opacity: .55; }
 .typing { display: flex; gap: 5px; padding-left: 44px; }
 .typing span { width: 7px; height: 7px; border-radius: 50%; background: #8ca094; animation: pulse 900ms infinite alternate; }
 .typing span:nth-child(2) { animation-delay: 150ms; }.typing span:nth-child(3) { animation-delay: 300ms; }
