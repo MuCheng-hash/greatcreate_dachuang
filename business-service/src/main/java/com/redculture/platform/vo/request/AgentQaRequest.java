@@ -10,6 +10,8 @@ public class AgentQaRequest {
 
     private String threadId;
 
+    private String clientTurnId;
+
     private String modelId;
 
     private String question;

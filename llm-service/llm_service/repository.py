@@ -235,6 +235,40 @@ class ConversationRepository:
             for row in rows
         ]
 
+    def find_assistant_message_by_client_turn_id(
+        self,
+        client_turn_id: str,
+        owner_id: str,
+        scope_type: str,
+        scope_id: str | int,
+    ) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT m.id, m.thread_id, m.role, m.content, m.metadata_json, m.created_at
+                FROM agent_message m
+                INNER JOIN agent_thread t ON t.thread_id = m.thread_id
+                WHERE t.owner_id = ?
+                  AND t.scope_type = ?
+                  AND t.scope_id = ?
+                  AND m.role = 'assistant'
+                  AND json_extract(m.metadata_json, '$.clientTurnId') = ?
+                ORDER BY m.id DESC
+                LIMIT 1
+                """,
+                (owner_id, scope_type, str(scope_id), client_turn_id),
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "id": row["id"],
+            "thread_id": row["thread_id"],
+            "role": row["role"],
+            "content": row["content"],
+            "metadata": json.loads(row["metadata_json"] or "{}"),
+            "created_at": row["created_at"],
+        }
+
     def update_summary(self, thread_id: str, summary: str) -> None:
         with self._lock, self._connect() as connection:
             connection.execute(

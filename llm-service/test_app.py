@@ -351,6 +351,51 @@ def test_new_thread_and_multiturn_persistence(tmp_path: Path):
     assert snapshot["generationStatus"] == data["generationStatus"]
 
 
+def test_client_turn_id_persists_and_recovers_only_within_owner_scope(tmp_path: Path):
+    client_turn_id = "turn-recovery-1"
+    with build_client(settings_for(tmp_path)) as client:
+        response = client.post(
+            "/agent/messages",
+            json=message_payload(clientTurnId=client_turn_id),
+        )
+        assert response.status_code == 200
+        thread_id = response.json()["threadId"]
+
+        detail = client.get(
+            f"/agent/threads/{thread_id}",
+            params={"ownerId": "school-user:1", "scopeType": "SCHOOL", "scopeId": 1},
+        )
+        recovered = client.get(
+            f"/agent/messages/recovery/{client_turn_id}",
+            params={"ownerId": "school-user:1", "scopeType": "SCHOOL", "scopeId": 1},
+        )
+        missing = client.get(
+            "/agent/messages/recovery/turn-missing",
+            params={"ownerId": "school-user:1", "scopeType": "SCHOOL", "scopeId": 1},
+        )
+        cross_owner = client.get(
+            f"/agent/messages/recovery/{client_turn_id}",
+            params={"ownerId": "school-user:2", "scopeType": "SCHOOL", "scopeId": 1},
+        )
+        cross_scope = client.get(
+            f"/agent/messages/recovery/{client_turn_id}",
+            params={"ownerId": "school-user:1", "scopeType": "SCHOOL", "scopeId": 2},
+        )
+
+    assert detail.status_code == 200
+    stored_messages = detail.json()["messages"]
+    assert stored_messages[0]["metadata"]["clientTurnId"] == client_turn_id
+    assert stored_messages[1]["metadata"]["clientTurnId"] == client_turn_id
+    assert recovered.status_code == 200
+    assert recovered.json()["found"] is True
+    assert recovered.json()["threadId"] == thread_id
+    assert recovered.json()["message"]["role"] == "assistant"
+    assert recovered.json()["message"]["metadata"]["clientTurnId"] == client_turn_id
+    assert missing.json() == {"found": False, "threadId": None, "message": None}
+    assert cross_owner.json()["found"] is False
+    assert cross_scope.json()["found"] is False
+
+
 def test_unknown_greeting_creates_and_persists_thread(tmp_path: Path):
     question = "你好，你可以做什么？"
     with build_client(settings_for(tmp_path)) as client:
@@ -394,7 +439,9 @@ def test_follow_up_questions_filter_meta_prompts_and_fill_teacher_tasks():
 
 def test_stateful_stream_emits_events_and_persists_final_response(tmp_path: Path):
     with build_client(settings_for(tmp_path)) as client:
-        response = client.post("/agent/messages/stream", json=message_payload())
+        response = client.post(
+            "/agent/messages/stream", json=message_payload(clientTurnId="turn-stream-1")
+        )
 
         assert response.status_code == 200
         assert response.headers["content-type"].startswith("text/event-stream")
@@ -418,6 +465,8 @@ def test_stateful_stream_emits_events_and_persists_final_response(tmp_path: Path
         assert [item["role"] for item in stored["messages"]] == ["user", "assistant"]
     assert stored["messages"][-1]["content"] == final_data["response"]["answer"]
     assert final_data["response"]["followUpQuestions"]
+    assert stored["messages"][0]["metadata"]["clientTurnId"] == "turn-stream-1"
+    assert stored["messages"][-1]["metadata"]["clientTurnId"] == "turn-stream-1"
     assert stored["messages"][-1]["metadata"]["followUpQuestions"] == final_data["response"]["followUpQuestions"]
     assert stored["messages"][-1]["metadata"]["responseSnapshot"]["schemaVersion"] == 1
 

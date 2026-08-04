@@ -5,6 +5,7 @@ import com.redculture.platform.config.AuthContext;
 import com.redculture.platform.service.agent.AgentRuntimeClient;
 import com.redculture.platform.vo.AuthCurrentUserVO;
 import com.redculture.platform.vo.ai.AssistantConversationDetail;
+import com.redculture.platform.vo.ai.AssistantConversationTurnRecovery;
 import com.redculture.platform.vo.ai.AssistantConversationSummary;
 import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.web.bind.annotation.DeleteMapping;
@@ -41,6 +42,14 @@ public class AssistantConversationHistoryController {
         AuthCurrentUserVO user = requireSchoolUser(request);
         return ApiResponse.success(agentRuntimeClient.getConversation(
                 threadId, agentRuntimeClient.ownerIdFor(user), "SCHOOL", user.getSchoolId()));
+    }
+
+    @GetMapping("/recovery/{clientTurnId}")
+    public ApiResponse<AssistantConversationTurnRecovery> recover(
+            @PathVariable String clientTurnId, HttpServletRequest request) {
+        AuthCurrentUserVO user = requireSchoolUser(request);
+        return ApiResponse.success(agentRuntimeClient.recoverConversationTurn(
+                clientTurnId, agentRuntimeClient.ownerIdFor(user), "SCHOOL", user.getSchoolId()));
     }
 
     @DeleteMapping("/{threadId}")

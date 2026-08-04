@@ -15,6 +15,7 @@ import com.redculture.platform.vo.ai.AgentMemoryConflictPreview;
 import com.redculture.platform.vo.ai.AgentMemorySetting;
 import com.redculture.platform.vo.ai.LlmModelOption;
 import com.redculture.platform.vo.ai.AssistantConversationDetail;
+import com.redculture.platform.vo.ai.AssistantConversationTurnRecovery;
 import com.redculture.platform.vo.ai.AssistantConversationSummary;
 import com.redculture.platform.vo.request.AgentQaRequest;
 import com.redculture.platform.vo.request.AgentMemoryCreateRequest;
@@ -384,6 +385,23 @@ public class AgentRuntimeClient {
         return response;
     }
 
+    public AssistantConversationTurnRecovery recoverConversationTurn(
+            String clientTurnId, String ownerId, String scopeType, Long scopeId) {
+        AssistantConversationTurnRecovery response = restClient.get()
+                .uri(uriBuilder -> uriBuilder.path("/agent/messages/recovery/{clientTurnId}")
+                        .queryParam("ownerId", ownerId)
+                        .queryParam("scopeType", scopeType)
+                        .queryParam("scopeId", scopeId)
+                        .build(clientTurnId))
+                .headers(this::applyInternalServiceToken)
+                .retrieve()
+                .body(AssistantConversationTurnRecovery.class);
+        if (response == null) {
+            throw new IllegalStateException("agent turn recovery response is empty");
+        }
+        return response;
+    }
+
     public void archiveConversation(String threadId, String ownerId, String scopeType, Long scopeId) {
         restClient.post()
                 .uri(uriBuilder -> uriBuilder.path("/agent/threads/{threadId}/archive")
@@ -457,6 +475,7 @@ public class AgentRuntimeClient {
         body.setScopeType(context.getScopeType().name());
         body.setScopeId(context.getScopeId());
         body.setThreadId(request.getThreadId());
+        body.setClientTurnId(request.getClientTurnId());
         body.setModelId(request.getModelId());
         body.setTaskType("CHAT");
         body.setMessage(context.getQuestion());

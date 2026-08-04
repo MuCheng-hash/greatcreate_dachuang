@@ -115,7 +115,7 @@ class AgentRuntime:
             plan,
             memory_context,
         )
-        self._persist_response(thread, result)
+        self._persist_response(thread, result, request.client_turn_id)
         return result
 
     async def stream_events(self, request: AgentMessageRequest) -> AsyncIterator[str]:
@@ -148,7 +148,7 @@ class AgentRuntime:
                     memory_context,
                     publish,
                 )
-                self._persist_response(thread, result)
+                self._persist_response(thread, result, request.client_turn_id)
                 publish(
                     "final",
                     {
@@ -187,11 +187,14 @@ class AgentRuntime:
         thread = self._get_or_create_thread(request)
         self._capture_explicit_memory(request, thread)
         memory_context = self._memory_context_for(request)
+        metadata = {"intent": request.intent, "taskType": request.task_type}
+        if request.client_turn_id:
+            metadata["clientTurnId"] = request.client_turn_id
         self.repository.append_message(
             thread.thread_id,
             "user",
             request.message,
-            {"intent": request.intent, "taskType": request.task_type},
+            metadata,
         )
         stored = self.repository.list_messages(thread.thread_id)
         window = self.context_manager.build(stored, thread.summary)
@@ -883,30 +886,38 @@ class AgentRuntime:
             ]
         return [item for item in values if item is not None]
 
-    def _persist_response(self, thread: ThreadRecord, result: AgentMessageResponse) -> None:
+    def _persist_response(
+        self,
+        thread: ThreadRecord,
+        result: AgentMessageResponse,
+        client_turn_id: str | None = None,
+    ) -> None:
+        metadata = {
+            "status": result.status,
+            "taskType": result.task_type,
+            "citations": [item.citation_id for item in result.citations],
+            "retrievalMethods": result.retrieval_methods,
+            "toolExecutions": [item.model_dump(by_alias=True) for item in result.tool_executions],
+            "teachingPlan": result.teaching_plan,
+            "resourceDiscovery": result.resource_discovery,
+            "followUpQuestions": result.follow_up_questions,
+            "memoryApplied": (
+                result.memory_applied.model_dump(by_alias=True)
+                if result.memory_applied
+                else None
+            ),
+            "memoryCandidateIds": [
+                item.id for item in (result.memory_candidates or [])
+            ],
+            "responseSnapshot": self._response_snapshot(result),
+        }
+        if client_turn_id:
+            metadata["clientTurnId"] = client_turn_id
         self.repository.append_message(
             thread.thread_id,
             "assistant",
             result.answer,
-            {
-                "status": result.status,
-                "taskType": result.task_type,
-                "citations": [item.citation_id for item in result.citations],
-                "retrievalMethods": result.retrieval_methods,
-                "toolExecutions": [item.model_dump(by_alias=True) for item in result.tool_executions],
-                "teachingPlan": result.teaching_plan,
-                "resourceDiscovery": result.resource_discovery,
-                "followUpQuestions": result.follow_up_questions,
-                "memoryApplied": (
-                    result.memory_applied.model_dump(by_alias=True)
-                    if result.memory_applied
-                    else None
-                ),
-                "memoryCandidateIds": [
-                    item.id for item in (result.memory_candidates or [])
-                ],
-                "responseSnapshot": self._response_snapshot(result),
-            },
+            metadata,
         )
 
     @staticmethod

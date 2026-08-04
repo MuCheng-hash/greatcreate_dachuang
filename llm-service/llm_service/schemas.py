@@ -55,6 +55,7 @@ class AgentMessageRequest(ApiModel):
     scope_id: str | int = Field(alias="scopeId")
     message: str = Field(min_length=1, max_length=12000)
     thread_id: str | None = Field(default=None, alias="threadId", max_length=64)
+    client_turn_id: str | None = Field(default=None, alias="clientTurnId", min_length=1, max_length=96)
     model_id: str | None = Field(default=None, alias="modelId", min_length=1, max_length=300)
     task_type: TaskType = Field(default="CHAT", alias="taskType")
     task_payload: dict[str, Any] = Field(default_factory=dict, alias="taskPayload")
@@ -240,6 +241,12 @@ class StoredMessage(ApiModel):
     content: str
     created_at: datetime = Field(alias="createdAt")
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class TurnRecoveryResponse(ApiModel):
+    found: bool
+    thread_id: str | None = Field(default=None, alias="threadId")
+    message: StoredMessage | None = None
 
 
 class ThreadResponse(ApiModel):

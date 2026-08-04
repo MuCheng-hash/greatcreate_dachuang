@@ -19,6 +19,8 @@ public class StatefulAgentRequest {
 
     private String threadId;
 
+    private String clientTurnId;
+
     private String modelId;
 
     private String taskType = "CHAT";

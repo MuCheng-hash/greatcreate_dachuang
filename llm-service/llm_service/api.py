@@ -36,6 +36,7 @@ from .schemas import (
     MemoryUpdateRequest,
     StoredMessage,
     ThreadCreateRequest,
+    TurnRecoveryResponse,
     ThreadResponse,
     ThreadSummaryResponse,
 )
@@ -547,6 +548,33 @@ def create_app(
                 owner_id, task_type, scope_type, scope_id, limit, status
             )
         ]
+
+    @app.get(
+        "/agent/messages/recovery/{client_turn_id}", response_model=TurnRecoveryResponse,
+        dependencies=[Depends(require_internal_agent_token)],
+    )
+    async def recover_assistant_message(
+        client_turn_id: str,
+        owner_id: str = Query(alias="ownerId"),
+        scope_type: str = Query(alias="scopeType"),
+        scope_id: str | int = Query(alias="scopeId"),
+    ) -> TurnRecoveryResponse:
+        message = repository.find_assistant_message_by_client_turn_id(
+            client_turn_id, owner_id, scope_type, scope_id
+        )
+        if message is None:
+            return TurnRecoveryResponse(found=False)
+        return TurnRecoveryResponse(
+            found=True,
+            threadId=message["thread_id"],
+            message=StoredMessage(
+                id=message["id"],
+                role=message["role"],
+                content=message["content"],
+                createdAt=message["created_at"],
+                metadata=message["metadata"],
+            ),
+        )
 
     @app.get(
         "/agent/threads/{thread_id}", response_model=ThreadResponse,

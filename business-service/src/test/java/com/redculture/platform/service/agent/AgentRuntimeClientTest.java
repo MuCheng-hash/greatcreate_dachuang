@@ -131,6 +131,7 @@ class AgentRuntimeClientTest {
 
             AgentQaRequest request = new AgentQaRequest();
             request.setThreadId("thread-1");
+            request.setClientTurnId("turn-client-1");
             request.setQuestion("附近有哪些资源？");
             request.setModelId("deepseek");
             AuthCurrentUserVO user = new AuthCurrentUserVO();
@@ -155,6 +156,7 @@ class AgentRuntimeClientTest {
             assertEquals(List.of("internal-secret", "internal-secret", "internal-secret"), receivedTokens);
             assertTrue(requestBodies.stream().allMatch(body -> body.contains("\"ownerId\":\"account:1\"")));
             assertTrue(requestBodies.stream().allMatch(body -> body.contains("\"threadId\":\"thread-1\"")));
+            assertTrue(requestBodies.stream().allMatch(body -> body.contains("\"clientTurnId\":\"turn-client-1\"")));
             assertTrue(requestBodies.stream().allMatch(body -> body.contains("\"modelId\":\"deepseek\"")));
         } finally {
             server.stop(0);

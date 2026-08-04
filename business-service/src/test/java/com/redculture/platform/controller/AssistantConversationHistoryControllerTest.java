@@ -44,6 +44,19 @@ class AssistantConversationHistoryControllerTest {
                 output.write(bytes);
             }
         });
+        server.createContext("/agent/messages/recovery", exchange -> {
+            requests.add(exchange.getRequestMethod() + " " + exchange.getRequestURI());
+            String body = "{\"found\":true,\"threadId\":\"thread-1\",\"message\":{"
+                    + "\"id\":2,\"role\":\"assistant\",\"content\":\"恢复回答\","
+                    + "\"createdAt\":\"2026-07-28T00:01:00Z\","
+                    + "\"metadata\":{\"clientTurnId\":\"turn-recovery-1\"}}}";
+            byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
+            exchange.getResponseHeaders().set("Content-Type", "application/json");
+            exchange.sendResponseHeaders(200, bytes.length);
+            try (OutputStream output = exchange.getResponseBody()) {
+                output.write(bytes);
+            }
+        });
         server.start();
         try {
             AppMapProperties properties = new AppMapProperties();
@@ -59,6 +72,7 @@ class AssistantConversationHistoryControllerTest {
             var history = controller.list("active", request);
             var archivedHistory = controller.list("archived", request);
             var detail = controller.detail("thread-1", request);
+            var recovery = controller.recover("turn-recovery-1", request);
             var archived = controller.archive("thread-1", request);
             var restored = controller.restore("thread-1", request);
 
@@ -70,9 +84,13 @@ class AssistantConversationHistoryControllerTest {
             assertEquals(1, snapshot.get("schemaVersion"));
             assertEquals(List.of("hybrid-rrf"), snapshot.get("retrievalMethods"));
             assertEquals("历史来源", ((Map<?, ?>) ((List<?>) snapshot.get("citations")).get(0)).get("title"));
+            assertTrue(recovery.getData().isFound());
+            assertEquals("thread-1", recovery.getData().getThreadId());
+            assertEquals("恢复回答", recovery.getData().getMessage().getContent());
+            assertEquals("turn-recovery-1", recovery.getData().getMessage().getMetadata().get("clientTurnId"));
             assertEquals(200, archived.getCode());
             assertEquals(200, restored.getCode());
-            assertEquals(5, requests.size());
+            assertEquals(6, requests.size());
             assertTrue(requests.stream().allMatch(value -> value.contains("ownerId=account:1")));
             assertTrue(requests.stream().allMatch(value -> value.contains("scopeType=SCHOOL")));
             assertTrue(requests.stream().allMatch(value -> value.contains("scopeId=7")));
@@ -80,6 +98,7 @@ class AssistantConversationHistoryControllerTest {
             assertTrue(requests.stream().anyMatch(value -> value.contains("status=archived")));
             assertTrue(requests.stream().anyMatch(value -> value.startsWith("POST ") && value.contains("/archive")));
             assertTrue(requests.stream().anyMatch(value -> value.startsWith("POST ") && value.contains("/restore")));
+            assertTrue(requests.stream().anyMatch(value -> value.startsWith("GET ") && value.contains("/agent/messages/recovery/turn-recovery-1")));
         } finally {
             server.stop(0);
         }
