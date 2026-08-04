@@ -362,6 +362,23 @@ function loadMessages(): AssistantMessage[] {
 
 function retrievalStatusLabel(status?: string | null, methods: string[] = []): string {
   const methodSet = new Set(methods);
+  const hasHybridRrf = methodSet.has("hybrid-rrf")
+    || (methodSet.has("dense") && methodSet.has("lexical") && methodSet.has("rrf"));
+  if (hasHybridRrf) {
+    return status === "degraded"
+      ? "混合检索已完成，部分知识组件不可用"
+      : "已完成 Dense 与全文混合检索及证据校验";
+  }
+  if (methodSet.has("lexical")) {
+    return status === "degraded"
+      ? "全文检索已完成，其他知识组件部分不可用"
+      : "已完成 MySQL 全文检索与证据校验";
+  }
+  if (methodSet.has("dense")) {
+    return status === "degraded"
+      ? "向量检索已完成，其他知识组件部分不可用"
+      : "已完成向量检索与证据校验";
+  }
   if (methodSet.has("keyword-fallback")) {
     return status === "degraded"
       ? "向量检索未启用或暂不可用，已使用关键词检索"

@@ -107,7 +107,7 @@ describe("assistant view", () => {
         status: "completed",
         generationStatus: "completed",
         retrievalStatus: "degraded",
-        retrievalMethods: ["keyword-fallback"],
+        retrievalMethods: ["lexical"],
         citations: [{ citationId: "chunk:1", title: "历史来源", excerpt: "可信摘要" }],
         relatedResources: ["常安镇敬老院"],
         followUpQuestions: ["历史追问 A"],
@@ -153,7 +153,7 @@ describe("assistant view", () => {
     await historyButtons[0].trigger("click");
     await flushPromises();
     expect(wrapper.text()).toContain("历史来源");
-    expect(wrapper.text()).toContain("向量检索未启用或暂不可用，已使用关键词检索");
+    expect(wrapper.text()).toContain("全文检索已完成，其他知识组件部分不可用");
     expect(wrapper.text()).not.toContain("实际模型：openai-compatible / qwen-test");
     expect(wrapper.text()).toContain("本次参考 2 条记忆");
     expect(wrapper.find(".composer-memory-suggestions").exists()).toBe(false);
@@ -746,9 +746,10 @@ describe("assistant view", () => {
   it.each([
     ["empty", [], "未检索到直接匹配的知识证据"],
     ["degraded", [], "知识检索部分不可用，当前回答基于可用业务数据"],
-    ["degraded", ["keyword-fallback"], "向量检索未启用或暂不可用，已使用关键词检索"],
-    ["degraded", ["vector+hybrid-rerank"], "向量检索已完成，其他知识组件部分不可用"],
-    ["ok", ["vector+hybrid-rerank"], "已完成向量检索与证据校验"],
+    ["degraded", ["lexical"], "全文检索已完成，其他知识组件部分不可用"],
+    ["degraded", ["dense"], "向量检索已完成，其他知识组件部分不可用"],
+    ["degraded", ["dense", "lexical", "rrf", "hybrid-rrf"], "混合检索已完成，部分知识组件不可用"],
+    ["ok", ["dense", "lexical", "rrf", "hybrid-rrf"], "已完成 Dense 与全文混合检索及证据校验"],
   ])("renders the %s retrieval status", async (retrievalStatus, retrievalMethods, statusText) => {
     apiMock.post.mockResolvedValueOnce({ answer: "回答", citations: [], retrievalStatus, retrievalMethods });
     const wrapper = mount(AssistantView, {
