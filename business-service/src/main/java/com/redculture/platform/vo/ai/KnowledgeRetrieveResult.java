@@ -20,6 +20,8 @@ public class KnowledgeRetrieveResult {
 
     private List<String> retrievalMethods = new ArrayList<>();
 
+    private KnowledgeRetrievalTraceVO retrievalTrace;
+
     public static KnowledgeRetrieveResult empty() {
         KnowledgeRetrieveResult result = new KnowledgeRetrieveResult();
         result.setRetrievalStatus(KnowledgeRetrievalStatus.EMPTY);
@@ -55,14 +57,26 @@ public class KnowledgeRetrieveResult {
                     .forEach(methods::add);
         }
         if (chunks != null) {
-            chunks.stream()
-                    .map(KnowledgeChunkVO::getRetrievalMethod)
-                    .filter(this::hasText)
-                    .filter(method -> !"hybrid-rrf".equals(method)
-                            || !(methods.contains("dense")
-                            && methods.contains("lexical")
-                            && methods.contains("rrf")))
-                    .forEach(methods::add);
+            for (KnowledgeChunkVO chunk : chunks) {
+                String method = chunk == null ? null : chunk.getRetrievalMethod();
+                if (!hasText(method)) {
+                    continue;
+                }
+                if (method.startsWith("hybrid-rrf")) {
+                    methods.add("dense");
+                    methods.add("lexical");
+                    methods.add("rrf");
+                } else if (method.startsWith("dense")) {
+                    methods.add("dense");
+                } else if (method.startsWith("lexical")) {
+                    methods.add("lexical");
+                } else {
+                    methods.add(method);
+                }
+                if (method.endsWith("+heuristic-rerank")) {
+                    methods.add("heuristic-rerank");
+                }
+            }
         }
         if (graphFacts != null && !graphFacts.isEmpty()) {
             methods.add("knowledge-graph");
