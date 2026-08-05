@@ -3,7 +3,9 @@ package com.redculture.platform.controller;
 import com.redculture.platform.common.ApiResponse;
 import com.redculture.platform.common.PageResult;
 import com.redculture.platform.service.SchoolResourceRelService;
+import com.redculture.platform.vo.SchoolResourceCandidateResultVO;
 import com.redculture.platform.vo.SchoolResourceRelAdminVO;
+import com.redculture.platform.vo.request.SchoolResourceRelBatchCreateRequest;
 import com.redculture.platform.vo.request.SchoolResourceRelCreateRequest;
 import com.redculture.platform.vo.request.SchoolResourceRelUpdateRequest;
 import org.springframework.web.bind.annotation.DeleteMapping;
@@ -49,6 +51,26 @@ public class SchoolResourceRelAdminController {
     public ApiResponse<Boolean> delete(@PathVariable Long relId) {
         try {
             return ApiResponse.success("relation deleted", schoolResourceRelService.deleteRelation(relId));
+        } catch (IllegalArgumentException exception) {
+            return ApiResponse.fail(exception.getMessage());
+        }
+    }
+
+    @GetMapping("/schools/{schoolId}/resource-candidates")
+    public ApiResponse<SchoolResourceCandidateResultVO> resourceCandidates(@PathVariable Long schoolId,
+                                                                           @RequestParam(required = false) Double radiusKm) {
+        try {
+            return ApiResponse.success(schoolResourceRelService.listResourceCandidates(schoolId, radiusKm));
+        } catch (IllegalArgumentException exception) {
+            return ApiResponse.fail(exception.getMessage());
+        }
+    }
+
+    @PostMapping("/schools/{schoolId}/resource-relations/batch")
+    public ApiResponse<SchoolResourceCandidateResultVO> batchCreate(@PathVariable Long schoolId,
+                                                                    @RequestBody SchoolResourceRelBatchCreateRequest request) {
+        try {
+            return ApiResponse.success("relations created", schoolResourceRelService.batchCreateRelations(schoolId, request));
         } catch (IllegalArgumentException exception) {
             return ApiResponse.fail(exception.getMessage());
         }

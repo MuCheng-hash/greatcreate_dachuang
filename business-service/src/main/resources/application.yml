@@ -49,8 +49,8 @@ app:
   map:
     default-town-region-id: 4
     generated-boundary-radius-km: 1.2
-    amap-key: ${AMAP_WEB_KEY:0b5095fedd1afcec744da426d736612a}
-    amap-security-js-code: ${AMAP_SECURITY_JS_CODE:}
+    amap-key: ${AMAP_WEB_KEY:d89b2bdf82aeca567856dc1caf4ae072}
+    amap-security-js-code: ${AMAP_SECURITY_JS_CODE:ed585e4399b10929316bbe9d180ec502}
     llm-service-base-url: ${LLM_SERVICE_BASE_URL:http://127.0.0.1:5050}
   agent:
     internal-service-token: ${AGENT_INTERNAL_SERVICE_TOKEN:}

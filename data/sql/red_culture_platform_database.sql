@@ -304,6 +304,37 @@ BEGIN
   END IF;
 END $$
 
+DROP PROCEDURE IF EXISTS rebuild_content_chunk_fulltext_index $$
+CREATE PROCEDURE rebuild_content_chunk_fulltext_index()
+BEGIN
+  IF EXISTS (
+    SELECT 1
+    FROM information_schema.tables
+    WHERE table_schema = DATABASE()
+      AND table_name = 'content_chunk'
+  )
+  AND EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_schema = DATABASE()
+      AND table_name = 'content_chunk'
+      AND column_name = 'retrieval_text'
+  ) THEN
+    IF EXISTS (
+      SELECT 1
+      FROM information_schema.statistics
+      WHERE table_schema = DATABASE()
+        AND table_name = 'content_chunk'
+        AND index_name = 'ft_chunk_text'
+    ) THEN
+      ALTER TABLE content_chunk DROP INDEX ft_chunk_text;
+    END IF;
+    CREATE FULLTEXT INDEX ft_chunk_text
+      ON content_chunk (chunk_title, chunk_text, retrieval_text)
+      WITH PARSER ngram;
+  END IF;
+END $$
+
 DELIMITER ;
 
 CALL add_column_if_missing('school', 'logo_url', 'VARCHAR(255) NULL COMMENT ''学校Logo地址''');
@@ -334,12 +365,16 @@ CALL add_column_if_missing('school_resource_rel', 'manual_locked', 'TINYINT(1) N
 CALL add_column_if_missing('school_resource_rel', 'last_verified_at', 'DATETIME NULL COMMENT ''最后核验时间''');
 
 CALL add_column_if_missing('content_chunk', 'content_hash', 'VARCHAR(64) NULL COMMENT ''内容哈希''');
+CALL add_column_if_missing('content_chunk', 'retrieval_text', 'LONGTEXT NULL COMMENT ''检索元数据文本'' AFTER `chunk_text`');
+CALL add_column_if_missing('content_chunk', 'embedding_hash', 'CHAR(64) NULL COMMENT ''向量索引哈希'' AFTER `embedding_status`');
 CALL add_column_if_missing('content_chunk', 'embedding_model', 'VARCHAR(100) NULL COMMENT ''向量模型''');
 CALL add_column_if_missing('content_chunk', 'embedding_dimensions', 'INT NULL COMMENT ''向量维度''');
+CALL add_column_if_missing('content_chunk', 'embedding_index_version', 'VARCHAR(32) NULL COMMENT ''向量索引版本'' AFTER `embedding_dimensions`');
 CALL add_column_if_missing('content_chunk', 'qdrant_collection', 'VARCHAR(100) NULL COMMENT ''Qdrant集合名''');
 CALL add_column_if_missing('content_chunk', 'vector_point_id', 'VARCHAR(100) NULL COMMENT ''向量库点位ID''');
 CALL add_column_if_missing('content_chunk', 'embedded_at', 'DATETIME NULL COMMENT ''向量化完成时间''');
 CALL add_column_if_missing('content_chunk', 'embedding_error', 'TEXT NULL COMMENT ''向量化失败原因''');
+CALL rebuild_content_chunk_fulltext_index();
 
 CALL add_column_if_missing('teaching_activity_plan', 'owner_account_id', 'BIGINT NULL COMMENT ''方案所属账号ID''');
 CALL add_column_if_missing('teaching_activity_plan', 'class_id', 'BIGINT NULL COMMENT ''发布班级ID''');
@@ -379,5 +414,6 @@ ON DUPLICATE KEY UPDATE
 
 DROP PROCEDURE IF EXISTS add_column_if_missing;
 DROP PROCEDURE IF EXISTS add_index_if_missing;
+DROP PROCEDURE IF EXISTS rebuild_content_chunk_fulltext_index;
 
 SET FOREIGN_KEY_CHECKS = 1;

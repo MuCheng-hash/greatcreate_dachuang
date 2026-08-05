@@ -86,9 +86,7 @@ public class RagEntityMetadataService {
             return Collections.emptyMap();
         }
 
-        Map<Long, School> schools = approvedById(
-                selectSchools(ids(requestedIds, EntityType.SCHOOL)), School::getSchoolId,
-                School::getReviewStatus, School::getActive);
+        Map<Long, School> schools = activeSchoolsById(selectSchools(ids(requestedIds, EntityType.SCHOOL)));
         Map<Long, LocalEduResource> resources = approvedById(
                 selectResources(ids(requestedIds, EntityType.RESOURCE)), LocalEduResource::getResourceId,
                 LocalEduResource::getReviewStatus, LocalEduResource::getActive);
@@ -152,12 +150,12 @@ public class RagEntityMetadataService {
     private RagEntityMetadata schoolMetadata(School school,
                                              Map<Long, String> regions,
                                              List<String> relatedNames) {
-        String region = firstRegion(regions, school.getVillageRegionId(), school.getTownshipRegionId(),
-                school.getCountyRegionId(), school.getRegionId());
-        String category = joinValues(school.getSchoolLevel(), school.getSchoolType(), school.getSchoolNature());
+        String region = firstRegion(regions, school.getTownshipRegionId(), school.getCountyRegionId(),
+                school.getCityRegionId(), school.getProvinceRegionId());
+        String category = joinValues(school.getSchoolType());
         return metadata(EntityType.SCHOOL, school.getSchoolId(), school.getSchoolName(),
-                aliases(school.getSchoolAlias(), school.getSchoolCode()), region, category,
-                null, themes(school.getIntro()), school.getSourceId(), joinValues(relatedNames));
+                aliases(), region, category, null, themes(school.getIntro(), school.getAddress()),
+                null, joinValues(relatedNames));
     }
 
     private RagEntityMetadata resourceMetadata(LocalEduResource resource,
@@ -273,8 +271,7 @@ public class RagEntityMetadataService {
     private void loadMissingApprovedSchools(Map<Long, School> schools, Set<Long> ids) {
         Set<Long> missing = new LinkedHashSet<>(ids);
         missing.removeAll(schools.keySet());
-        approvedById(selectSchools(missing), School::getSchoolId, School::getReviewStatus, School::getActive)
-                .forEach(schools::putIfAbsent);
+        activeSchoolsById(selectSchools(missing)).forEach(schools::putIfAbsent);
     }
 
     private void loadMissingApprovedResources(Map<Long, LocalEduResource> resources, Set<Long> ids) {
@@ -319,8 +316,8 @@ public class RagEntityMetadataService {
                                        Collection<MemorialHall> memorials,
                                        Collection<RedStory> stories) {
         Set<Long> ids = new LinkedHashSet<>();
-        schools.forEach(item -> addIds(ids, item.getRegionId(), item.getCountyRegionId(),
-                item.getTownshipRegionId(), item.getVillageRegionId()));
+        schools.forEach(item -> addIds(ids, item.getProvinceRegionId(), item.getCityRegionId(),
+                item.getCountyRegionId(), item.getTownshipRegionId()));
         resources.forEach(item -> addIds(ids, item.getRegionId(), item.getCountyRegionId(),
                 item.getTownshipRegionId()));
         sites.forEach(item -> addIds(ids, item.getRegionId()));
@@ -343,6 +340,17 @@ public class RagEntityMetadataService {
                 .filter(region -> region.getRegionId() != null && StringUtils.hasText(region.getRegionName()))
                 .collect(Collectors.toMap(AdministrativeRegion::getRegionId, AdministrativeRegion::getRegionName,
                         (first, second) -> first, LinkedHashMap::new));
+    }
+
+    private Map<Long, School> activeSchoolsById(List<School> values) {
+        if (values == null) {
+            return new LinkedHashMap<>();
+        }
+        return values.stream().filter(Objects::nonNull)
+                .filter(value -> value.getSchoolId() != null)
+                .filter(value -> Boolean.TRUE.equals(value.getActive()))
+                .collect(Collectors.toMap(School::getSchoolId, Function.identity(), (first, second) -> first,
+                        LinkedHashMap::new));
     }
 
     private <T> Map<Long, T> approvedById(List<T> values,

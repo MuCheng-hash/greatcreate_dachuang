@@ -42,6 +42,21 @@ public class SchoolUserAccount extends BaseAuditEntity {
     @TableField("contact_phone")
     private String contactPhone;
 
+    @TableField("real_name")
+    private String realName;
+
+    @TableField("email")
+    private String email;
+
+    @TableField("account_type")
+    private String accountType;
+
+    @TableField("force_password_change")
+    private Boolean forcePasswordChange;
+
+    @TableField("password_updated_at")
+    private LocalDateTime passwordUpdatedAt;
+
     @TableField("status")
     private AccountStatus status;
 
