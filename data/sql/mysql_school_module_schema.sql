@@ -22,9 +22,15 @@ MODIFY COLUMN entity_type ENUM('site', 'hero', 'event', 'memorial', 'story', 'sc
 
 -- Existing installations: rebuild the Chinese-capable FULLTEXT index once.
 ALTER TABLE content_chunk
+  ADD COLUMN retrieval_text LONGTEXT NULL AFTER chunk_text,
+  ADD COLUMN embedding_hash CHAR(64) NULL AFTER embedding_status,
+  ADD COLUMN embedding_model VARCHAR(100) NULL AFTER embedding_hash,
+  ADD COLUMN embedding_dimensions INT NULL AFTER embedding_model,
+  ADD COLUMN embedding_index_version VARCHAR(32) NULL AFTER embedding_dimensions,
+  ADD COLUMN embedded_at DATETIME NULL AFTER embedding_index_version,
   DROP INDEX ft_chunk_text;
 CREATE FULLTEXT INDEX ft_chunk_text
-  ON content_chunk (chunk_title, chunk_text)
+  ON content_chunk (chunk_title, chunk_text, retrieval_text)
   WITH PARSER ngram;
 
 ALTER TABLE audit_log

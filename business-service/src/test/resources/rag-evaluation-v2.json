@@ -1,0 +1,38 @@
+{
+  "version": "v2",
+  "thresholds": {
+    "recallAt8": 0.85,
+    "mrrAt8": 0.70,
+    "graphPredicateAccuracy": 0.80
+  },
+  "cases": [
+    {"id":"nearby-01","category":"nearby","intent":"NEARBY_RESOURCE","query":"里庄小学附近有哪些适合四年级的红色资源？","scopeType":"SCHOOL","scopeCode":"SCH_SJZ_GC_0001","grade":"四年级","theme":"红色教育","expectedEntities":["里庄村红色记忆讲述点","里庄村史馆"],"expectedPredicates":["SCHOOL_NEAR_RESOURCE"]},
+    {"id":"nearby-02","category":"nearby","intent":"NEARBY_RESOURCE","query":"本校周边哪里可以开展敬老志愿服务？","scopeType":"SCHOOL","scopeCode":"SCH_SJZ_GC_0001","grade":"小学高年级","theme":"志愿服务","expectedEntities":["常安镇敬老院"],"expectedPredicates":["SCHOOL_NEAR_RESOURCE"]},
+    {"id":"nearby-03","category":"nearby","intent":"NEARBY_RESOURCE","query":"学校附近有哪些劳动教育场所？","scopeType":"SCHOOL","scopeCode":"SCH_SJZ_GC_0001","theme":"劳动教育","expectedEntities":["里庄小学劳动实践角"],"expectedPredicates":["SCHOOL_NEAR_RESOURCE"]},
+    {"id":"nearby-04","category":"nearby","intent":"NEARBY_RESOURCE","query":"推荐一个附近的文明实践资源。","scopeType":"SCHOOL","scopeCode":"SCH_SJZ_GC_0001","expectedEntities":["常安镇新时代文明实践站"],"expectedPredicates":["SCHOOL_NEAR_RESOURCE"]},
+    {"id":"nearby-05","category":"nearby","intent":"NEARBY_RESOURCE","query":"西柏坡希望小学周边有哪些党史教育资源？","scopeType":"SCHOOL","scopeCode":"SCH_SJZ_PS_0001","theme":"党史","expectedEntities":["西柏坡中共中央旧址","西柏坡纪念馆"],"expectedPredicates":["SCHOOL_NEAR_RESOURCE"]},
+    {"id":"nearby-06","category":"nearby","intent":"NEARBY_RESOURCE","query":"里庄小学附近适合了解家乡变化的资源有哪些？","scopeType":"SCHOOL","scopeCode":"SCH_SJZ_GC_0001","theme":"乡土文化","expectedEntities":["里庄村史馆","里庄村乡贤文化墙"],"expectedPredicates":["SCHOOL_NEAR_RESOURCE"]},
+
+    {"id":"teaching-01","category":"teaching","intent":"TEACHING_SUGGESTION","query":"这所学校可以怎样开展敬老志愿服务？","scopeType":"SCHOOL","scopeCode":"SCH_SJZ_GC_0001","grade":"小学高年级","theme":"志愿服务","expectedEntities":["常安镇敬老院"],"expectedPredicates":[]},
+    {"id":"teaching-02","category":"teaching","intent":"TEACHING_SUGGESTION","query":"为四年级设计一节口述红色记忆实践课。","scopeType":"SCHOOL","scopeCode":"SCH_SJZ_GC_0001","grade":"四年级","theme":"红色教育","expectedEntities":["里庄村红色记忆讲述点"],"expectedPredicates":[]},
+    {"id":"teaching-03","category":"teaching","intent":"TEACHING_SUGGESTION","query":"如何利用校园劳动实践角开展责任教育？","scopeType":"SCHOOL","scopeCode":"SCH_SJZ_GC_0001","theme":"劳动教育","expectedEntities":["里庄小学劳动实践角"],"expectedPredicates":[]},
+    {"id":"teaching-04","category":"teaching","intent":"TEACHING_SUGGESTION","query":"里庄村史馆适合设计成什么样的乡土思政课？","scopeType":"RESOURCE","scopeCode":"RES_SJZ_GC_0004","grade":"四年级","theme":"乡土文化","expectedEntities":["里庄村史馆"],"expectedPredicates":[]},
+    {"id":"teaching-05","category":"teaching","intent":"TEACHING_SUGGESTION","query":"怎样围绕西柏坡旧址设计高年级研学活动？","scopeType":"RESOURCE","scopeCode":"RES_SJZ_XBP_0001","grade":"小学高年级","theme":"党史","expectedEntities":["西柏坡中共中央旧址"],"expectedPredicates":[]},
+
+    {"id":"relation-01","category":"relation","intent":"RELATION_QUERY","query":"里庄小学和常安镇敬老院有什么关联？","scopeType":"SCHOOL","scopeCode":"SCH_SJZ_GC_0001","expectedEntities":["常安镇敬老院"],"expectedPredicates":["SCHOOL_NEAR_RESOURCE"]},
+    {"id":"relation-02","category":"relation","intent":"RELATION_QUERY","query":"里庄小学和里庄村红色记忆讲述点如何关联？","scopeType":"SCHOOL","scopeCode":"SCH_SJZ_GC_0001","expectedEntities":["里庄村红色记忆讲述点"],"expectedPredicates":["SCHOOL_NEAR_RESOURCE"]},
+    {"id":"relation-03","category":"relation","intent":"RELATION_QUERY","query":"三大战役指挥决策与西柏坡旧址有什么关系？","scopeType":"REGION","scopeCode":"130131100","expectedEntities":["三大战役指挥决策","西柏坡中共中央旧址"],"expectedPredicates":["OCCURRED_AT","GRAPH_PATH"]},
+    {"id":"relation-04","category":"relation","intent":"RELATION_QUERY","query":"西柏坡纪念馆纪念了哪些事件或人物？","scopeType":"RESOURCE","scopeCode":"RES_SJZ_XBP_0002","expectedEntities":["西柏坡纪念馆"],"expectedPredicates":["COMMEMORATES","MEMORIALIZED_AT","GRAPH_PATH"]},
+    {"id":"relation-05","category":"relation","intent":"RELATION_QUERY","query":"李大钊和这所学校有哪些可核验的图谱关联？","scopeType":"SCHOOL","scopeCode":"SCH_SJZ_GC_0001","expectedEntities":["李大钊"],"expectedPredicates":["RELATED_TO","GRAPH_PATH"]},
+
+    {"id":"explain-01","category":"explanation","intent":"RESOURCE_EXPLANATION","query":"里庄村红色记忆讲述点有什么教育价值？","scopeType":"RESOURCE","scopeCode":"RES_SJZ_GC_0007","expectedEntities":["里庄村红色记忆讲述点"],"expectedPredicates":[]},
+    {"id":"explain-02","category":"explanation","intent":"RESOURCE_EXPLANATION","query":"常安镇敬老院适合哪些年级开展什么活动？","scopeType":"RESOURCE","scopeCode":"RES_SJZ_GC_0001","expectedEntities":["常安镇敬老院"],"expectedPredicates":[]},
+    {"id":"explain-03","category":"explanation","intent":"RESOURCE_EXPLANATION","query":"西柏坡纪念馆为什么适合思政教学？","scopeType":"RESOURCE","scopeCode":"RES_SJZ_XBP_0002","expectedEntities":["西柏坡纪念馆"],"expectedPredicates":[]},
+    {"id":"explain-04","category":"explanation","intent":"RESOURCE_EXPLANATION","query":"里庄小学劳动实践角有哪些安全和组织建议？","scopeType":"RESOURCE","scopeCode":"RES_SJZ_GC_0010","expectedEntities":["里庄小学劳动实践角"],"expectedPredicates":[]},
+
+    {"id":"negative-01","category":"negative","intent":"NEARBY_RESOURCE","query":"附近有没有完全不存在的火星红色纪念馆？","scopeType":"SCHOOL","scopeCode":"SCH_SJZ_GC_0001","expectedEntities":[],"expectedPredicates":[],"expectEmpty":true},
+    {"id":"negative-02","category":"negative","intent":"RESOURCE_EXPLANATION","query":"请介绍未审核测试资源。","scopeType":"RESOURCE","scopeCode":"UNAPPROVED_RESOURCE","expectedEntities":[],"expectedPredicates":[],"expectEmpty":true},
+    {"id":"negative-03","category":"negative","intent":"RELATION_QUERY","query":"学校和仅共享标签但没有真实关系的资源有什么关联？","scopeType":"SCHOOL","scopeCode":"SCH_SJZ_GC_0001","expectedEntities":[],"expectedPredicates":[],"forbiddenPredicates":["HAS_TAG"],"expectEmpty":true},
+    {"id":"negative-04","category":"negative","intent":"TEACHING_SUGGESTION","query":"用已停用资源设计一节课。","scopeType":"RESOURCE","scopeCode":"INACTIVE_RESOURCE","expectedEntities":[],"expectedPredicates":[],"expectEmpty":true}
+  ]
+}

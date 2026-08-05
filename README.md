@@ -237,13 +237,13 @@ $env:RAG_EMBEDDING_MODEL = "text-embedding-v3"
 $env:RAG_EMBEDDING_DIMENSIONS = "1024"
 ```
 
-业务服务启动时会同步 `content_chunk` 到 Qdrant，并维护 `embedding_status`。内容更新后也可以手动全量重建：
+业务服务启动时会按内容 Hash、Embedding 模型、维度和索引版本增量同步 `content_chunk`。未变化的 Chunk 会跳过 Embedding 和 Upsert；版本变化时先构建新的物理 Collection，全部成功后再原子切换逻辑 Alias `red_culture_content_chunks_active`。内容更新后也可以手动全量重建：
 
 ```powershell
 Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8080/api/admin/rag/reindex"
 ```
 
-未启用 RAG 或 embedding/Qdrant 暂时不可用时，系统会明确返回 `degraded` 并使用 `keyword-fallback`，不会把关键词结果标记成向量召回。
+未启用 Dense 召回或 embedding/Qdrant 暂时不可用时，系统仍可使用 MySQL ngram 全文召回，并明确返回 `degraded` 和 `lexical+heuristic-rerank`；不会把全文结果标记成向量召回。
 
 ## 常见问题
 

@@ -15,8 +15,9 @@ public interface ContentChunkMapper extends BaseMapper<ContentChunk> {
 
     @Select("""
             <script>
-            SELECT chunk_id, entity_type, entity_id, chunk_title, chunk_text,
-                   chunk_index, source_id, token_count, embedding_status,
+            SELECT chunk_id, entity_type, entity_id, chunk_title, chunk_text, retrieval_text,
+                   chunk_index, source_id, token_count, embedding_status, embedding_hash,
+                   embedding_model, embedding_dimensions, embedding_index_version, embedded_at,
                    created_at, updated_at
             FROM content_chunk
             WHERE (
@@ -28,9 +29,9 @@ public interface ContentChunkMapper extends BaseMapper<ContentChunk> {
                      </foreach>)
                 </foreach>
             )
-            AND MATCH(chunk_title, chunk_text)
+            AND MATCH(chunk_title, chunk_text, retrieval_text)
                 AGAINST(#{query} IN NATURAL LANGUAGE MODE)
-            ORDER BY MATCH(chunk_title, chunk_text)
+            ORDER BY MATCH(chunk_title, chunk_text, retrieval_text)
                 AGAINST(#{query} IN NATURAL LANGUAGE MODE) DESC,
                 chunk_id ASC
             LIMIT #{limit}

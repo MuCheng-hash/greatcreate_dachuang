@@ -6,7 +6,7 @@ import InlineNotice from "@/components/InlineNotice.vue";
 import { api } from "@/services/api";
 import { useAuthStore } from "@/stores/auth";
 import { useSchoolStore } from "@/stores/school";
-import type { AgentQaRequestPayload, AgentQaResponse, AgentSseEventData, AgentSseEventName, LlmModelOption } from "@/types/agent";
+import type { AgentQaRequestPayload, AgentQaResponse, AgentSseEventData, AgentSseEventName, KnowledgeRetrievalTrace, LlmModelOption } from "@/types/agent";
 
 interface DebugEvent {
   id: number;
@@ -39,7 +39,29 @@ const durationMs = computed(() => {
 const toolCount = computed(() => events.value.filter(item => item.name === "tool.completed").length);
 const errorCount = computed(() => events.value.filter(item => item.name === "error" || item.name === "model.failed").length);
 const runId = computed(() => String(events.value.find(item => item.data.runId)?.data.runId || finalResponse.value?.runId || "—"));
-const stages = computed(() => events.value.filter(item => item.name === "phase.started" || item.name === "phase.completed" || item.name.startsWith("model.") || item.name.startsWith("tool.")));
+const stages = computed(() => events.value.flatMap(item => {
+  if (item.name === "phase.completed" && item.data.phase === "retrieval" && item.data.retrievalTrace) {
+    return [...retrievalStageNodes(item, item.data.retrievalTrace), item];
+  }
+  return item.name === "phase.started" || item.name === "phase.completed"
+    || item.name.startsWith("model.") || item.name.startsWith("tool.") ? [item] : [];
+}));
+
+function retrievalStageNodes(event: DebugEvent, trace: KnowledgeRetrievalTrace): DebugEvent[] {
+  const values: Array<[string, string, string, string]> = [
+    ["retrieval.dense", "Dense 召回", `${trace.denseCandidateCount || 0} 个候选`, "completed"],
+    ["retrieval.lexical", "Lexical 召回", `${trace.lexicalCandidateCount || 0} 个候选`, "completed"],
+    ["retrieval.graph", "Graph 检索", `${trace.graphCandidateCount || 0} 个事实 · ${trace.graphStatus || "skipped"}`, trace.graphStatus === "failed" ? "failed" : "completed"],
+    ["retrieval.rerank", "业务重排", `${trace.rerankedCandidateCount || 0} 个候选 · ${(trace.retrievalMethods || []).join(" / ")}`, "completed"]
+  ];
+  return values.map(([name, label, outputSummary, status], index) => ({
+    id: -(event.id * 10 + index + 1),
+    name,
+    data: { phase: "retrieval", label, outputSummary, status },
+    timestamp: event.timestamp,
+    elapsedMs: event.elapsedMs
+  }));
+}
 
 onMounted(async () => {
   await school.load();
@@ -78,6 +100,7 @@ async function run(): Promise<void> {
     scopeType: "SCHOOL",
     scopeId: school.school?.schoolId || auth.user?.schoolId || null,
     conversationId: globalThis.crypto?.randomUUID?.() || `debug-${Date.now()}`,
+    debug: true,
     ...(selectedModelId.value ? { modelId: selectedModelId.value } : {})
   };
   try {

@@ -48,6 +48,7 @@ import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.LockSupport;
+import java.util.function.Consumer;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -196,10 +197,7 @@ public class AgentQaServiceImpl implements AgentQaService {
                         "label", "正在检索可信知识与业务数据"
                 ));
                 AgentAnswerContext context = buildAgentContext(request, currentUser, question, intent, scope);
-                sendEvent(emitter, "phase.completed", Map.of(
-                        "phase", "retrieval",
-                        "label", "知识与业务上下文已准备"
-                ));
+                sendEvent(emitter, "phase.completed", retrievalCompletedEvent(request, context, null));
                 agentRuntimeClient.streamStateful(request, currentUser, context, event -> {
                     if ("done".equals(event.event())) {
                         upstreamDone[0] = true;
@@ -261,12 +259,9 @@ public class AgentQaServiceImpl implements AgentQaService {
                         "phase", "retrieval",
                         "label", "正在检索可信知识与业务数据"
                 ));
-                AgentQaResponse response = askWithLocalFallbackPipeline(request, currentUser);
-                sendEvent(emitter, "phase.completed", Map.of(
-                        "runId", runId,
-                        "phase", "retrieval",
-                        "label", "知识与业务上下文已准备"
-                ));
+                AtomicReference<AgentAnswerContext> contextRef = new AtomicReference<>();
+                AgentQaResponse response = askWithPipeline(request, currentUser, false, contextRef::set);
+                sendEvent(emitter, "phase.completed", retrievalCompletedEvent(request, contextRef.get(), runId));
                 sendEvent(emitter, "phase.started", Map.of(
                         "runId", runId,
                         "phase", "response",
@@ -484,6 +479,22 @@ public class AgentQaServiceImpl implements AgentQaService {
         return context;
     }
 
+    private Map<String, Object> retrievalCompletedEvent(AgentQaRequest request,
+                                                        AgentAnswerContext context,
+                                                        String runId) {
+        Map<String, Object> event = new LinkedHashMap<>();
+        if (StringUtils.hasText(runId)) {
+            event.put("runId", runId);
+        }
+        event.put("phase", "retrieval");
+        event.put("label", "知识与业务上下文已准备");
+        if (Boolean.TRUE.equals(request.getDebug()) && context != null && context.getRetrieval() != null
+                && context.getRetrieval().getRetrievalTrace() != null) {
+            event.put("retrievalTrace", context.getRetrieval().getRetrievalTrace());
+        }
+        return event;
+    }
+
     private void sendEvent(SseEmitter emitter, String eventName, Object data) {
         try {
             emitter.send(SseEmitter.event().name(eventName).data(data));
@@ -511,6 +522,14 @@ public class AgentQaServiceImpl implements AgentQaService {
     private AgentQaResponse askWithPipeline(AgentQaRequest request,
                                              AuthCurrentUserVO currentUser,
                                              boolean allowRemoteAgent) {
+        return askWithPipeline(request, currentUser, allowRemoteAgent, ignored -> {
+        });
+    }
+
+    private AgentQaResponse askWithPipeline(AgentQaRequest request,
+                                             AuthCurrentUserVO currentUser,
+                                             boolean allowRemoteAgent,
+                                             Consumer<AgentAnswerContext> contextConsumer) {
 
         String question = request.getQuestion().trim();
         AgentIntent intent = hasImageAttachments(request)
@@ -528,6 +547,7 @@ public class AgentQaServiceImpl implements AgentQaService {
         Scope scope = scopeResolution.scope();
 
         AgentAnswerContext context = buildAgentContext(request, currentUser, question, intent, scope);
+        contextConsumer.accept(context);
         KnowledgeRetrieveResult retrieval = context.getRetrieval();
 
         AgentRuntimeResult remote = !allowRemoteAgent || agentRuntimeClient == null

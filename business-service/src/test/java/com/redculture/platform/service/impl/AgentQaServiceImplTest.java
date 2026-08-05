@@ -55,7 +55,7 @@ class AgentQaServiceImplTest {
         assertEquals(KnowledgeRetrievalStatus.OK, response.getRetrievalStatus());
         assertEquals(1, response.getCitations().size());
         assertEquals("chunk:1", response.getCitations().get(0).getCitationId());
-        assertEquals(List.of("hybrid-rrf"), response.getRetrievalMethods());
+        assertEquals(List.of("dense", "lexical", "rrf"), response.getRetrievalMethods());
         assertFalse(response.getRelatedResources().isEmpty());
         verify(retriever).retrieve(any(KnowledgeRetrieveRequest.class));
     }

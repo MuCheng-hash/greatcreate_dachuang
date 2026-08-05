@@ -28,5 +28,7 @@ public class AgentQaRequest {
 
     private Integer topK;
 
+    private Boolean debug = false;
+
     private List<AgentAttachmentRequest> attachments = new ArrayList<>();
 }

@@ -395,13 +395,19 @@ CREATE TABLE content_chunk (
   source_id            BIGINT NULL,
   token_count          INT NULL,
   embedding_status     ENUM('pending', 'done', 'failed') NOT NULL DEFAULT 'pending',
+  retrieval_text       LONGTEXT NULL,
+  embedding_hash       CHAR(64) NULL,
+  embedding_model      VARCHAR(100) NULL,
+  embedding_dimensions INT NULL,
+  embedding_index_version VARCHAR(32) NULL,
+  embedded_at          DATETIME NULL,
   created_at           DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at           DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   CONSTRAINT fk_chunk_source
     FOREIGN KEY (source_id) REFERENCES data_source(source_id),
   CONSTRAINT uk_content_chunk UNIQUE (entity_type, entity_id, chunk_index),
   KEY idx_chunk_entity (entity_type, entity_id),
-  FULLTEXT INDEX ft_chunk_text (chunk_title, chunk_text) WITH PARSER ngram
+  FULLTEXT INDEX ft_chunk_text (chunk_title, chunk_text, retrieval_text) WITH PARSER ngram
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE audit_log (

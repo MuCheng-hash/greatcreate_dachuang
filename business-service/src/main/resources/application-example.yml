@@ -34,8 +34,22 @@ app:
     qdrant-base-url: ${QDRANT_BASE_URL:http://127.0.0.1:6333}
     qdrant-api-key: ${QDRANT_API_KEY:}
     qdrant-collection: ${QDRANT_COLLECTION:red_culture_content_chunks}
+    qdrant-alias: ${QDRANT_ALIAS:red_culture_content_chunks_active}
+    index-version: ${RAG_INDEX_VERSION:v2}
     candidate-multiplier: ${RAG_CANDIDATE_MULTIPLIER:4}
     rrf-k: ${RAG_RRF_K:60}
     dense-rrf-weight: ${RAG_DENSE_RRF_WEIGHT:1.0}
     lexical-rrf-weight: ${RAG_LEXICAL_RRF_WEIGHT:1.0}
+    base-retrieval-weight: ${RAG_BASE_RETRIEVAL_WEIGHT:0.60}
+    entity-match-weight: ${RAG_ENTITY_MATCH_WEIGHT:0.15}
+    grade-match-weight: ${RAG_GRADE_MATCH_WEIGHT:0.10}
+    theme-match-weight: ${RAG_THEME_MATCH_WEIGHT:0.08}
+    source-credibility-weight: ${RAG_SOURCE_CREDIBILITY_WEIGHT:0.03}
+    graph-relevance-weight: ${RAG_GRAPH_RELEVANCE_WEIGHT:0.04}
+    rerank-candidate-limit: ${RAG_RERANK_CANDIDATE_LIMIT:32}
+    graph-candidate-limit: ${RAG_GRAPH_CANDIDATE_LIMIT:24}
+    graph-evidence-limit: ${RAG_GRAPH_EVIDENCE_LIMIT:8}
+    graph-context-limit: ${RAG_GRAPH_CONTEXT_LIMIT:3}
+    joint-evidence-limit: ${RAG_JOINT_EVIDENCE_LIMIT:8}
+    relation-expansion-limit: ${RAG_RELATION_EXPANSION_LIMIT:16}
     minimum-vector-score: ${RAG_MINIMUM_VECTOR_SCORE:0.2}

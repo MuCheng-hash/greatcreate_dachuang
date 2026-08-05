@@ -13,6 +13,8 @@ import com.redculture.platform.service.SchoolMapService;
 import com.redculture.platform.service.TownMapService;
 import com.redculture.platform.service.rag.ChunkVectorStore;
 import com.redculture.platform.service.rag.EmbeddingClient;
+import com.redculture.platform.service.rag.RagEntityMetadata;
+import com.redculture.platform.service.rag.RagEntityMetadataService;
 import com.redculture.platform.service.rag.VectorSearchCandidate;
 import com.redculture.platform.vo.LocalEduResourceSummaryVO;
 import com.redculture.platform.vo.SchoolMapDetailVO;
@@ -26,6 +28,7 @@ import org.springframework.context.annotation.AnnotationConfigApplicationContext
 import org.springframework.data.neo4j.core.Neo4jClient;
 
 import java.util.Collection;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -39,7 +42,9 @@ import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.anySet;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -92,8 +97,9 @@ class DatabaseKnowledgeRetrieverTest {
         assertEquals(1, result.getChunks().size());
         assertTrue(result.allCitationIds().contains("chunk:11"));
         assertTrue(result.allCitationIds().contains("source-rel:21"));
-        assertEquals("lexical", result.getChunks().get(0).getRetrievalMethod());
-        assertEquals(List.of("lexical"), result.getRetrievalMethods());
+        assertEquals("lexical+heuristic-rerank", result.getChunks().get(0).getRetrievalMethod());
+        assertEquals(List.of("lexical", "heuristic-rerank"), result.getRetrievalMethods());
+        assertEquals("failed", result.getRetrievalTrace().getGraphStatus());
     }
 
     @Test
@@ -139,8 +145,8 @@ class DatabaseKnowledgeRetrieverTest {
         assertEquals(KnowledgeRetrievalStatus.OK, result.getRetrievalStatus());
         assertEquals(3, result.getChunks().size());
         assertEquals(32L, result.getChunks().get(0).getChunkId());
-        assertEquals("hybrid-rrf", result.getChunks().get(0).getRetrievalMethod());
-        assertEquals(List.of("dense", "lexical", "rrf"), result.getRetrievalMethods());
+        assertEquals("hybrid-rrf+heuristic-rerank", result.getChunks().get(0).getRetrievalMethod());
+        assertEquals(List.of("dense", "lexical", "rrf", "heuristic-rerank"), result.getRetrievalMethods());
         assertTrue(result.getChunks().get(0).getScore() > result.getChunks().get(1).getScore());
     }
 
@@ -175,8 +181,8 @@ class DatabaseKnowledgeRetrieverTest {
         ));
 
         assertEquals(KnowledgeRetrievalStatus.DEGRADED, result.getRetrievalStatus());
-        assertEquals(List.of("lexical"), result.getRetrievalMethods());
-        assertEquals("lexical", result.getChunks().get(0).getRetrievalMethod());
+        assertEquals(List.of("lexical", "heuristic-rerank"), result.getRetrievalMethods());
+        assertEquals("lexical+heuristic-rerank", result.getChunks().get(0).getRetrievalMethod());
     }
 
     @Test
@@ -212,8 +218,8 @@ class DatabaseKnowledgeRetrieverTest {
         ));
 
         assertEquals(KnowledgeRetrievalStatus.DEGRADED, result.getRetrievalStatus());
-        assertEquals(List.of("dense"), result.getRetrievalMethods());
-        assertEquals("dense", result.getChunks().get(0).getRetrievalMethod());
+        assertEquals(List.of("dense", "heuristic-rerank"), result.getRetrievalMethods());
+        assertEquals("dense+heuristic-rerank", result.getChunks().get(0).getRetrievalMethod());
     }
 
     @Test
@@ -445,6 +451,327 @@ class DatabaseKnowledgeRetrieverTest {
     }
 
     @Test
+    void returnsStructuredWhitelistedGraphPathWithRealEdges() {
+        ContentChunkMapper contentChunkMapper = mock(ContentChunkMapper.class);
+        when(contentChunkMapper.searchByFullText(anyMap(), anyString(), anyInt())).thenReturn(List.of());
+        SchoolMapService schoolMapService = mock(SchoolMapService.class);
+        when(schoolMapService.getSchoolDetail(1L)).thenReturn(new SchoolMapDetailVO());
+        Neo4jClient neo4jClient = mock(Neo4jClient.class, org.mockito.Answers.RETURNS_DEEP_STUBS);
+        when(neo4jClient.query(argThat((String query) -> query != null
+                && query.contains("SCHOOL_NEAR_RESOURCE")))
+                .bind(1L).to("schoolId").fetch().all()).thenReturn(List.of());
+        Map<String, Object> pathRow = new LinkedHashMap<>();
+        pathRow.put("pathNodes", List.of(
+                Map.of("nodeType", "School", "nodeId", 1L, "nodeName", "里庄小学"),
+                Map.of("nodeType", "LocalEduResource", "nodeId", 9L, "nodeName", "里庄村史馆"),
+                Map.of("nodeType", "Hero", "nodeId", 21L, "nodeName", "李大钊")
+        ));
+        pathRow.put("pathRelationships", List.of(
+                Map.of("predicate", "SCHOOL_NEAR_RESOURCE", "startId", 1L, "endId", 9L),
+                Map.of("predicate", "MEMORIALIZED_AT", "startId", 21L, "endId", 9L)
+        ));
+        pathRow.put("hop", 2);
+        when(neo4jClient.query(argThat((String query) -> query != null && query.contains("pathNodes")))
+                .bind(1L).to("schoolId").fetch().all()).thenReturn(List.of(pathRow));
+
+        RagEntityMetadataService metadataService = mock(RagEntityMetadataService.class);
+        when(metadataService.loadApproved(anyMap())).thenReturn(Map.of(
+                "school:1", metadata(EntityType.SCHOOL, 1L, "里庄小学", null, null),
+                "resource:9", metadata(EntityType.RESOURCE, 9L, "里庄村史馆", null, null),
+                "hero:21", metadata(EntityType.HERO, 21L, "李大钊", null, null)
+        ));
+        DatabaseKnowledgeRetriever retriever = retriever(
+                contentChunkMapper, mock(EntitySourceRelMapper.class), mock(DataSourceMapper.class),
+                schoolMapService, mock(TownMapService.class), neo4jClient, new RagProperties(),
+                mock(EmbeddingClient.class), mock(ChunkVectorStore.class), metadataService);
+        KnowledgeRetrieveRequest request = request("李大钊和这所学校有什么关联？",
+                KnowledgeScopeType.SCHOOL, 1L, 5);
+        request.setIntent("RELATION_QUERY");
+
+        KnowledgeRetrieveResult result = retriever.retrieve(request);
+
+        assertEquals(KnowledgeRetrievalStatus.OK, result.getRetrievalStatus());
+        assertEquals(1, result.getGraphFacts().size());
+        assertEquals("GRAPH_PATH", result.getGraphFacts().get(0).getPredicate());
+        assertEquals(2, result.getGraphFacts().get(0).getHop());
+        assertEquals(2, result.getGraphFacts().get(0).getPathEdges().size());
+        assertEquals("INCOMING", result.getGraphFacts().get(0).getPathEdges().get(1).getDirection());
+        verify(neo4jClient).query(argThat((String query) -> query != null
+                && query.contains("all(rel IN relationships(p)")
+                  && !query.contains("'HAS_TAG'")));
+    }
+
+    @Test
+    void returnsEmptyForUnknownNamedSchoolRelationTarget() {
+        ContentChunkMapper contentChunkMapper = mock(ContentChunkMapper.class);
+        SchoolMapService schoolMapService = mock(SchoolMapService.class);
+        when(schoolMapService.getSchoolDetail(1L)).thenReturn(new SchoolMapDetailVO());
+        Neo4jClient neo4jClient = mock(Neo4jClient.class, org.mockito.Answers.RETURNS_DEEP_STUBS);
+        when(neo4jClient.query(argThat((String query) -> query != null
+                && query.contains("SCHOOL_NEAR_RESOURCE")))
+                .bind(1L).to("schoolId").fetch().all()).thenReturn(List.of());
+        Map<String, Object> pathRow = new LinkedHashMap<>();
+        pathRow.put("pathNodes", List.of(
+                Map.of("nodeType", "School", "nodeId", 1L, "nodeName", "里庄小学"),
+                Map.of("nodeType", "LocalEduResource", "nodeId", 9L, "nodeName", "里庄村史馆"),
+                Map.of("nodeType", "Hero", "nodeId", 22L, "nodeName", "董存瑞")
+        ));
+        pathRow.put("pathRelationships", List.of(
+                Map.of("predicate", "SCHOOL_NEAR_RESOURCE", "startId", 1L, "endId", 9L),
+                Map.of("predicate", "MEMORIALIZED_AT", "startId", 22L, "endId", 9L)
+        ));
+        pathRow.put("hop", 2);
+        when(neo4jClient.query(argThat((String query) -> query != null && query.contains("pathNodes")))
+                .bind(1L).to("schoolId").fetch().all()).thenReturn(List.of(pathRow));
+        RagEntityMetadataService metadataService = mock(RagEntityMetadataService.class);
+        when(metadataService.loadApproved(anyMap())).thenReturn(Map.of(
+                "school:1", metadata(EntityType.SCHOOL, 1L, "里庄小学", null, null),
+                "resource:9", metadata(EntityType.RESOURCE, 9L, "里庄村史馆", null, null),
+                "hero:22", metadata(EntityType.HERO, 22L, "董存瑞", null, null)
+        ));
+        DatabaseKnowledgeRetriever retriever = retriever(
+                contentChunkMapper, mock(EntitySourceRelMapper.class), mock(DataSourceMapper.class),
+                schoolMapService, mock(TownMapService.class), neo4jClient, new RagProperties(),
+                mock(EmbeddingClient.class), mock(ChunkVectorStore.class), metadataService);
+        KnowledgeRetrieveRequest request = request("李大钊和这所学校有什么关联？",
+                KnowledgeScopeType.SCHOOL, 1L, 5);
+        request.setIntent("RELATION_QUERY");
+
+        KnowledgeRetrieveResult result = retriever.retrieve(request);
+
+        assertEquals(KnowledgeRetrievalStatus.EMPTY, result.getRetrievalStatus());
+        assertTrue(result.getGraphFacts().isEmpty());
+        assertEquals("empty", result.getRetrievalTrace().getGraphStatus());
+        verify(contentChunkMapper, never()).searchByFullText(anyMap(), anyString(), anyInt());
+    }
+
+    @Test
+    void deduplicatesEquivalentDirectAndOneHopGraphFacts() {
+        ContentChunkMapper contentChunkMapper = mock(ContentChunkMapper.class);
+        when(contentChunkMapper.searchByFullText(anyMap(), anyString(), anyInt())).thenReturn(List.of());
+        SchoolMapService schoolMapService = mock(SchoolMapService.class);
+        when(schoolMapService.getSchoolDetail(1L)).thenReturn(new SchoolMapDetailVO());
+        Neo4jClient neo4jClient = mock(Neo4jClient.class, org.mockito.Answers.RETURNS_DEEP_STUBS);
+        when(neo4jClient.query(argThat((String query) -> query != null
+                && query.contains("SCHOOL_NEAR_RESOURCE")))
+                .bind(1L).to("schoolId").fetch().all()).thenReturn(List.of(Map.of(
+                        "schoolName", "里庄小学", "resourceId", 4L, "resourceName", "常安镇敬老院",
+                        "predicate", "SCHOOL_NEAR_RESOURCE", "distanceMeters", 1800
+                )));
+        Map<String, Object> pathRow = new LinkedHashMap<>();
+        pathRow.put("pathNodes", List.of(
+                Map.of("nodeType", "School", "nodeId", 1L, "nodeName", "里庄小学"),
+                Map.of("nodeType", "LocalEduResource", "nodeId", 4L, "nodeName", "常安镇敬老院")
+        ));
+        pathRow.put("pathRelationships", List.of(
+                Map.of("predicate", "SCHOOL_NEAR_RESOURCE", "startId", 1L, "endId", 4L)
+        ));
+        pathRow.put("hop", 1);
+        when(neo4jClient.query(argThat((String query) -> query != null && query.contains("pathNodes")))
+                .bind(1L).to("schoolId").fetch().all()).thenReturn(List.of(pathRow));
+        RagEntityMetadataService metadataService = mock(RagEntityMetadataService.class);
+        when(metadataService.loadApproved(anyMap())).thenReturn(Map.of(
+                "school:1", metadata(EntityType.SCHOOL, 1L, "里庄小学", null, null),
+                "resource:4", metadata(EntityType.RESOURCE, 4L, "常安镇敬老院", null, null)
+        ));
+        DatabaseKnowledgeRetriever retriever = retriever(
+                contentChunkMapper, mock(EntitySourceRelMapper.class), mock(DataSourceMapper.class),
+                schoolMapService, mock(TownMapService.class), neo4jClient, new RagProperties(),
+                mock(EmbeddingClient.class), mock(ChunkVectorStore.class), metadataService);
+        KnowledgeRetrieveRequest request = request("里庄小学和常安镇敬老院有什么关联？",
+                KnowledgeScopeType.SCHOOL, 1L, 5);
+        request.setIntent("RELATION_QUERY");
+
+        KnowledgeRetrieveResult result = retriever.retrieve(request);
+
+        assertEquals(1, result.getGraphFacts().size());
+        assertEquals(1800D, result.getGraphFacts().get(0).getDistanceMeters());
+    }
+
+    @Test
+    void returnsStructuredRegionPathFromNeo4j() {
+        ContentChunkMapper contentChunkMapper = mock(ContentChunkMapper.class);
+        when(contentChunkMapper.searchByFullText(anyMap(), anyString(), anyInt())).thenReturn(List.of());
+        TownMapService townMapService = mock(TownMapService.class);
+        when(townMapService.getTownMapDetail(4L)).thenReturn(new com.redculture.platform.vo.TownMapDetailVO());
+        Neo4jClient neo4jClient = mock(Neo4jClient.class, org.mockito.Answers.RETURNS_DEEP_STUBS);
+        Map<String, Object> pathRow = new LinkedHashMap<>();
+        pathRow.put("pathNodes", List.of(
+                Map.of("nodeType", "Region", "nodeId", 4L, "nodeName", "西柏坡镇"),
+                Map.of("nodeType", "Site", "nodeId", 1L, "nodeName", "西柏坡中共中央旧址"),
+                Map.of("nodeType", "Event", "nodeId", 1L, "nodeName", "三大战役指挥决策")
+        ));
+        pathRow.put("pathRelationships", List.of(
+                Map.of("predicate", "LOCATED_IN", "startId", 1L, "endId", 4L),
+                Map.of("predicate", "OCCURRED_AT", "startId", 1L, "endId", 1L)
+        ));
+        pathRow.put("hop", 2);
+        when(neo4jClient.query(argThat((String query) -> query != null
+                && query.contains("MATCH p=(region:Region")))
+                .bind(4L).to("regionId").fetch().all()).thenReturn(List.of(pathRow));
+        RagEntityMetadataService metadataService = mock(RagEntityMetadataService.class);
+        when(metadataService.loadApproved(anyMap())).thenReturn(Map.of(
+                "site:1", metadata(EntityType.SITE, 1L, "西柏坡中共中央旧址", null, null),
+                "event:1", metadata(EntityType.EVENT, 1L, "三大战役指挥决策", null, null)
+        ));
+        DatabaseKnowledgeRetriever retriever = retriever(
+                contentChunkMapper, mock(EntitySourceRelMapper.class), mock(DataSourceMapper.class),
+                mock(SchoolMapService.class), townMapService, neo4jClient, new RagProperties(),
+                mock(EmbeddingClient.class), mock(ChunkVectorStore.class), metadataService);
+        KnowledgeRetrieveRequest request = request("三大战役指挥决策与西柏坡旧址有什么关系？",
+                KnowledgeScopeType.REGION, 4L, 5);
+        request.setIntent("RELATION_QUERY");
+
+        KnowledgeRetrieveResult result = retriever.retrieve(request);
+
+        assertEquals("ok", result.getRetrievalTrace().getGraphStatus());
+        assertEquals("GRAPH_PATH", result.getGraphFacts().get(0).getPredicate());
+        assertEquals(List.of("LOCATED_IN", "OCCURRED_AT"), result.getGraphFacts().get(0)
+                .getPathEdges().stream().map(edge -> edge.getPredicate()).toList());
+    }
+
+    @Test
+    void explicitUnknownNearbyResourceReturnsEmpty() {
+        ContentChunkMapper contentChunkMapper = mock(ContentChunkMapper.class);
+        SchoolMapService schoolMapService = schoolWithResources(
+                7L, "里庄村史馆", 8L, "常安镇敬老院");
+        Neo4jClient neo4jClient = mock(Neo4jClient.class, org.mockito.Answers.RETURNS_DEEP_STUBS);
+        when(neo4jClient.query(anyString()).bind(1L).to("schoolId").fetch().all()).thenReturn(List.of());
+        RagEntityMetadataService metadataService = mock(RagEntityMetadataService.class);
+        when(metadataService.loadApproved(anyMap())).thenReturn(Map.of(
+                "school:1", metadata(EntityType.SCHOOL, 1L, "里庄小学", null, null),
+                "resource:7", metadata(EntityType.RESOURCE, 7L, "里庄村史馆", null, null)
+        ));
+        DatabaseKnowledgeRetriever retriever = retriever(
+                contentChunkMapper, mock(EntitySourceRelMapper.class), mock(DataSourceMapper.class),
+                schoolMapService, mock(TownMapService.class), neo4jClient, new RagProperties(),
+                mock(EmbeddingClient.class), mock(ChunkVectorStore.class), metadataService);
+
+        KnowledgeRetrieveResult result = retriever.retrieve(request(
+                "附近有没有完全不存在的火星红色纪念馆？", KnowledgeScopeType.SCHOOL, 1L, 5));
+
+        assertEquals(KnowledgeRetrievalStatus.EMPTY, result.getRetrievalStatus());
+        assertTrue(result.getGraphFacts().isEmpty());
+        verify(contentChunkMapper, never()).searchByFullText(anyMap(), anyString(), anyInt());
+    }
+
+    @Test
+    void rejectsGraphResourceWithoutApprovedSchoolRelation() {
+        ContentChunkMapper contentChunkMapper = mock(ContentChunkMapper.class);
+        when(contentChunkMapper.searchByFullText(anyMap(), anyString(), anyInt())).thenAnswer(invocation -> {
+            Map<String, Collection<Long>> ids = invocation.getArgument(0);
+            assertFalse(ids.getOrDefault("resource", List.of()).contains(9L));
+            return List.of();
+        });
+        SchoolMapService schoolMapService = mock(SchoolMapService.class);
+        when(schoolMapService.getSchoolDetail(1L)).thenReturn(new SchoolMapDetailVO());
+        Neo4jClient neo4jClient = mock(Neo4jClient.class, org.mockito.Answers.RETURNS_DEEP_STUBS);
+        when(neo4jClient.query(anyString()).bind(1L).to("schoolId").fetch().all()).thenReturn(List.of(Map.of(
+                "schoolName", "里庄小学", "resourceId", 9L, "resourceName", "未建立审核关系的资源",
+                "predicate", "SCHOOL_NEAR_RESOURCE", "distanceMeters", 100
+        )));
+        RagEntityMetadataService metadataService = mock(RagEntityMetadataService.class);
+        when(metadataService.loadApproved(anyMap())).thenReturn(Map.of(
+                "school:1", metadata(EntityType.SCHOOL, 1L, "里庄小学", null, null)
+        ));
+
+        DatabaseKnowledgeRetriever retriever = retriever(
+                contentChunkMapper, mock(EntitySourceRelMapper.class), mock(DataSourceMapper.class),
+                schoolMapService, mock(TownMapService.class), neo4jClient, new RagProperties(),
+                mock(EmbeddingClient.class), mock(ChunkVectorStore.class), metadataService);
+        KnowledgeRetrieveResult result = retriever.retrieve(request(
+                "里庄小学附近有哪些红色资源？", KnowledgeScopeType.SCHOOL, 1L, 5));
+
+        assertTrue(result.getGraphFacts().isEmpty());
+        assertEquals("empty", result.getRetrievalTrace().getGraphStatus());
+    }
+
+    @Test
+    void reranksSameRrfCandidatesByGradeAndTheme() {
+        ContentChunkMapper contentChunkMapper = mock(ContentChunkMapper.class);
+        ContentChunk highGrade = chunk(101L, EntityType.RESOURCE, 7L, "普通基地", "红色文化学习", null);
+        ContentChunk middleGrade = chunk(102L, EntityType.RESOURCE, 8L, "志愿服务基地", "开展志愿服务", null);
+        when(contentChunkMapper.searchByFullText(anyMap(), anyString(), anyInt()))
+                .thenReturn(List.of(highGrade, middleGrade));
+        when(contentChunkMapper.selectBatchIds(anyCollection())).thenReturn(List.of(highGrade, middleGrade));
+        SchoolMapService schoolMapService = schoolWithResources(7L, "普通基地", 8L, "志愿服务基地");
+        RagEntityMetadataService metadataService = mock(RagEntityMetadataService.class);
+        when(metadataService.loadApproved(anyMap())).thenReturn(Map.of(
+                "school:1", metadata(EntityType.SCHOOL, 1L, "里庄小学", null, null),
+                "resource:7", metadata(EntityType.RESOURCE, 7L, "普通基地", "小学高年级", "红色文化"),
+                "resource:8", metadata(EntityType.RESOURCE, 8L, "志愿服务基地", "小学中年级", "志愿服务")
+        ));
+        RagProperties properties = new RagProperties();
+        properties.setEnabled(true);
+        EmbeddingClient embeddingClient = mock(EmbeddingClient.class);
+        when(embeddingClient.embed(anyString())).thenReturn(new float[]{0.1F});
+        ChunkVectorStore vectorStore = mock(ChunkVectorStore.class);
+        when(vectorStore.search(any(float[].class), anySet(), anyInt())).thenReturn(List.of(
+                new VectorSearchCandidate(101L, 0.9D), new VectorSearchCandidate(102L, 0.89D)));
+        DatabaseKnowledgeRetriever retriever = retriever(
+                contentChunkMapper, mock(EntitySourceRelMapper.class), mock(DataSourceMapper.class),
+                schoolMapService, mock(TownMapService.class), null, properties,
+                embeddingClient, vectorStore, metadataService);
+        KnowledgeRetrieveRequest request = request("适合四年级的志愿服务资源",
+                KnowledgeScopeType.SCHOOL, 1L, 2);
+        request.setGrade("四年级");
+        request.setTheme("志愿服务");
+
+        KnowledgeRetrieveResult result = retriever.retrieve(request);
+
+        assertEquals(102L, result.getChunks().get(0).getChunkId());
+        assertTrue(result.getRetrievalTrace().getTopCandidates().get(0)
+                .getContributions().get("gradeMatch") > 0D);
+        assertTrue(result.getRetrievalTrace().getTopCandidates().get(0)
+                .getContributions().get("themeMatch") > 0D);
+    }
+
+    @Test
+    void nearbyRerankPrefersCloserResourceAndKeepsResourceDiversity() {
+        ContentChunkMapper contentChunkMapper = mock(ContentChunkMapper.class);
+        ContentChunk farOne = chunk(111L, EntityType.RESOURCE, 7L, "远资源一", "红色教育", null);
+        ContentChunk farTwo = chunk(112L, EntityType.RESOURCE, 7L, "远资源二", "红色教育", null);
+        ContentChunk farThree = chunk(113L, EntityType.RESOURCE, 7L, "远资源三", "红色教育", null);
+        ContentChunk near = chunk(114L, EntityType.RESOURCE, 8L, "近资源", "红色教育", null);
+        List<ContentChunk> all = List.of(farOne, farTwo, farThree, near);
+        when(contentChunkMapper.searchByFullText(anyMap(), anyString(), anyInt())).thenReturn(all);
+        when(contentChunkMapper.selectBatchIds(anyCollection())).thenReturn(all);
+        SchoolMapService schoolMapService = schoolWithResources(7L, "远资源", 8L, "近资源");
+        Neo4jClient neo4jClient = mock(Neo4jClient.class, org.mockito.Answers.RETURNS_DEEP_STUBS);
+        when(neo4jClient.query(anyString()).bind(1L).to("schoolId").fetch().all()).thenReturn(List.of(
+                Map.of("schoolName", "里庄小学", "resourceId", 7L, "resourceName", "远资源",
+                        "predicate", "SCHOOL_NEAR_RESOURCE", "distanceMeters", 50000),
+                Map.of("schoolName", "里庄小学", "resourceId", 8L, "resourceName", "近资源",
+                        "predicate", "SCHOOL_NEAR_RESOURCE", "distanceMeters", 100)
+        ));
+        RagEntityMetadataService metadataService = mock(RagEntityMetadataService.class);
+        when(metadataService.loadApproved(anyMap())).thenReturn(Map.of(
+                "school:1", metadata(EntityType.SCHOOL, 1L, "里庄小学", null, null),
+                "resource:7", metadata(EntityType.RESOURCE, 7L, "远资源", null, "红色教育"),
+                "resource:8", metadata(EntityType.RESOURCE, 8L, "近资源", null, "红色教育")
+        ));
+        RagProperties properties = new RagProperties();
+        properties.setEnabled(true);
+        EmbeddingClient embeddingClient = mock(EmbeddingClient.class);
+        when(embeddingClient.embed(anyString())).thenReturn(new float[]{0.1F});
+        ChunkVectorStore vectorStore = mock(ChunkVectorStore.class);
+        when(vectorStore.search(any(float[].class), anySet(), anyInt())).thenReturn(List.of(
+                new VectorSearchCandidate(111L, 0.94D), new VectorSearchCandidate(112L, 0.93D),
+                new VectorSearchCandidate(113L, 0.92D), new VectorSearchCandidate(114L, 0.91D)));
+        DatabaseKnowledgeRetriever retriever = retriever(
+                contentChunkMapper, mock(EntitySourceRelMapper.class), mock(DataSourceMapper.class),
+                schoolMapService, mock(TownMapService.class), neo4jClient, properties,
+                embeddingClient, vectorStore, metadataService);
+
+        KnowledgeRetrieveResult result = retriever.retrieve(request(
+                "附近有哪些红色教育资源？", KnowledgeScopeType.SCHOOL, 1L, 3));
+
+        assertEquals(8L, result.getChunks().get(0).getEntityId());
+        assertTrue(result.getChunks().stream().anyMatch(item -> item.getEntityId().equals(7L)));
+        assertTrue(result.getChunks().stream().anyMatch(item -> item.getEntityId().equals(8L)));
+    }
+
+    @Test
     void activatesMockRetrieverOnlyForMockRagProfile() {
         try (AnnotationConfigApplicationContext context = new AnnotationConfigApplicationContext()) {
             context.getEnvironment().setActiveProfiles("mock-rag");
@@ -518,6 +845,52 @@ class DatabaseKnowledgeRetrieverTest {
                 embeddingClient,
                 vectorStore
         );
+    }
+
+    private DatabaseKnowledgeRetriever retriever(ContentChunkMapper contentChunkMapper,
+                                                  EntitySourceRelMapper entitySourceRelMapper,
+                                                  DataSourceMapper dataSourceMapper,
+                                                  SchoolMapService schoolMapService,
+                                                  TownMapService townMapService,
+                                                  Neo4jClient neo4jClient,
+                                                  RagProperties properties,
+                                                  EmbeddingClient embeddingClient,
+                                                  ChunkVectorStore vectorStore,
+                                                  RagEntityMetadataService metadataService) {
+        return new DatabaseKnowledgeRetriever(
+                contentChunkMapper, entitySourceRelMapper, dataSourceMapper, schoolMapService, townMapService,
+                neo4jClient, properties, embeddingClient, vectorStore, metadataService
+        );
+    }
+
+    private SchoolMapService schoolWithResources(Long firstId,
+                                                 String firstName,
+                                                 Long secondId,
+                                                 String secondName) {
+        SchoolResourceItemVO first = new SchoolResourceItemVO();
+        first.setResourceId(firstId);
+        LocalEduResourceSummaryVO firstSummary = new LocalEduResourceSummaryVO();
+        firstSummary.setResourceName(firstName);
+        first.setResource(firstSummary);
+        SchoolResourceItemVO second = new SchoolResourceItemVO();
+        second.setResourceId(secondId);
+        LocalEduResourceSummaryVO secondSummary = new LocalEduResourceSummaryVO();
+        secondSummary.setResourceName(secondName);
+        second.setResource(secondSummary);
+        SchoolMapDetailVO detail = new SchoolMapDetailVO();
+        detail.setResources(List.of(first, second));
+        SchoolMapService service = mock(SchoolMapService.class);
+        when(service.getSchoolDetail(1L)).thenReturn(detail);
+        return service;
+    }
+
+    private RagEntityMetadata metadata(EntityType type,
+                                       Long id,
+                                       String name,
+                                       String grade,
+                                       String theme) {
+        return new RagEntityMetadata(type, id, name, List.of(), null, null, grade, theme,
+                null, null, "[实体名称] " + name);
     }
 
     private KnowledgeRetrieveRequest request(String query,

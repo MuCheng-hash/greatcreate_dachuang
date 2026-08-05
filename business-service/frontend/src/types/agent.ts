@@ -226,7 +226,31 @@ export interface AgentQaRequestPayload {
   theme?: string | null;
   topK?: number;
   modelId?: string | null;
+  debug?: boolean;
   attachments?: AgentAttachment[];
+}
+
+export interface KnowledgeRetrievalCandidateTrace {
+  citationId?: string;
+  evidenceType?: string;
+  score?: number;
+  rank?: number;
+  retrievalMethod?: string;
+  contributions?: Record<string, number>;
+}
+
+export interface KnowledgeRetrievalTrace {
+  retrievalStatus?: string;
+  intent?: string;
+  needGraph?: boolean;
+  graphStatus?: "skipped" | "ok" | "empty" | "failed";
+  denseCandidateCount?: number;
+  lexicalCandidateCount?: number;
+  rrfCandidateCount?: number;
+  graphCandidateCount?: number;
+  rerankedCandidateCount?: number;
+  retrievalMethods?: string[];
+  topCandidates?: KnowledgeRetrievalCandidateTrace[];
 }
 
 export interface AgentAttachment {
@@ -268,6 +292,7 @@ export interface AgentSseEventData {
   durationMs?: number;
   arguments?: Record<string, unknown>;
   outputSummary?: string;
+  retrievalTrace?: KnowledgeRetrievalTrace;
   provider?: string;
   model?: string;
   response?: AgentQaResponse;

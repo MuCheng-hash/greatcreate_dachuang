@@ -18,4 +18,12 @@ public class KnowledgeCitationCandidateVO {
     private String excerpt;
 
     private String url;
+
+    private String evidenceType;
+
+    private Double score;
+
+    private Integer rank;
+
+    private String retrievalMethod;
 }

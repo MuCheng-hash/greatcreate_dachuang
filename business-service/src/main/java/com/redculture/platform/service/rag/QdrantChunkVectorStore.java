@@ -12,7 +12,9 @@ import org.springframework.web.client.RestClient;
 import org.springframework.web.client.RestClientResponseException;
 
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -35,9 +37,14 @@ public class QdrantChunkVectorStore implements ChunkVectorStore {
 
     @Override
     public void ensureCollection() {
+        ensureCollection(properties.getQdrantCollection());
+    }
+
+    @Override
+    public void ensureCollection(String collectionName) {
         boolean exists = true;
         try {
-            restClient.get().uri(collectionEndpoint()).headers(this::addAuthHeader)
+            restClient.get().uri(collectionEndpoint(collectionName)).headers(this::addAuthHeader)
                     .retrieve().toBodilessEntity();
         } catch (RestClientResponseException exception) {
             if (exception.getStatusCode().value() != 404) {
@@ -55,30 +62,145 @@ public class QdrantChunkVectorStore implements ChunkVectorStore {
                     "vectors", vectors,
                     "hnsw_config", Map.of("m", 16, "ef_construct", 100)
             );
-            restClient.put().uri(collectionEndpoint())
+            restClient.put().uri(collectionEndpoint(collectionName))
                     .headers(this::addAuthHeader)
                     .contentType(MediaType.APPLICATION_JSON)
                     .body(body)
                     .retrieve()
                     .toBodilessEntity();
         }
-        ensureEntityKeyIndex();
+        ensureEntityKeyIndex(collectionName);
     }
 
     @Override
     public void upsert(List<VectorPoint> points) {
+        upsert(properties.getQdrantCollection(), points);
+    }
+
+    @Override
+    public void upsert(String collectionName, List<VectorPoint> points) {
         if (points == null || points.isEmpty()) {
             return;
         }
-        List<Map<String, Object>> values = points.stream().map(point -> Map.<String, Object>of(
-                "id", point.chunkId(),
-                "vector", point.vector(),
-                "payload", Map.of("chunk_id", point.chunkId(), "entity_key", point.entityKey())
-        )).toList();
-        restClient.put().uri(collectionEndpoint() + "/points?wait=true")
+        List<Map<String, Object>> values = points.stream().map(point -> {
+            Map<String, Object> payload = new LinkedHashMap<>();
+            payload.put("chunk_id", point.chunkId());
+            payload.put("entity_key", point.entityKey());
+            putIfPresent(payload, "content_hash", point.contentHash());
+            putIfPresent(payload, "embedding_model", point.embeddingModel());
+            if (point.embeddingDimensions() > 0) {
+                payload.put("embedding_dimensions", point.embeddingDimensions());
+            }
+            putIfPresent(payload, "index_version", point.indexVersion());
+            Map<String, Object> value = new LinkedHashMap<>();
+            value.put("id", point.chunkId());
+            value.put("vector", point.vector());
+            value.put("payload", payload);
+            return value;
+        }).toList();
+        restClient.put().uri(collectionEndpoint(collectionName) + "/points?wait=true")
                 .headers(this::addAuthHeader)
                 .contentType(MediaType.APPLICATION_JSON)
                 .body(Map.of("points", values))
+                .retrieve()
+                .toBodilessEntity();
+    }
+
+    @Override
+    public void delete(String collectionName, Collection<Long> chunkIds) {
+        if (chunkIds == null || chunkIds.isEmpty()) {
+            return;
+        }
+        restClient.post().uri(collectionEndpoint(collectionName) + "/points/delete?wait=true")
+                .headers(this::addAuthHeader)
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(Map.of("points", chunkIds))
+                .retrieve()
+                .toBodilessEntity();
+    }
+
+    @Override
+    public Set<Long> listPointIds(String collectionName) {
+        Set<Long> ids = new LinkedHashSet<>();
+        Long offset = null;
+        do {
+            Map<String, Object> body = new LinkedHashMap<>();
+            body.put("limit", 256);
+            body.put("with_payload", false);
+            body.put("with_vector", false);
+            if (offset != null) {
+                body.put("offset", offset);
+            }
+            String response = restClient.post().uri(collectionEndpoint(collectionName) + "/points/scroll")
+                    .headers(this::addAuthHeader)
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .body(body)
+                    .retrieve()
+                    .body(String.class);
+            try {
+                JsonNode result = objectMapper.readTree(response).path("result");
+                for (JsonNode point : result.path("points")) {
+                    JsonNode id = point.path("id");
+                    if (id.canConvertToLong()) {
+                        ids.add(id.asLong());
+                    }
+                }
+                JsonNode nextOffset = result.path("next_page_offset");
+                offset = nextOffset.canConvertToLong() ? nextOffset.asLong() : null;
+            } catch (Exception exception) {
+                throw new IllegalStateException("failed to parse Qdrant scroll response", exception);
+            }
+        } while (offset != null);
+        return ids;
+    }
+
+    @Override
+    public String resolveAlias(String aliasName) {
+        if (!StringUtils.hasText(aliasName)) {
+            return null;
+        }
+        try {
+            String response = restClient.get().uri(baseEndpoint() + "/aliases")
+                    .headers(this::addAuthHeader).retrieve().body(String.class);
+            JsonNode aliases = objectMapper.readTree(response).path("result").path("aliases");
+            if (aliases.isArray()) {
+                for (JsonNode alias : aliases) {
+                    if (!aliasName.equals(alias.path("alias_name").asText())) {
+                        continue;
+                    }
+                    String collectionName = alias.path("collection_name").asText();
+                    return StringUtils.hasText(collectionName) ? collectionName : null;
+                }
+            }
+            return null;
+        } catch (RestClientResponseException exception) {
+            if (exception.getStatusCode().value() == 404) {
+                return null;
+            }
+            throw exception;
+        } catch (Exception exception) {
+            throw new IllegalStateException("failed to resolve Qdrant alias", exception);
+        }
+    }
+
+    @Override
+    public void switchAlias(String aliasName, String collectionName) {
+        String currentCollection = resolveAlias(aliasName);
+        if (collectionName.equals(currentCollection)) {
+            return;
+        }
+        List<Map<String, Object>> actions = new ArrayList<>();
+        if (StringUtils.hasText(currentCollection)) {
+            actions.add(Map.of("delete_alias", Map.of("alias_name", aliasName)));
+        }
+        actions.add(Map.of("create_alias", Map.of(
+                "collection_name", collectionName,
+                "alias_name", aliasName
+        )));
+        restClient.post().uri(baseEndpoint() + "/collections/aliases")
+                .headers(this::addAuthHeader)
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(Map.of("actions", actions))
                 .retrieve()
                 .toBodilessEntity();
     }
@@ -98,13 +220,28 @@ public class QdrantChunkVectorStore implements ChunkVectorStore {
         body.put("with_payload", true);
         body.put("params", Map.of("hnsw_ef", Math.max(64, limit * 4), "exact", false));
 
-        String response = restClient.post().uri(collectionEndpoint() + "/points/search")
+        String response;
+        String activeCollection = StringUtils.hasText(properties.getQdrantAlias())
+                ? properties.getQdrantAlias() : properties.getQdrantCollection();
+        try {
+            response = search(activeCollection, body);
+        } catch (RestClientResponseException exception) {
+            if (exception.getStatusCode().value() != 404
+                    || activeCollection.equals(properties.getQdrantCollection())) {
+                throw exception;
+            }
+            response = search(properties.getQdrantCollection(), body);
+        }
+        return parseCandidates(response);
+    }
+
+    private String search(String collectionName, Map<String, Object> body) {
+        return restClient.post().uri(collectionEndpoint(collectionName) + "/points/search")
                 .headers(this::addAuthHeader)
                 .contentType(MediaType.APPLICATION_JSON)
                 .body(body)
                 .retrieve()
                 .body(String.class);
-        return parseCandidates(response);
     }
 
     private List<VectorSearchCandidate> parseCandidates(String response) {
@@ -134,8 +271,8 @@ public class QdrantChunkVectorStore implements ChunkVectorStore {
         }
     }
 
-    private void ensureEntityKeyIndex() {
-        restClient.put().uri(collectionEndpoint() + "/index?wait=true")
+    private void ensureEntityKeyIndex(String collectionName) {
+        restClient.put().uri(collectionEndpoint(collectionName) + "/index?wait=true")
                 .headers(this::addAuthHeader)
                 .contentType(MediaType.APPLICATION_JSON)
                 .body(Map.of("field_name", "entity_key", "field_schema", "keyword"))
@@ -143,8 +280,17 @@ public class QdrantChunkVectorStore implements ChunkVectorStore {
                 .toBodilessEntity();
     }
 
-    private String collectionEndpoint() {
-        return properties.getQdrantBaseUrl().replaceAll("/+$", "")
-                + "/collections/" + properties.getQdrantCollection();
+    private void putIfPresent(Map<String, Object> payload, String key, String value) {
+        if (StringUtils.hasText(value)) {
+            payload.put(key, value);
+        }
+    }
+
+    private String collectionEndpoint(String collectionName) {
+        return baseEndpoint() + "/collections/" + collectionName;
+    }
+
+    private String baseEndpoint() {
+        return properties.getQdrantBaseUrl().replaceAll("/+$", "");
     }
 }

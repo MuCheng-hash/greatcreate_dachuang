@@ -9,6 +9,8 @@ import com.redculture.platform.enums.EntityType;
 import lombok.Data;
 import lombok.EqualsAndHashCode;
 
+import java.time.LocalDateTime;
+
 @Data
 @EqualsAndHashCode(callSuper = true)
 @TableName(value = "content_chunk", autoResultMap = true)
@@ -40,4 +42,22 @@ public class ContentChunk extends BaseAuditEntity {
 
     @TableField("embedding_status")
     private EmbeddingStatus embeddingStatus;
+
+    @TableField("retrieval_text")
+    private String retrievalText;
+
+    @TableField("embedding_hash")
+    private String embeddingHash;
+
+    @TableField("embedding_model")
+    private String embeddingModel;
+
+    @TableField("embedding_dimensions")
+    private Integer embeddingDimensions;
+
+    @TableField("embedding_index_version")
+    private String embeddingIndexVersion;
+
+    @TableField("embedded_at")
+    private LocalDateTime embeddedAt;
 }
