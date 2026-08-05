@@ -410,6 +410,8 @@ function buildAgentSessionTimelines(modelRecords, toolRecords) {
                 kind,
                 modelRecords: [],
                 toolRecords: [],
+                retrievalRecords: [],
+                retrievalKeys: new Set(),
                 events: []
             });
         }
@@ -429,6 +431,24 @@ function buildAgentSessionTimelines(modelRecords, toolRecords) {
             timestamp: record.startedAt || record.completedAt,
             record
         });
+        const retrievalTrace = record.metadata?.retrievalTrace;
+        if (retrievalTrace && typeof retrievalTrace === "object") {
+            const retrievalKey = JSON.stringify(retrievalTrace);
+            if (!group.retrievalKeys.has(retrievalKey)) {
+                group.retrievalKeys.add(retrievalKey);
+                const retrievalRecord = {
+                    ...retrievalTrace,
+                    status: retrievalTrace.retrievalStatus === "degraded" || retrievalTrace.graphStatus === "failed"
+                        ? "degraded" : (retrievalTrace.retrievalStatus || "completed")
+                };
+                group.retrievalRecords.push(retrievalRecord);
+                group.events.push({
+                    type: "retrieval",
+                    timestamp: record.startedAt || record.completedAt,
+                    record: retrievalRecord
+                });
+            }
+        }
     });
 
     toolRecords.forEach(record => {
@@ -500,6 +520,7 @@ function renderAgentSessionGroup(group, open) {
                 </span>
                 <span class="agent-session-stats">
                     <span>模型 ${group.modelRecords.length}</span>
+                    <span>检索 ${group.retrievalRecords.length}</span>
                     <span>工具 ${group.toolRecords.length}</span>
                 </span>
                 ${renderAgentStatus(group.status)}
@@ -516,11 +537,14 @@ function renderAgentSessionGroup(group, open) {
 function renderAgentTimelineEvent(event) {
     const record = event.record || {};
     const isModel = event.type === "model";
+    const isRetrieval = event.type === "retrieval";
     const metadata = record.metadata || {};
     const status = normalizeAgentStatus(record.status);
-    const title = isModel ? (record.feature || "模型调用") : (record.toolName || "工具调用");
+    const title = isModel ? (record.feature || "模型调用")
+        : isRetrieval ? "可信知识检索" : (record.toolName || "工具调用");
     const subtitle = isModel
         ? ([record.provider, record.model].filter(Boolean).join(" / ") || "模型信息不可用")
+        : isRetrieval ? `${record.intent || "UNKNOWN"} / Graph ${record.graphStatus || "skipped"}`
         : "受控业务工具";
     const details = isModel
         ? [
@@ -529,7 +553,12 @@ function renderAgentTimelineEvent(event) {
             ["Fallback", metadata.fallbackLevel == null ? "-" : String(metadata.fallbackLevel)],
             ["Trace ID", shortAgentId(record.traceId)]
         ]
-        : [
+        : isRetrieval ? [
+            ["Dense", String(record.denseCandidateCount ?? 0)],
+            ["Lexical", String(record.lexicalCandidateCount ?? 0)],
+            ["Graph", String(record.graphCandidateCount ?? 0)],
+            ["重排", String(record.rerankedCandidateCount ?? 0)]
+        ] : [
             ["耗时", record.durationMs == null ? "-" : `${record.durationMs} ms`],
             ["线程", shortAgentId(record.threadId)],
             ["工具状态", status],
@@ -537,18 +566,19 @@ function renderAgentTimelineEvent(event) {
         ];
     const preview = isModel
         ? (record.errorType || record.errorMessage || "模型调用完成，无错误摘要")
+        : isRetrieval ? `检索方式：${(record.retrievalMethods || []).join(" / ") || "-"}`
         : (record.resultPreview || "工具未返回结果摘要");
-    const argumentsText = !isModel && record.arguments && Object.keys(record.arguments).length
+    const argumentsText = !isModel && !isRetrieval && record.arguments && Object.keys(record.arguments).length
         ? formatAgentJson(record.arguments)
         : "";
 
     return `
-        <article class="agent-timeline-event agent-timeline-event--${isModel ? "model" : "tool"}">
+        <article class="agent-timeline-event agent-timeline-event--${isModel ? "model" : isRetrieval ? "retrieval" : "tool"}">
             <span class="agent-event-marker" aria-hidden="true"></span>
             <div class="agent-event-card">
                 <div class="agent-event-topline">
                     <div>
-                        <span class="agent-event-kind">${isModel ? "模型" : "工具"}</span>
+                        <span class="agent-event-kind">${isModel ? "模型" : isRetrieval ? "检索" : "工具"}</span>
                         <strong class="agent-event-title">${escapeHtml(title)}</strong>
                         <span class="agent-event-subtitle">${escapeHtml(subtitle)}</span>
                     </div>
@@ -566,7 +596,7 @@ function renderAgentTimelineEvent(event) {
                     `).join("")}
                 </div>
                 <div class="agent-event-preview" title="${escapeHtml(preview)}">
-                    <span>${isModel ? "错误 / 说明" : "结果摘要"}</span>
+                    <span>${isModel ? "错误 / 说明" : isRetrieval ? "检索摘要" : "结果摘要"}</span>
                     <p>${escapeHtml(truncateAgentText(preview, 260))}</p>
                 </div>
                 ${argumentsText ? `
