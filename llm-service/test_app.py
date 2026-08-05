@@ -910,6 +910,87 @@ def test_model_output_filters_invented_citations(tmp_path: Path):
     assert [item.citation_id for item in response.citations] == ["chunk:1"]
 
 
+def test_prefetched_context_uses_joint_rank_and_caps_graph_facts(tmp_path: Path):
+    runtime = create_app(settings_for(tmp_path)).state.runtime
+    chunks = [
+        {"citationId": f"chunk:{index}", "text": f"文本证据{index}"}
+        for index in range(1, 8)
+    ]
+    graph_facts = [
+        {"citationId": f"graph:{index}", "text": f"图谱证据{index}"}
+        for index in range(1, 5)
+    ]
+    candidates = [
+        {
+            "citationId": f"graph:{index}",
+            "evidenceType": "graph_fact",
+            "rank": index,
+            "score": 1 - index / 100,
+        }
+        for index in range(1, 5)
+    ] + [
+        {
+            "citationId": f"chunk:{index}",
+            "evidenceType": "chunk",
+            "rank": index + 4,
+            "score": 0.8 - index / 100,
+        }
+        for index in range(1, 8)
+    ]
+    trusted = TrustedContext.model_validate({
+        "retrieval": {
+            "retrievalStatus": "ok",
+            "chunks": chunks,
+            "graphFacts": graph_facts,
+        },
+        "citationCandidates": candidates,
+    })
+
+    prompt = runtime._prefetched_evidence_message(trusted)
+
+    assert prompt.count('"evidenceType": "graph_fact"') == 3
+    assert '"citationId": "graph:4"' not in prompt
+    assert '"citationId": "chunk:5"' in prompt
+    assert '"citationId": "chunk:6"' not in prompt
+
+
+def test_retrieval_trace_summary_is_bounded_and_drops_feature_details(tmp_path: Path):
+    runtime = create_app(settings_for(tmp_path)).state.runtime
+    trusted = TrustedContext.model_validate({
+        "retrieval": {
+            "retrievalTrace": {
+                "retrievalStatus": "degraded",
+                "intent": "NEARBY_RESOURCE",
+                "needGraph": True,
+                "graphStatus": "failed",
+                "denseCandidateCount": 8,
+                "lexicalCandidateCount": 10,
+                "rrfCandidateCount": 12,
+                "graphCandidateCount": 0,
+                "rerankedCandidateCount": 12,
+                "retrievalMethods": ["dense", "lexical", "rrf", "heuristic-rerank"],
+                "topCandidates": [
+                    {
+                        "citationId": f"chunk:{index}",
+                        "rank": index,
+                        "score": 1 - index / 100,
+                        "evidenceType": "chunk",
+                        "retrievalMethod": "hybrid-rrf+heuristic-rerank",
+                        "contributions": {"base": 0.6},
+                    }
+                    for index in range(1, 11)
+                ],
+            }
+        }
+    })
+
+    summary = runtime._retrieval_trace_summary(trusted)
+
+    assert summary["graphStatus"] == "failed"
+    assert len(summary["topCandidates"]) == 8
+    assert "contributions" not in summary["topCandidates"][0]
+
+
 def test_grounded_response_persists_deterministic_sanitized_snapshot(tmp_path: Path):
     settings = settings_for(tmp_path)
     repository = ConversationRepository(settings.database_path)

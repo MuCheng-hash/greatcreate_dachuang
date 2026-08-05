@@ -321,19 +321,23 @@ class AgentRuntime:
             "recursion_limit": max(3, plan.max_tool_rounds * 2 + 3),
         }
         if self.observability is not None:
+            metadata: dict[str, Any] = {
+                "intent": request.intent or "",
+                "scopeType": request.scope_type,
+                "modelRole": "primary" if config.fallback_level == 0 else (
+                    "fallback" if config.fallback_level == 1 else "lightweight"
+                ),
+                "fallbackLevel": config.fallback_level,
+            }
+            retrieval_trace = self._retrieval_trace_summary(request.context)
+            if retrieval_trace:
+                metadata["retrievalTrace"] = retrieval_trace
             trace_context = LlmTraceContext(
                 feature="stateful-agent",
                 user_id=request.owner_id,
                 session_id=thread.thread_id,
                 expected_json=True,
-                metadata={
-                    "intent": request.intent or "",
-                    "scopeType": request.scope_type,
-                    "modelRole": "primary" if config.fallback_level == 0 else (
-                        "fallback" if config.fallback_level == 1 else "lightweight"
-                    ),
-                    "fallbackLevel": config.fallback_level,
-                },
+                metadata=metadata,
             )
             invoke_config["callbacks"] = [
                 self.observability.callback(trace_context, config.provider, config.model)
@@ -1164,13 +1168,48 @@ class AgentRuntime:
 
     def _prefetched_evidence_message(self, trusted: TrustedContext) -> str:
         retrieval = trusted.retrieval or {}
+        chunks = {
+            str(item.get("citationId")): item
+            for item in retrieval.get("chunks", [])
+            if isinstance(item, dict) and item.get("citationId")
+        }
+        graph_facts = {
+            str(item.get("citationId")): item
+            for item in retrieval.get("graphFacts", [])
+            if isinstance(item, dict) and item.get("citationId")
+        }
+        ranked_candidates = sorted(
+            (
+                item for item in trusted.citation_candidates
+                if isinstance(item, dict)
+                and item.get("citationId")
+                and item.get("evidenceType") in {"chunk", "graph_fact"}
+                and item.get("rank") is not None
+            ),
+            key=lambda item: (int(item.get("rank") or 10_000), str(item.get("citationId"))),
+        )
+        joint_evidence: list[dict[str, Any]] = []
+        graph_count = 0
+        for candidate in ranked_candidates:
+            evidence_type = str(candidate.get("evidenceType"))
+            if evidence_type == "graph_fact" and graph_count >= 3:
+                continue
+            citation_id = str(candidate.get("citationId"))
+            source = chunks.get(citation_id) or graph_facts.get(citation_id) or {}
+            joint_evidence.append({**source, **candidate})
+            if evidence_type == "graph_fact":
+                graph_count += 1
+            if len(joint_evidence) >= 8:
+                break
+        if not joint_evidence:
+            joint_evidence = [
+                *list(chunks.values()), *list(graph_facts.values())
+            ][:8]
         evidence = {
             "retrievalStatus": retrieval.get("retrievalStatus", "empty"),
-            "chunks": retrieval.get("chunks", [])[:8],
-            "graphFacts": retrieval.get("graphFacts", [])[:8],
-            "citationCandidates": trusted.citation_candidates[:8],
+            "evidence": joint_evidence,
         }
-        if not any(evidence[key] for key in ("chunks", "graphFacts", "citationCandidates")):
+        if not joint_evidence:
             return ""
         serialized = json.dumps(evidence, ensure_ascii=False, default=str)
         return (
@@ -1515,6 +1554,30 @@ class AgentRuntime:
             return "ok"
         return "empty"
 
+    def _retrieval_trace_summary(self, trusted: TrustedContext) -> dict[str, Any]:
+        retrieval = trusted.retrieval or {}
+        trace = retrieval.get("retrievalTrace")
+        if not isinstance(trace, dict):
+            return {}
+        summary_keys = (
+            "retrievalStatus", "intent", "needGraph", "graphStatus",
+            "denseCandidateCount", "lexicalCandidateCount", "rrfCandidateCount",
+            "graphCandidateCount", "rerankedCandidateCount", "retrievalMethods",
+        )
+        summary = {key: trace.get(key) for key in summary_keys if key in trace}
+        top_candidates: list[dict[str, Any]] = []
+        for item in (trace.get("topCandidates") or [])[:8]:
+            if not isinstance(item, dict):
+                continue
+            top_candidates.append({
+                key: item.get(key)
+                for key in ("citationId", "evidenceType", "score", "rank", "retrievalMethod")
+                if key in item
+            })
+        if top_candidates:
+            summary["topCandidates"] = top_candidates
+        return summary
+
     def _retrieval_methods(self, trusted: TrustedContext) -> list[str]:
         retrieval = trusted.retrieval or {}
         values: list[str] = []
@@ -1526,8 +1589,20 @@ class AgentRuntime:
             if not isinstance(item, dict):
                 continue
             normalized = str(item.get("retrievalMethod") or "").strip()
-            if normalized and normalized not in values:
-                values.append(normalized)
+            derived: list[str] = []
+            if normalized.startswith("hybrid-rrf"):
+                derived.extend(["dense", "lexical", "rrf"])
+            elif normalized.startswith("dense"):
+                derived.append("dense")
+            elif normalized.startswith("lexical"):
+                derived.append("lexical")
+            elif normalized:
+                derived.append(normalized)
+            if normalized.endswith("+heuristic-rerank"):
+                derived.append("heuristic-rerank")
+            for method in derived:
+                if method not in values:
+                    values.append(method)
         if retrieval.get("graphFacts") and "knowledge-graph" not in values:
             values.append("knowledge-graph")
         return values
@@ -1543,7 +1618,15 @@ class AgentRuntime:
         values: list[str] = []
         seen: set[str] = set()
         retrieval = trusted.retrieval or {}
+        ranked_candidates = sorted(
+            (
+                item for item in trusted.citation_candidates
+                if isinstance(item, dict) and item.get("rank") is not None
+            ),
+            key=lambda item: int(item.get("rank") or 10_000),
+        )
         groups = (
+            ranked_candidates,
             retrieval.get("chunks", []),
             retrieval.get("graphFacts", []),
             trusted.citation_candidates,
