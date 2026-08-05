@@ -1,6 +1,6 @@
 # RAG 与 Agent 接口约定
 
-> 版本：v1.1
+> 版本：v1.2
 >
 > 状态：待双方确认后冻结
 >
@@ -72,8 +72,9 @@ Agent：校验引用并返回结构化结果
 - Agent 不允许让 LLM 直接生成任意 SQL 或 Cypher 并执行。
 - Agent 不允许信任模型自造的来源名称、URL 或引用 ID。
 - 前端不直接拼接数据库数据作为最终可信上下文。
-- 不因为本协议新增聊天记录表、向量数据库表或其他业务表；本轮仅为已有
-  `content_chunk` 全文索引补充 MySQL `ngram` parser，索引重建由部署人员按 SQL 脚本一次性执行。
+- 不因为本协议新增聊天记录表、向量数据库表或其他业务表；P1 仅为已有
+  `content_chunk` 增加检索元数据与索引版本列，并将全文索引扩展为
+  `(chunk_title, chunk_text, retrieval_text) WITH PARSER ngram`。数据库迁移由部署人员按 SQL 脚本一次性执行。
 
 ## 4. RAG 检索接口
 
@@ -151,7 +152,7 @@ Java 内部接口和 HTTP 接口只实现一种即可，不要求同一份代码
       "title": "西柏坡红色教育资料",
       "text": "内容片段……",
       "score": 0.91,
-      "retrievalMethod": "hybrid-rrf",
+      "retrievalMethod": "hybrid-rrf+heuristic-rerank",
       "entityType": "resource",
       "entityId": 5,
       "sourceId": 3
@@ -162,8 +163,25 @@ Java 内部接口和 HTTP 接口只实现一种即可，不要求同一份代码
       "citationId": "graph:school:1-resource:5",
       "text": "该学校与该教育资源存在周边资源关系。",
       "subjectId": 1,
+      "subjectType": "school",
+      "subjectName": "某小学",
       "predicate": "SCHOOL_NEAR_RESOURCE",
-      "objectId": 5
+      "objectId": 5,
+      "objectType": "resource",
+      "objectName": "西柏坡纪念馆",
+      "hop": 1,
+      "distanceMeters": 450,
+      "sourceId": 3,
+      "pathEdges": [
+        {
+          "fromId": 1,
+          "fromName": "某小学",
+          "relationshipType": "SCHOOL_NEAR_RESOURCE",
+          "toId": 5,
+          "toName": "西柏坡纪念馆",
+          "direction": "OUTGOING"
+        }
+      ]
     }
   ],
   "citationCandidates": [
@@ -174,10 +192,14 @@ Java 内部接口和 HTTP 接口只实现一种即可，不要求同一份代码
       "relatedEntityType": "resource",
       "relatedEntityId": 5,
       "excerpt": "内容片段……",
-      "url": null
+      "url": null,
+      "evidenceType": "chunk",
+      "score": 0.91,
+      "rank": 1,
+      "retrievalMethod": "hybrid-rrf+heuristic-rerank"
     }
   ],
-  "retrievalMethods": ["dense", "lexical", "rrf", "knowledge-graph"]
+  "retrievalMethods": ["dense", "lexical", "rrf", "heuristic-rerank", "knowledge-graph"]
 }
 ```
 
@@ -189,7 +211,8 @@ Java 内部接口和 HTTP 接口只实现一种即可，不要求同一份代码
 | `chunks` | `Array` | 内容分块证据，无结果时返回 `[]` |
 | `graphFacts` | `Array` | Neo4j 或其他结构化关系事实，无结果时返回 `[]` |
 | `citationCandidates` | `Array` | 给 Agent 和 LLM 使用的可展示引用候选，无结果时返回 `[]` |
-| `retrievalMethods` | `Array<String>` | 实际使用的召回方式，可包含 `dense`、`lexical`、`rrf`、`knowledge-graph` |
+| `retrievalMethods` | `Array<String>` | 实际使用的召回方式，可包含 `dense`、`lexical`、`rrf`、`heuristic-rerank`、`knowledge-graph` |
+| `retrievalTrace` | `Object` | 内部检索 Trace；仅在 Agent `debug=true` 的检索阶段 SSE 事件中透出详细内容 |
 
 响应规则：
 
@@ -209,7 +232,7 @@ Java 内部接口和 HTTP 接口只实现一种即可，不要求同一份代码
 | `title` | `String` | 内容分块标题 |
 | `text` | `String` | 可供 LLM 使用的内容，建议限制长度 |
 | `score` | `Double` | 检索分数；图谱事实可为空 |
-| `retrievalMethod` | `String` | 内容分块的主要召回方式，可为 `dense`、`lexical` 或 `hybrid-rrf` |
+| `retrievalMethod` | `String` | 重排后的检索方式：`hybrid-rrf+heuristic-rerank`、`dense+heuristic-rerank` 或 `lexical+heuristic-rerank` |
 | `entityType` | `String` | 关联实体类型，例如 `school`、`resource` |
 | `entityId` | `Long` | 关联实体 ID |
 | `sourceId` | `Long` | `data_source` 主键，可为空 |
@@ -221,8 +244,14 @@ Java 内部接口和 HTTP 接口只实现一种即可，不要求同一份代码
 | `citationId` | `String` | 稳定引用 ID，例如 `graph:school:1-resource:5` |
 | `text` | `String` | 面向 Agent/LLM 的事实描述 |
 | `subjectId` | `Long` | 关系主体 ID |
-| `predicate` | `String` | 关系类型，例如 `SCHOOL_NEAR_RESOURCE` |
+| `subjectType` / `subjectName` | `String` | 关系主体类型与规范名称 |
+| `predicate` | `String` | 直接关系保留真实类型；多跳关系固定为 `GRAPH_PATH` |
 | `objectId` | `Long` | 关系客体 ID |
+| `objectType` / `objectName` | `String` | 关系客体类型与规范名称 |
+| `hop` | `Integer` | 路径跳数，学校最多 3 跳、资源最多 2 跳 |
+| `distanceMeters` | `Double` | 附近资源距离，可为空 |
+| `sourceId` | `Long` | 关系来源 ID，可为空 |
+| `pathEdges` | `Array` | 每条真实边的起点、关系、终点和方向；禁止使用 `HAS_TAG` 构造路径 |
 
 ### 5.5 引用候选字段
 
@@ -237,6 +266,10 @@ Java 内部接口和 HTTP 接口只实现一种即可，不要求同一份代码
 | `relatedEntityId` | `Long` | 关联实体 ID |
 | `excerpt` | `String` | 来源摘要 |
 | `url` | `String` | 来源 URL，可为空 |
+| `evidenceType` | `String` | `chunk` 或 `graph`，用于联合证据排序 |
+| `score` | `Double` | 归一化业务重排分数 |
+| `rank` | `Integer` | 联合证据顺序，从 1 开始 |
+| `retrievalMethod` | `String` | 该证据的重排检索方式 |
 
 ## 6. Agent 调用 RAG 的标准流程
 
@@ -247,7 +280,7 @@ Java 内部接口和 HTTP 接口只实现一种即可，不要求同一份代码
 4. 生成 KnowledgeRetrieveRequest
 5. 调用 KnowledgeRetriever
 6. 合并已审核的学校/资源业务数据和 RAG 证据
-7. 调用 LLM 生成结构化答案
+7. 按 `rank` 选择联合 Top 8 证据（图谱事实最多 3 条）调用 LLM 生成结构化答案
 8. 校验 LLM 返回的 citationId
 9. 删除非法引用或使用已知引用候选补充
 10. 返回最终问答结果
@@ -272,6 +305,23 @@ Java 内部接口和 HTTP 接口只实现一种即可，不要求同一份代码
 - LLM 生成的来源名称、URL 或书名不能单独视为可信引用。
 - 如果 LLM 没有返回引用，Agent 可以根据实际使用的证据补充最多 5 个引用。
 - 最终答案中的事实应能追溯到学校/资源业务数据、内容分块或图谱事实。
+
+### 6.3 调试与检索 Trace
+
+- `AgentQaRequest.debug` 为可选布尔值，默认 `false`。
+- `debug=true` 时，`phase.completed` 且 `phase=retrieval` 的 SSE 事件可以返回 `retrievalTrace`。
+- Trace 包含 `intent`、`needGraph`、`graphStatus`、各召回通道候选数、最终方法和 Top 8 特征贡献。
+- `graphStatus` 只允许 `skipped`、`ok`、`empty`、`failed`。
+- Python 仅把精简、限长后的 Trace 写入 LLM Trace `metadata_json`；普通问答 SSE 不增加调试详情。
+- Graph 是 RAG 内部检索通道，不计入 LLM `toolCount`；工具数只统计模型实际发起的工具调用。
+
+### 6.4 增量索引约定
+
+- Dense 索引文本由 `retrieval_text + chunk_title + chunk_text` 组成，`retrieval_text` 仅保存稳定的检索元数据。
+- 内容 Hash 同时包含索引 Schema 版本、Embedding 模型、维度和规范化索引文本。
+- Qdrant 使用逻辑 Alias `red_culture_content_chunks_active`；物理 Collection 包含版本、模型 Hash 和维度。
+- Hash 与版本一致时跳过 Embedding 与 Upsert；删除、停用或审核失效的实体 Point 会从当前物理 Collection 删除。
+- 新版本全部成功后才原子切换 Alias；失败时保留旧 Alias，且不自动删除旧 Collection。
 
 ## 7. 双方责任和代码边界
 
@@ -307,7 +357,7 @@ Java 内部接口和 HTTP 接口只实现一种即可，不要求同一份代码
 
 - RAG 同学不要修改 Agent 的 Controller、前端问答渲染和最终响应结构。
 - Agent 同学不要直接修改 RAG 的检索算法或数据库查询实现。
-- 双方都不要为了本协议新增业务表；已有环境的 `content_chunk.ft_chunk_text` 索引按迁移脚本重建为 `ngram` 全文索引。
+- 双方都不要为了本协议新增业务表；已有环境按迁移脚本增加 `content_chunk` 检索元数据列并重建三列 `ngram` 全文索引。
 - Java 对外的 `/api/ai/teaching-plans/generate` 和
   `/api/ai/teaching-plans/generate/stream` 保持兼容；FastAPI 内部统一调用
   `/agent/messages` 和 `/agent/messages/stream`，不再保留 `/llm/*` 教学方案接口。
@@ -418,10 +468,11 @@ RAG 请求重点：
 
 ## 10. 版本和兼容性
 
-- 本协议版本为 `v1.1`。
+- 本协议版本为 `v1.2`。
 - 新增字段必须保持向后兼容，消费者应忽略未知字段。
 - 不得直接重命名或删除已冻结字段；需要变更时升级协议版本。
-- `retrievalMethod` 当前使用 `dense`、`lexical`、`hybrid-rrf`；`retrievalMethods` 可报告 `dense`、`lexical`、`rrf`、`knowledge-graph`，不改变顶层响应结构。
+- `retrievalMethod` 当前使用 `hybrid-rrf+heuristic-rerank`、`dense+heuristic-rerank`、`lexical+heuristic-rerank`、`knowledge-graph+heuristic-rerank`；顶层 `retrievalMethods` 使用固定能力名，不改变顶层响应结构。
+- 部署顺序固定为：执行 MySQL 迁移，启动应用构建新物理 Collection，确认 Alias 切换成功后开放 RAG。回滚时保留新增列和旧 Collection。
 - 后续引入向量数据库时，只替换 RAG 实现，不改变 Agent 请求和响应契约。
 - 如果 RAG 从 Java 内部接口迁移为 Python HTTP 服务，必须保持本文档中的 JSON 字段和语义不变。
 
@@ -433,5 +484,5 @@ RAG 请求重点：
 - [ ] RAG 可以用 Mock 数据返回本文档定义的响应。
 - [ ] Agent 可以仅依赖 Mock RAG 响应完成一次完整问答。
 - [ ] 无结果、Neo4j 不可用和非法引用场景均有明确行为。
-- [ ] 不修改现有教学方案接口和数据库结构。
+- [ ] 不修改现有教学方案接口；数据库仅执行约定的兼容性迁移。
 - [ ] 代码联调前双方各自完成本模块测试。
