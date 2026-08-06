@@ -15,6 +15,13 @@
 - `scripts/`：数据处理、模板生成、MySQL 到 Neo4j 同步等脚本。
 - `docs/`：需求、数据库、接口、Neo4j 同步等设计文档。
 
+## 当前核心能力
+
+- 学校与周边思政资源地图：支持学校地址定位、资源检索以及学校和周边资源的空间关联管理。
+- 后台组织与账号管理：支持学校管理、账号、角色与权限、教师和学生档案、班级及学生导入等管理流程。
+- Stateful Agent：为教师侧问答、教学方案和资源发现提供统一的 Agent 服务；管理后台可查看 Agent 调试信息。
+- RAG 知识库运维：管理员可在后台查看索引状态、发起重建，并按学校范围和检索条件进行检索测试。
+
 ## 运行环境
 
 本项目以 Windows 本地开发环境为主，以下命令均在 PowerShell 中执行。
@@ -59,21 +66,37 @@ python --version
 mysql --default-character-set=utf8mb4 -u root -p
 ```
 
-在 MySQL 客户端中导入全量脚本：
+数据库脚本分为旧基础库和当前版本扩展。对于全新、本地且允许清空数据的演示库，在 MySQL 客户端中按以下顺序导入：
 
 ```sql
 SOURCE data/sql/mysql_red_culture_all_in_one.sql;
+USE red_culture_platform;
+SOURCE data/sql/simplify_school_table_region_hierarchy.sql;
+SOURCE data/sql/red_culture_platform_database.sql;
+SOURCE data/sql/add_user_management_module.sql;
 ```
 
-该脚本会创建 `red_culture_platform` 数据库、表结构和演示数据。
+`mysql_red_culture_all_in_one.sql` 创建旧基础表和基础演示数据；后续三个脚本将学校切换到地址定位模型，并补齐当前的角色权限、师生档案、班级、RAG 运维和 Agent 调试相关表与字段。不要把第一份全量脚本误认为已经包含当前全部 Schema。
 
-已有数据库升级到 AI 周边资源发现功能时，不要重置全库，改为执行增量脚本：
+如需演示教师和学生管理功能，可在上述迁移完成后额外导入样例账号数据：
 
 ```sql
-SOURCE data/sql/mysql_ai_poi_resource_discovery.sql;
+SOURCE data/sql/seed_teacher_student_profiles.sql;
 ```
 
-> **数据重置警告：** `mysql_red_culture_all_in_one.sql` 会先执行 `DROP TABLE`，删除并重建项目相关表。它只适合首次初始化或数据可以丢弃的本地开发库，不要对包含有效数据的数据库直接执行。全量脚本已经合并学校、认证和样例数据内容，导入后不要再重复执行 `data/sql/` 下的拆分脚本。
+该样例脚本会创建固定密码为 `123456` 的教师和学生账号，只能用于可丢弃的本地演示库，不能作为生产或默认启动步骤。
+
+已有数据库升级时，先完成可恢复备份，**不要**重新执行 `mysql_red_culture_all_in_one.sql`。数据库若尚未具备 AI 周边资源发现表，先执行专项迁移，再执行当前 Schema 迁移：
+
+```sql
+USE red_culture_platform;
+SOURCE data/sql/mysql_ai_poi_resource_discovery.sql;
+SOURCE data/sql/simplify_school_table_region_hierarchy.sql;
+SOURCE data/sql/red_culture_platform_database.sql;
+SOURCE data/sql/add_user_management_module.sql;
+```
+
+如果数据库已具备 AI 周边资源发现功能，可以跳过第一份专项迁移，但其余三个当前 Schema 脚本仍需按顺序执行。`simplify_school_table_region_hierarchy.sql` 会删除旧学校字段；`add_user_management_module.sql` 会移除旧版“一校一账号”唯一约束。两者均可能影响已有数据和约束，只应在备份完成并确认升级窗口后执行。
 
 如果 `SOURCE` 无法识别相对路径，请改用仓库的绝对路径，并统一使用正斜杠，例如：
 
@@ -192,6 +215,8 @@ python "scripts/sync_mysql_to_neo4j.py"
 
 `/api/auth/me` 返回 JSON 即表示业务服务已经响应；未登录时 `data` 为 `null` 属于正常情况。学校注册成功后，管理员可从同源的管理后台登录并审核申请。
 
+完成当前 Schema 迁移后，管理员还可在 `http://localhost:8080/admin.html` 验证学校与资源关联、账号与角色、师生档案、Agent 调试和 RAG 知识库管理入口。RAG 知识库页面提供索引状态、重建和检索测试；相关操作需要管理员登录。
+
 FastAPI Agent 启动后，可以在 PowerShell 中发送一个最小请求。内部令牌只由 Java 服务使用，不能暴露给浏览器：
 
 ```powershell
@@ -237,11 +262,7 @@ $env:RAG_EMBEDDING_MODEL = "text-embedding-v3"
 $env:RAG_EMBEDDING_DIMENSIONS = "1024"
 ```
 
-业务服务启动时会按内容 Hash、Embedding 模型、维度和索引版本增量同步 `content_chunk`。未变化的 Chunk 会跳过 Embedding 和 Upsert；版本变化时先构建新的物理 Collection，全部成功后再原子切换逻辑 Alias `red_culture_content_chunks_active`。内容更新后也可以手动全量重建：
-
-```powershell
-Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8080/api/admin/rag/reindex"
-```
+业务服务启动时会按内容 Hash、Embedding 模型、维度和索引版本增量同步 `content_chunk`。未变化的 Chunk 会跳过 Embedding 和 Upsert；版本变化时先构建新的物理 Collection，全部成功后再原子切换逻辑 Alias `red_culture_content_chunks_active`。内容更新后，优先从管理后台的“RAG 知识库”页面查看索引状态、发起重建或执行检索测试。`/api/admin/rag/reindex` 受管理员认证和 CSRF 保护，不能直接发送裸 POST；命令行调用示例见[本地启动与配置指南](docs/本地启动与配置指南.md#73-管理员手动重建索引)。
 
 未启用 Dense 召回或 embedding/Qdrant 暂时不可用时，系统仍可使用 MySQL ngram 全文召回，并明确返回 `degraded` 和 `lexical+heuristic-rerank`；不会把全文结果标记成向量召回。
 
@@ -250,7 +271,7 @@ Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8080/api/admin/rag/reindex
 ### 业务服务提示数据库连接失败
 
 - 确认 MySQL 服务已启动且监听 `3306`。
-- 确认已经导入 `mysql_red_culture_all_in_one.sql`。
+- 确认已按数据库类型完成基础库和当前 Schema 迁移，而非仅导入 `mysql_red_culture_all_in_one.sql`。
 - 核对 `application.yml` 中的数据库地址、用户名和密码。
 - 确认当前账号有访问 `red_culture_platform` 的权限。
 
