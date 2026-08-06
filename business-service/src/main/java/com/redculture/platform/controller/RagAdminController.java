@@ -1,20 +1,64 @@
 package com.redculture.platform.controller;
 
+import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.redculture.platform.common.ApiResponse;
+import com.redculture.platform.config.RagProperties;
+import com.redculture.platform.entity.ContentChunk;
+import com.redculture.platform.enums.EmbeddingStatus;
+import com.redculture.platform.mapper.ContentChunkMapper;
+import com.redculture.platform.service.KnowledgeRetriever;
+import com.redculture.platform.service.rag.ChunkVectorStore;
 import com.redculture.platform.service.rag.RagIndexService;
+import com.redculture.platform.vo.ai.KnowledgeRetrieveRequest;
+import com.redculture.platform.vo.ai.KnowledgeRetrieveResult;
 import com.redculture.platform.vo.ai.RagIndexReport;
+import org.springframework.util.StringUtils;
+import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
+
+import java.util.LinkedHashMap;
+import java.util.Map;
+import java.util.Set;
 
 @RestController
 @RequestMapping("/api/admin/rag")
 public class RagAdminController {
 
     private final RagIndexService ragIndexService;
+    private final RagProperties ragProperties;
+    private final ContentChunkMapper contentChunkMapper;
+    private final ChunkVectorStore vectorStore;
+    private final KnowledgeRetriever knowledgeRetriever;
 
-    public RagAdminController(RagIndexService ragIndexService) {
+    public RagAdminController(RagIndexService ragIndexService,
+                              RagProperties ragProperties,
+                              ContentChunkMapper contentChunkMapper,
+                              ChunkVectorStore vectorStore,
+                              KnowledgeRetriever knowledgeRetriever) {
         this.ragIndexService = ragIndexService;
+        this.ragProperties = ragProperties;
+        this.contentChunkMapper = contentChunkMapper;
+        this.vectorStore = vectorStore;
+        this.knowledgeRetriever = knowledgeRetriever;
+    }
+
+    @GetMapping("/status")
+    public ApiResponse<Map<String, Object>> status() {
+        Map<String, Object> status = new LinkedHashMap<>();
+        status.put("enabled", ragProperties.isEnabled());
+        status.put("syncOnStartup", ragProperties.isSyncOnStartup());
+        status.put("embeddingModel", ragProperties.getEmbeddingModel());
+        status.put("embeddingDimensions", ragProperties.getEmbeddingDimensions());
+        status.put("indexVersion", ragProperties.getIndexVersion());
+        status.put("qdrantBaseUrl", ragProperties.getQdrantBaseUrl());
+        status.put("qdrantCollection", ragProperties.getQdrantCollection());
+        status.put("qdrantAlias", ragProperties.getQdrantAlias());
+        status.put("chunks", chunkStatus());
+        status.put("qdrant", qdrantStatus());
+        return ApiResponse.success(status);
     }
 
     @PostMapping("/reindex")
@@ -24,5 +68,66 @@ public class RagAdminController {
         } catch (RuntimeException exception) {
             return ApiResponse.fail(exception.getMessage());
         }
+    }
+
+    @PostMapping("/retrieve-test")
+    public ApiResponse<KnowledgeRetrieveResult> retrieveTest(@RequestBody KnowledgeRetrieveRequest request) {
+        if (request == null || !StringUtils.hasText(request.getQuery())) {
+            return ApiResponse.fail("检索问题不能为空");
+        }
+        if (request.getScopeType() == null || request.getScopeId() == null || request.getScopeId() <= 0) {
+            return ApiResponse.fail("请选择有效的检索范围");
+        }
+        try {
+            KnowledgeRetrieveResult result = knowledgeRetriever.retrieve(request);
+            if (result != null) {
+                result.refreshRetrievalMethods();
+            }
+            return ApiResponse.success(result);
+        } catch (RuntimeException exception) {
+            return ApiResponse.fail(exception.getMessage());
+        }
+    }
+
+    private Map<String, Object> chunkStatus() {
+        Map<String, Object> status = new LinkedHashMap<>();
+        status.put("total", contentChunkMapper.selectCount(null));
+        status.put("done", countByEmbeddingStatus(EmbeddingStatus.DONE));
+        status.put("pending", countByEmbeddingStatus(EmbeddingStatus.PENDING));
+        status.put("failed", countByEmbeddingStatus(EmbeddingStatus.FAILED));
+        status.put("indexedForCurrentConfig", contentChunkMapper.selectCount(new LambdaQueryWrapper<ContentChunk>()
+                .eq(ContentChunk::getEmbeddingStatus, EmbeddingStatus.DONE)
+                .eq(ContentChunk::getEmbeddingModel, ragProperties.getEmbeddingModel())
+                .eq(ContentChunk::getEmbeddingDimensions, ragProperties.getEmbeddingDimensions())
+                .eq(ContentChunk::getEmbeddingIndexVersion, ragProperties.getIndexVersion())));
+        return status;
+    }
+
+    private Long countByEmbeddingStatus(EmbeddingStatus status) {
+        return contentChunkMapper.selectCount(new LambdaQueryWrapper<ContentChunk>()
+                .eq(ContentChunk::getEmbeddingStatus, status));
+    }
+
+    private Map<String, Object> qdrantStatus() {
+        Map<String, Object> status = new LinkedHashMap<>();
+        status.put("reachable", false);
+        status.put("aliasTarget", null);
+        status.put("pointCount", null);
+        status.put("message", null);
+        try {
+            String aliasName = ragProperties.getQdrantAlias();
+            String target = StringUtils.hasText(aliasName)
+                    ? vectorStore.resolveAlias(aliasName)
+                    : ragProperties.getQdrantCollection();
+            String collectionName = StringUtils.hasText(target) ? target : ragProperties.getQdrantCollection();
+            Set<Long> pointIds = vectorStore.listPointIds(collectionName);
+            status.put("reachable", true);
+            status.put("aliasTarget", target);
+            status.put("pointCount", pointIds == null ? 0 : pointIds.size());
+            status.put("message", "Qdrant 连接正常");
+        } catch (RuntimeException exception) {
+            status.put("message", exception.getMessage());
+        }
+        return status;
     }
 }

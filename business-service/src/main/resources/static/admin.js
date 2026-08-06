@@ -33,7 +33,18 @@ const adminState = {
     agentTraces: [],
     agentToolTraces: [],
     agentPromptVersions: [],
-    agentPromptMetrics: []
+    agentPromptMetrics: [],
+    agentDebugModels: [],
+    agentDebugEvents: [],
+    agentDebugAnswer: "",
+    agentDebugFinalResponse: null,
+    agentDebugStartedAt: 0,
+    agentDebugFinishedAt: 0,
+    agentDebugRunning: false,
+    agentDebugAbortController: null,
+    ragStatus: null,
+    ragLastReindexReport: null,
+    ragRetrieveResult: null
 };
 
 const adminElements = {
@@ -200,7 +211,41 @@ const adminElements = {
     agentPromptTableBody: document.querySelector("#agentPromptTableBody"),
     agentTimelineSessionCount: document.querySelector("#agentTimelineSessionCount"),
     agentTimelineEventCount: document.querySelector("#agentTimelineEventCount"),
-    agentTimelineList: document.querySelector("#agentTimelineList")
+    agentTimelineList: document.querySelector("#agentTimelineList"),
+    agentDebugSchoolSelect: null,
+    agentDebugModelSelect: null,
+    agentDebugPromptInput: null,
+    agentDebugRunButton: null,
+    agentDebugStopButton: null,
+    agentDebugResetButton: null,
+    agentDebugStatusMetric: null,
+    agentDebugDurationMetric: null,
+    agentDebugToolMetric: null,
+    agentDebugErrorMetric: null,
+    agentDebugTraceList: null,
+    agentDebugEventList: null,
+    agentDebugAnswer: null,
+    agentDebugFinalJson: null,
+    agentDebugRunId: null,
+    agentDebugNodeCount: null,
+    agentDebugAnswerCount: null,
+    ragStatusSummary: null,
+    ragChunkMetric: null,
+    ragIndexedMetric: null,
+    ragFailedMetric: null,
+    ragQdrantMetric: null,
+    ragStatusDetail: null,
+    ragRefreshButton: null,
+    ragReindexButton: null,
+    ragReindexReport: null,
+    ragTestSchoolSelect: null,
+    ragTestQueryInput: null,
+    ragTestIntentSelect: null,
+    ragTestGradeInput: null,
+    ragTestThemeInput: null,
+    ragTestTopKInput: null,
+    ragTestRunButton: null,
+    ragTestResult: null
 };
 
 document.addEventListener("DOMContentLoaded", () => {
@@ -331,7 +376,10 @@ function initializeUserManagementPanel() {
                         <label><span>联系电话</span><input id="accountPhoneInput" type="text"></label>
                         <label><span>邮箱</span><input id="accountEmailInput" type="email"></label>
                         <label><span>所属学校</span><select id="accountSchoolSelect"></select></label>
-                        <label><span>角色</span><select id="accountRoleSelect" multiple size="4"></select></label>
+                        <div class="checklist-field">
+                            <span>角色</span>
+                            <div id="accountRoleSelect" class="checklist-box"></div>
+                        </div>
                         <div class="form-actions">
                             <button class="accent-button" type="submit">保存账号</button>
                             <button class="ghost-button" id="accountResetPasswordButton" type="button">重置密码</button>
@@ -376,7 +424,10 @@ function initializeUserManagementPanel() {
                         <label><span>职称/岗位</span><input id="profileTitleInput" type="text"></label>
                         <label><span>学生学号</span><input id="profileStudentNoInput" type="text"></label>
                         <label><span>年级</span><input id="profileGradeInput" type="text" placeholder="例如 五年级"></label>
-                        <label><span>班级</span><select id="profileClassSelect" multiple size="5"></select></label>
+                        <div class="checklist-field">
+                            <span>班级</span>
+                            <div id="profileClassSelect" class="checklist-box"></div>
+                        </div>
                         <div class="form-actions"><button class="accent-button" type="submit">保存档案</button></div>
                     </form>
                 </article>
@@ -414,7 +465,10 @@ function initializeUserManagementPanel() {
                         <label><span>角色编码</span><input id="roleCodeInput" type="text" placeholder="例如 school_admin"></label>
                         <label><span>角色名称</span><input id="roleNameInput" type="text"></label>
                         <label><span>角色范围</span><select id="roleScopeInput"><option value="platform">平台</option><option value="school">学校</option><option value="class">班级</option><option value="self">本人</option></select></label>
-                        <label><span>角色权限</span><select id="rolePermissionSelect" multiple size="8"></select></label>
+                        <div class="checklist-field">
+                            <span>角色权限</span>
+                            <div id="rolePermissionSelect" class="checklist-box checklist-box--tall"></div>
+                        </div>
                         <div class="form-actions"><button class="accent-button" type="submit">保存角色</button></div>
                     </form>
                 </article>
@@ -489,9 +543,196 @@ function initializeUserManagementPanel() {
     });
 }
 
+function initializeAgentDebugPanel() {
+    const tabStrip = document.querySelector(".tab-strip");
+    if (tabStrip && !document.querySelector('.tab-chip[data-tab="agent-debug"]')) {
+        const button = document.createElement("button");
+        button.className = "tab-chip";
+        button.dataset.tab = "agent-debug";
+        button.type = "button";
+        button.textContent = "Agent 调试";
+        tabStrip.insertBefore(button, tabStrip.querySelector('[data-tab="agent-ops"]'));
+    }
+
+    const workspaceStack = document.querySelector(".workspace-stack");
+    if (!workspaceStack || document.querySelector('.workspace-panel[data-panel="agent-debug"]')) return;
+    const panel = document.createElement("section");
+    panel.className = "workspace-panel agent-debug-panel";
+    panel.dataset.panel = "agent-debug";
+    panel.innerHTML = `
+        <div class="panel-heading">
+            <div>
+                <p class="eyebrow">Module 05</p>
+                <h2>Agent 调试</h2>
+                <p class="panel-description">管理员选择学校范围、模型和测试问题，实时查看智能体回答、检索链路、工具调用与 SSE 事件。</p>
+            </div>
+        </div>
+        <div class="agent-debug-layout">
+            <aside class="agent-debug-config table-card">
+                <div class="card-topline"><h3>运行配置</h3><span class="mini-stat">学校范围</span></div>
+                <label><span>学校范围</span><select id="agentDebugSchoolSelect" class="line-select"></select></label>
+                <label><span>模型</span><select id="agentDebugModelSelect" class="line-select"><option value="">系统默认</option></select></label>
+                <label><span>测试问题</span><textarea id="agentDebugPromptInput" rows="9" placeholder="请输入要测试的问题"></textarea></label>
+                <div class="agent-debug-actions">
+                    <button class="accent-button" id="agentDebugRunButton" type="button">开始运行</button>
+                    <button class="ghost-button" id="agentDebugStopButton" type="button" disabled>停止运行</button>
+                    <button class="ghost-button" id="agentDebugResetButton" type="button">清空</button>
+                </div>
+            </aside>
+            <main class="agent-debug-main">
+                <div class="agent-debug-metrics">
+                    <article><span>状态</span><strong id="agentDebugStatusMetric">待运行</strong></article>
+                    <article><span>总耗时</span><strong id="agentDebugDurationMetric">0 ms</strong></article>
+                    <article><span>工具调用</span><strong id="agentDebugToolMetric">0</strong></article>
+                    <article><span>异常事件</span><strong id="agentDebugErrorMetric">0</strong></article>
+                </div>
+                <div class="agent-debug-grid">
+                    <article class="table-card">
+                        <div class="card-topline">
+                            <div><h3>执行链路</h3><p class="agent-timeline-note">Run ID：<span id="agentDebugRunId">-</span></p></div>
+                            <span class="mini-stat" id="agentDebugNodeCount">0 个节点</span>
+                        </div>
+                        <div id="agentDebugTraceList" class="agent-debug-trace"></div>
+                    </article>
+                    <article class="table-card">
+                        <div class="card-topline"><div><h3>原始 SSE 事件</h3><p class="agent-timeline-note">按接收顺序追加</p></div></div>
+                        <div id="agentDebugEventList" class="agent-debug-events"></div>
+                    </article>
+                </div>
+                <article class="table-card">
+                    <div class="card-topline"><h3>模型输出</h3><span class="mini-stat" id="agentDebugAnswerCount">0 个字符</span></div>
+                    <div id="agentDebugAnswer" class="agent-debug-answer">等待模型输出</div>
+                    <details id="agentDebugFinalJson" class="agent-debug-json" hidden><summary>查看最终响应 JSON</summary><pre></pre></details>
+                </article>
+            </main>
+        </div>
+    `;
+    workspaceStack.insertBefore(panel, document.querySelector('.workspace-panel[data-panel="agent-ops"]'));
+    adminElements.tabButtons = Array.from(document.querySelectorAll(".tab-strip .tab-chip[data-tab]"));
+    adminElements.panels = Array.from(document.querySelectorAll(".workspace-panel"));
+    Object.assign(adminElements, {
+        agentDebugSchoolSelect: document.querySelector("#agentDebugSchoolSelect"),
+        agentDebugModelSelect: document.querySelector("#agentDebugModelSelect"),
+        agentDebugPromptInput: document.querySelector("#agentDebugPromptInput"),
+        agentDebugRunButton: document.querySelector("#agentDebugRunButton"),
+        agentDebugStopButton: document.querySelector("#agentDebugStopButton"),
+        agentDebugResetButton: document.querySelector("#agentDebugResetButton"),
+        agentDebugStatusMetric: document.querySelector("#agentDebugStatusMetric"),
+        agentDebugDurationMetric: document.querySelector("#agentDebugDurationMetric"),
+        agentDebugToolMetric: document.querySelector("#agentDebugToolMetric"),
+        agentDebugErrorMetric: document.querySelector("#agentDebugErrorMetric"),
+        agentDebugTraceList: document.querySelector("#agentDebugTraceList"),
+        agentDebugEventList: document.querySelector("#agentDebugEventList"),
+        agentDebugAnswer: document.querySelector("#agentDebugAnswer"),
+        agentDebugFinalJson: document.querySelector("#agentDebugFinalJson"),
+        agentDebugRunId: document.querySelector("#agentDebugRunId"),
+        agentDebugNodeCount: document.querySelector("#agentDebugNodeCount"),
+        agentDebugAnswerCount: document.querySelector("#agentDebugAnswerCount")
+    });
+}
+
+function initializeRagKnowledgePanel() {
+    const tabStrip = document.querySelector(".tab-strip");
+    if (tabStrip && !document.querySelector('.tab-chip[data-tab="rag-knowledge"]')) {
+        const button = document.createElement("button");
+        button.className = "tab-chip";
+        button.dataset.tab = "rag-knowledge";
+        button.type = "button";
+        button.textContent = "RAG 知识库";
+        tabStrip.insertBefore(button, tabStrip.querySelector('[data-tab="agent-debug"]') || tabStrip.querySelector('[data-tab="agent-ops"]'));
+    }
+
+    const workspaceStack = document.querySelector(".workspace-stack");
+    if (!workspaceStack || document.querySelector('.workspace-panel[data-panel="rag-knowledge"]')) return;
+    const panel = document.createElement("section");
+    panel.className = "workspace-panel rag-knowledge-panel";
+    panel.dataset.panel = "rag-knowledge";
+    panel.innerHTML = `
+        <div class="panel-heading">
+            <div>
+                <p class="eyebrow">Module 05</p>
+                <h2>RAG 知识库管理</h2>
+                <p class="panel-description">查看内容分块、向量索引、Qdrant 连接状态，并直接测试知识检索命中效果。</p>
+            </div>
+            <div class="panel-tools">
+                <button class="ghost-button" id="ragRefreshButton" type="button">刷新状态</button>
+                <button class="accent-button" id="ragReindexButton" type="button">一键重建索引</button>
+            </div>
+        </div>
+
+        <div class="rag-status-banner" id="ragStatusSummary">正在等待状态数据。</div>
+        <div class="agent-metric-grid">
+            <article class="agent-metric-card"><span>内容分块</span><strong id="ragChunkMetric">-</strong><small>全部可检索文本块</small></article>
+            <article class="agent-metric-card"><span>当前索引</span><strong id="ragIndexedMetric">-</strong><small>匹配当前模型与版本</small></article>
+            <article class="agent-metric-card"><span>失败分块</span><strong id="ragFailedMetric">-</strong><small>需要重建或检查配置</small></article>
+            <article class="agent-metric-card"><span>Qdrant</span><strong id="ragQdrantMetric">-</strong><small>向量库连接与点位</small></article>
+        </div>
+
+        <div class="rag-grid">
+            <article class="table-card">
+                <div class="card-topline"><h3>知识库索引状态</h3><span class="mini-stat">配置与连接</span></div>
+                <div id="ragStatusDetail" class="rag-detail-list"></div>
+            </article>
+            <article class="table-card">
+                <div class="card-topline"><h3>重建索引结果</h3><span class="mini-stat">最近一次</span></div>
+                <div id="ragReindexReport" class="rag-detail-list"></div>
+            </article>
+        </div>
+
+        <article class="table-card rag-test-card">
+            <div class="card-topline"><h3>检索测试</h3><span class="mini-stat">不经过模型生成</span></div>
+            <div class="rag-test-layout">
+                <form class="rag-test-form" id="ragTestForm">
+                    <label><span>学校范围</span><select id="ragTestSchoolSelect" class="line-select"></select></label>
+                    <label><span>测试问题</span><textarea id="ragTestQueryInput" rows="5" placeholder="请输入要测试的检索问题"></textarea></label>
+                    <div class="field-grid two-col">
+                        <label><span>意图</span><select id="ragTestIntentSelect" class="line-select">
+                            <option value="">自动识别</option>
+                            <option value="NEARBY_RESOURCE">周边资源</option>
+                            <option value="TEACHING_SUGGESTION">教学建议</option>
+                            <option value="RESOURCE_EXPLANATION">资源解释</option>
+                            <option value="RELATION_QUERY">关系查询</option>
+                            <option value="UNKNOWN">未知</option>
+                        </select></label>
+                        <label><span>Top K</span><input id="ragTestTopKInput" class="line-input" type="number" min="1" max="8" value="5"></label>
+                        <label><span>年级</span><input id="ragTestGradeInput" class="line-input" type="text" placeholder="例如 四年级"></label>
+                        <label><span>主题</span><input id="ragTestThemeInput" class="line-input" type="text" placeholder="例如 红色文化"></label>
+                    </div>
+                    <button class="accent-button" id="ragTestRunButton" type="submit">开始检索</button>
+                </form>
+                <div id="ragTestResult" class="rag-test-result"></div>
+            </div>
+        </article>
+    `;
+    workspaceStack.insertBefore(panel, document.querySelector('.workspace-panel[data-panel="agent-debug"]') || document.querySelector('.workspace-panel[data-panel="agent-ops"]'));
+    adminElements.tabButtons = Array.from(document.querySelectorAll(".tab-strip .tab-chip[data-tab]"));
+    adminElements.panels = Array.from(document.querySelectorAll(".workspace-panel"));
+    Object.assign(adminElements, {
+        ragStatusSummary: document.querySelector("#ragStatusSummary"),
+        ragChunkMetric: document.querySelector("#ragChunkMetric"),
+        ragIndexedMetric: document.querySelector("#ragIndexedMetric"),
+        ragFailedMetric: document.querySelector("#ragFailedMetric"),
+        ragQdrantMetric: document.querySelector("#ragQdrantMetric"),
+        ragStatusDetail: document.querySelector("#ragStatusDetail"),
+        ragRefreshButton: document.querySelector("#ragRefreshButton"),
+        ragReindexButton: document.querySelector("#ragReindexButton"),
+        ragReindexReport: document.querySelector("#ragReindexReport"),
+        ragTestSchoolSelect: document.querySelector("#ragTestSchoolSelect"),
+        ragTestQueryInput: document.querySelector("#ragTestQueryInput"),
+        ragTestIntentSelect: document.querySelector("#ragTestIntentSelect"),
+        ragTestGradeInput: document.querySelector("#ragTestGradeInput"),
+        ragTestThemeInput: document.querySelector("#ragTestThemeInput"),
+        ragTestTopKInput: document.querySelector("#ragTestTopKInput"),
+        ragTestRunButton: document.querySelector("#ragTestRunButton"),
+        ragTestResult: document.querySelector("#ragTestResult")
+    });
+}
+
 function bindAdminEvents() {
     initializeSchoolMapPanel();
     initializeUserManagementPanel();
+    initializeAgentDebugPanel();
+    initializeRagKnowledgePanel();
 
     adminElements.refreshDashboardButton?.addEventListener("click", () => {
         void bootstrapAdmin();
@@ -574,6 +815,15 @@ function bindAdminEvents() {
     adminElements.agentTraceFeatureFilter?.addEventListener("change", () => void loadAgentOps());
     adminElements.agentToolNameFilter?.addEventListener("change", () => void loadAgentOps());
     adminElements.agentPromptKeySelect?.addEventListener("change", () => void loadAgentPrompts());
+    adminElements.agentDebugRunButton?.addEventListener("click", () => void runAgentDebug());
+    adminElements.agentDebugStopButton?.addEventListener("click", stopAgentDebug);
+    adminElements.agentDebugResetButton?.addEventListener("click", resetAgentDebug);
+    adminElements.ragRefreshButton?.addEventListener("click", () => void loadRagStatus());
+    adminElements.ragReindexButton?.addEventListener("click", () => void reindexRag());
+    document.querySelector("#ragTestForm")?.addEventListener("submit", event => {
+        event.preventDefault();
+        void runRagRetrieveTest();
+    });
     document.addEventListener("keydown", event => {
         if (event.key === "Escape" && !adminElements.schoolModal?.hidden) {
             closeSchoolModal();
@@ -1116,6 +1366,407 @@ function setActiveTab(tabName) {
     if (tabName === "agent-ops") {
         void loadAgentOps();
     }
+    if (tabName === "agent-debug") {
+        void loadAgentDebugModels();
+        syncAgentDebugSchoolOptions();
+    }
+    if (tabName === "rag-knowledge") {
+        syncRagSchoolOptions();
+        void loadRagStatus();
+    }
+}
+
+async function loadAgentDebugModels() {
+    if (!adminElements.agentDebugModelSelect || adminState.agentDebugModels.length) return;
+    try {
+        const models = await requestJson("/api/ai/models");
+        adminState.agentDebugModels = Array.isArray(models) ? models : [];
+        adminElements.agentDebugModelSelect.innerHTML = '<option value="">系统默认</option>'
+            + adminState.agentDebugModels.map(model =>
+                `<option value="${escapeHtml(model.id || "")}">${escapeHtml(model.displayName || model.id || "未命名模型")} · ${escapeHtml(model.provider || "")}</option>`
+            ).join("");
+    } catch (error) {
+        setGlobalStatus("Agent 调试异常", error.message || "模型列表加载失败。");
+    }
+}
+
+function syncAgentDebugSchoolOptions() {
+    const select = adminElements.agentDebugSchoolSelect;
+    if (!select) return;
+    const current = select.value;
+    select.innerHTML = adminState.schools.map(school =>
+        `<option value="${escapeHtml(String(school.schoolId))}">${escapeHtml(school.schoolName || `学校 ${school.schoolId}`)}</option>`
+    ).join("");
+    if (current && adminState.schools.some(school => String(school.schoolId) === current)) {
+        select.value = current;
+    } else if (adminState.schools.length) {
+        select.value = String(adminState.schools[0].schoolId);
+    }
+}
+
+function resetAgentDebug() {
+    if (adminState.agentDebugRunning) return;
+    adminState.agentDebugEvents = [];
+    adminState.agentDebugAnswer = "";
+    adminState.agentDebugFinalResponse = null;
+    adminState.agentDebugStartedAt = 0;
+    adminState.agentDebugFinishedAt = 0;
+    renderAgentDebug();
+}
+
+function stopAgentDebug() {
+    adminState.agentDebugAbortController?.abort();
+}
+
+async function runAgentDebug() {
+    const question = adminElements.agentDebugPromptInput?.value?.trim() || "";
+    const schoolId = parseNullableNumber(adminElements.agentDebugSchoolSelect?.value);
+    if (!question || !schoolId || adminState.agentDebugRunning) return;
+
+    resetAgentDebug();
+    adminState.agentDebugRunning = true;
+    adminState.agentDebugStartedAt = Date.now();
+    const controller = new AbortController();
+    adminState.agentDebugAbortController = controller;
+    renderAgentDebug();
+
+    const body = {
+        question,
+        scopeType: "SCHOOL",
+        scopeId: schoolId,
+        conversationId: globalThis.crypto?.randomUUID?.() || `admin-debug-${Date.now()}`,
+        debug: true
+    };
+    const modelId = adminElements.agentDebugModelSelect?.value || "";
+    if (modelId) body.modelId = modelId;
+
+    try {
+        await streamAgentDebug("/api/ai/qa/stream", body, controller.signal);
+    } catch (error) {
+        if (error.name !== "AbortError") {
+            pushAgentDebugEvent("error", { message: error.message || "Agent 运行失败" });
+        } else {
+            pushAgentDebugEvent("error", { message: "调试运行已停止" });
+        }
+    } finally {
+        adminState.agentDebugFinishedAt = Date.now();
+        adminState.agentDebugRunning = false;
+        adminState.agentDebugAbortController = null;
+        renderAgentDebug();
+    }
+}
+
+async function streamAgentDebug(url, body, signal) {
+    const headers = new Headers({
+        Accept: "text/event-stream",
+        "Content-Type": "application/json"
+    });
+    const csrfToken = readCsrfToken();
+    if (csrfToken) headers.set("X-CSRF-TOKEN", csrfToken);
+    const response = await fetch(url, {
+        method: "POST",
+        credentials: "include",
+        headers,
+        body: JSON.stringify(body),
+        signal
+    });
+    if (!response.ok) {
+        let message = `请求失败（HTTP ${response.status}）`;
+        try {
+            const payload = await response.json();
+            message = payload.message || message;
+        } catch {
+            // SSE error responses may not be JSON.
+        }
+        throw new Error(message);
+    }
+    if (!response.body) throw new Error("服务没有返回流式响应");
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder("utf-8");
+    let buffer = "";
+    while (true) {
+        const { value, done } = await reader.read();
+        buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
+        const frames = buffer.split(/\r?\n\r?\n/);
+        buffer = frames.pop() || "";
+        frames.filter(frame => frame.trim()).forEach(dispatchAgentDebugFrame);
+        if (done) break;
+    }
+    if (buffer.trim()) dispatchAgentDebugFrame(buffer);
+    reader.releaseLock();
+}
+
+function dispatchAgentDebugFrame(frame) {
+    const lines = frame.split(/\r?\n/);
+    let name = "message";
+    const dataLines = [];
+    lines.forEach(line => {
+        if (line.startsWith("event:")) name = line.slice(6).trim();
+        if (line.startsWith("data:")) dataLines.push(line.slice(5).trimStart());
+    });
+    if (!dataLines.length) return;
+    let data = {};
+    try {
+        data = JSON.parse(dataLines.join("\n"));
+    } catch {
+        data = { raw: dataLines.join("\n") };
+    }
+    pushAgentDebugEvent(name, data);
+}
+
+function pushAgentDebugEvent(name, data) {
+    adminState.agentDebugEvents.push({
+        id: adminState.agentDebugEvents.length + 1,
+        name,
+        data,
+        timestamp: Date.now(),
+        elapsedMs: adminState.agentDebugStartedAt ? Date.now() - adminState.agentDebugStartedAt : 0
+    });
+    if (name === "token") adminState.agentDebugAnswer += data.delta || "";
+    if (name === "final") {
+        adminState.agentDebugFinalResponse = data.response || null;
+        adminState.agentDebugAnswer = data.response?.answer || adminState.agentDebugAnswer;
+    }
+    renderAgentDebug();
+}
+
+function renderAgentDebug() {
+    const events = adminState.agentDebugEvents;
+    const duration = adminState.agentDebugStartedAt
+        ? (adminState.agentDebugFinishedAt || Date.now()) - adminState.agentDebugStartedAt
+        : 0;
+    const tools = events.filter(event => event.name === "tool.completed").length;
+    const errors = events.filter(event => event.name === "error" || event.name === "model.failed").length;
+    const nodes = events.filter(event => event.name === "phase.started" || event.name === "phase.completed"
+        || event.name.startsWith("model.") || event.name.startsWith("tool."));
+    const runId = events.find(event => event.data?.runId)?.data?.runId
+        || adminState.agentDebugFinalResponse?.runId || "-";
+
+    if (adminElements.agentDebugStatusMetric) {
+        adminElements.agentDebugStatusMetric.textContent = adminState.agentDebugRunning
+            ? "运行中" : adminState.agentDebugFinishedAt ? "已结束" : "待运行";
+    }
+    if (adminElements.agentDebugDurationMetric) adminElements.agentDebugDurationMetric.textContent = `${duration} ms`;
+    if (adminElements.agentDebugToolMetric) adminElements.agentDebugToolMetric.textContent = String(tools);
+    if (adminElements.agentDebugErrorMetric) adminElements.agentDebugErrorMetric.textContent = String(errors);
+    if (adminElements.agentDebugRunId) adminElements.agentDebugRunId.textContent = runId;
+    if (adminElements.agentDebugNodeCount) adminElements.agentDebugNodeCount.textContent = `${nodes.length} 个节点`;
+    if (adminElements.agentDebugAnswerCount) adminElements.agentDebugAnswerCount.textContent = `${adminState.agentDebugAnswer.length} 个字符`;
+    if (adminElements.agentDebugAnswer) adminElements.agentDebugAnswer.textContent = adminState.agentDebugAnswer || "等待模型输出";
+    if (adminElements.agentDebugRunButton) adminElements.agentDebugRunButton.disabled = adminState.agentDebugRunning;
+    if (adminElements.agentDebugStopButton) adminElements.agentDebugStopButton.disabled = !adminState.agentDebugRunning;
+    if (adminElements.agentDebugPromptInput) adminElements.agentDebugPromptInput.disabled = adminState.agentDebugRunning;
+    if (adminElements.agentDebugSchoolSelect) adminElements.agentDebugSchoolSelect.disabled = adminState.agentDebugRunning;
+    if (adminElements.agentDebugModelSelect) adminElements.agentDebugModelSelect.disabled = adminState.agentDebugRunning;
+
+    if (adminElements.agentDebugTraceList) {
+        adminElements.agentDebugTraceList.innerHTML = nodes.length
+            ? nodes.map(renderAgentDebugNode).join("")
+            : '<div class="agent-empty-note">运行后将在这里显示检索、模型和工具节点。</div>';
+    }
+    if (adminElements.agentDebugEventList) {
+        adminElements.agentDebugEventList.innerHTML = events.length
+            ? events.map(event => `<details><summary><span>${event.id}</span><strong>${escapeHtml(event.name)}</strong><time>+${event.elapsedMs} ms</time></summary><pre>${escapeHtml(JSON.stringify(event.data, null, 2))}</pre></details>`).join("")
+            : '<div class="agent-empty-note">暂无事件。</div>';
+        adminElements.agentDebugEventList.scrollTop = adminElements.agentDebugEventList.scrollHeight;
+    }
+    if (adminElements.agentDebugFinalJson) {
+        adminElements.agentDebugFinalJson.hidden = !adminState.agentDebugFinalResponse;
+        const pre = adminElements.agentDebugFinalJson.querySelector("pre");
+        if (pre) pre.textContent = adminState.agentDebugFinalResponse ? JSON.stringify(adminState.agentDebugFinalResponse, null, 2) : "";
+    }
+}
+
+function renderAgentDebugNode(event) {
+    const failed = event.name === "error" || event.name.endsWith("failed") || event.data?.status === "failed";
+    const running = event.name.endsWith("started");
+    const state = failed ? "failed" : running ? "running" : "completed";
+    const title = event.data?.label || (event.name.startsWith("tool.")
+        ? `${event.data?.toolName || event.data?.name || "工具"} · ${event.name.endsWith("started") ? "开始" : "完成"}`
+        : event.name.startsWith("model.")
+            ? `${event.data?.provider || "LLM"} / ${event.data?.model || "模型"} · ${event.name.split(".")[1]}`
+            : event.name);
+    const summary = event.data?.outputSummary || "";
+    return `<div class="agent-debug-node ${state}"><span class="node-dot">${state === "failed" ? "!" : state === "running" ? "…" : "✓"}</span><div><strong>${escapeHtml(title)}</strong><small>+${event.elapsedMs} ms</small>${summary ? `<code>${escapeHtml(summary)}</code>` : ""}</div></div>`;
+}
+
+function syncRagSchoolOptions() {
+    const select = adminElements.ragTestSchoolSelect;
+    if (!select) return;
+    const current = select.value;
+    select.innerHTML = adminState.schools.map(school =>
+        `<option value="${escapeHtml(String(school.schoolId))}">${escapeHtml(school.schoolName || `学校 ${school.schoolId}`)}</option>`
+    ).join("");
+    if (current && adminState.schools.some(school => String(school.schoolId) === current)) {
+        select.value = current;
+    } else if (adminState.schools.length) {
+        select.value = String(adminState.schools[0].schoolId);
+    }
+}
+
+async function loadRagStatus() {
+    if (!adminElements.ragStatusDetail) return;
+    try {
+        const status = await requestJson("/api/admin/rag/status");
+        adminState.ragStatus = status || {};
+        renderRagStatus();
+    } catch (error) {
+        setGlobalStatus("RAG 状态异常", error.message || "RAG 状态读取失败。");
+        if (adminElements.ragStatusSummary) adminElements.ragStatusSummary.textContent = error.message || "RAG 状态读取失败。";
+    }
+}
+
+async function reindexRag() {
+    if (!window.confirm("确认重建 RAG 向量索引吗？该操作可能调用 Embedding 服务并写入 Qdrant。")) return;
+    if (adminElements.ragReindexButton) adminElements.ragReindexButton.disabled = true;
+    try {
+        const report = await requestJson("/api/admin/rag/reindex", { method: "POST", body: {} });
+        adminState.ragLastReindexReport = report || {};
+        renderRagReindexReport();
+        await loadRagStatus();
+        setGlobalStatus("RAG 索引已重建", "已刷新知识库索引状态。");
+    } catch (error) {
+        setGlobalStatus("RAG 重建失败", error.message || "索引重建失败。");
+        adminState.ragLastReindexReport = { error: error.message || "索引重建失败" };
+        renderRagReindexReport();
+    } finally {
+        if (adminElements.ragReindexButton) adminElements.ragReindexButton.disabled = false;
+    }
+}
+
+async function runRagRetrieveTest() {
+    const query = adminElements.ragTestQueryInput?.value?.trim() || "";
+    const schoolId = parseNullableNumber(adminElements.ragTestSchoolSelect?.value);
+    if (!query || !schoolId) {
+        setGlobalStatus("RAG 检索参数不足", "请选择学校范围并填写测试问题。");
+        return;
+    }
+    if (adminElements.ragTestRunButton) adminElements.ragTestRunButton.disabled = true;
+    if (adminElements.ragTestResult) adminElements.ragTestResult.innerHTML = '<div class="agent-empty-note">正在检索知识库。</div>';
+    try {
+        const result = await requestJson("/api/admin/rag/retrieve-test", {
+            method: "POST",
+            body: {
+                query,
+                scopeType: "SCHOOL",
+                scopeId: schoolId,
+                intent: optionalText(adminElements.ragTestIntentSelect?.value),
+                grade: optionalText(adminElements.ragTestGradeInput?.value),
+                theme: optionalText(adminElements.ragTestThemeInput?.value),
+                topK: parseNullableNumber(adminElements.ragTestTopKInput?.value) || 5
+            }
+        });
+        adminState.ragRetrieveResult = result || {};
+        renderRagRetrieveResult();
+        setGlobalStatus("RAG 检索完成", `状态 ${result?.retrievalStatus || "-"}。`);
+    } catch (error) {
+        setGlobalStatus("RAG 检索失败", error.message || "检索测试失败。");
+        if (adminElements.ragTestResult) adminElements.ragTestResult.innerHTML = `<div class="agent-empty-note agent-empty-note--error">${escapeHtml(error.message || "检索测试失败。")}</div>`;
+    } finally {
+        if (adminElements.ragTestRunButton) adminElements.ragTestRunButton.disabled = false;
+    }
+}
+
+function renderRagStatus() {
+    const status = adminState.ragStatus || {};
+    const chunks = status.chunks || {};
+    const qdrant = status.qdrant || {};
+    if (adminElements.ragStatusSummary) {
+        adminElements.ragStatusSummary.textContent = status.enabled
+            ? `RAG 已开启，Qdrant ${qdrant.reachable ? "连接正常" : "暂不可用"}。`
+            : "RAG 当前未开启，重建索引会被后端拒绝。";
+    }
+    if (adminElements.ragChunkMetric) adminElements.ragChunkMetric.textContent = formatAgentNumber(chunks.total);
+    if (adminElements.ragIndexedMetric) adminElements.ragIndexedMetric.textContent = formatAgentNumber(chunks.indexedForCurrentConfig);
+    if (adminElements.ragFailedMetric) adminElements.ragFailedMetric.textContent = formatAgentNumber(chunks.failed);
+    if (adminElements.ragQdrantMetric) adminElements.ragQdrantMetric.textContent = qdrant.reachable ? `${formatAgentNumber(qdrant.pointCount)} points` : "不可用";
+    if (adminElements.ragStatusDetail) {
+        adminElements.ragStatusDetail.innerHTML = renderRagDetailRows([
+            ["RAG 开关", status.enabled ? "已开启" : "未开启"],
+            ["启动同步", status.syncOnStartup ? "开启" : "关闭"],
+            ["Embedding 模型", status.embeddingModel],
+            ["向量维度", status.embeddingDimensions],
+            ["索引版本", status.indexVersion],
+            ["Qdrant 地址", status.qdrantBaseUrl],
+            ["逻辑 Alias", status.qdrantAlias],
+            ["Alias 指向", qdrant.aliasTarget || "-"],
+            ["Qdrant 状态", qdrant.message || "-"],
+            ["分块统计", `总数 ${formatAgentNumber(chunks.total)} / 完成 ${formatAgentNumber(chunks.done)} / 待处理 ${formatAgentNumber(chunks.pending)} / 失败 ${formatAgentNumber(chunks.failed)}`]
+        ]);
+    }
+}
+
+function renderRagReindexReport() {
+    const report = adminState.ragLastReindexReport;
+    if (!adminElements.ragReindexReport) return;
+    if (!report) {
+        adminElements.ragReindexReport.innerHTML = '<div class="agent-empty-note">尚未执行重建。</div>';
+        return;
+    }
+    if (report.error) {
+        adminElements.ragReindexReport.innerHTML = `<div class="agent-empty-note agent-empty-note--error">${escapeHtml(report.error)}</div>`;
+        return;
+    }
+    adminElements.ragReindexReport.innerHTML = renderRagDetailRows([
+        ["总分块", report.totalChunks],
+        ["本次索引", report.indexedChunks],
+        ["跳过", report.skippedChunks],
+        ["失败", report.failedChunks],
+        ["删除旧点位", report.deletedPoints],
+        ["物理 Collection", report.collectionName],
+        ["Alias 是否切换", report.aliasSwitched ? "是" : "否"]
+    ]);
+}
+
+function renderRagRetrieveResult() {
+    const result = adminState.ragRetrieveResult || {};
+    const chunks = Array.isArray(result.chunks) ? result.chunks : [];
+    const graphFacts = Array.isArray(result.graphFacts) ? result.graphFacts : [];
+    const citations = Array.isArray(result.citationCandidates) ? result.citationCandidates : [];
+    const methods = Array.isArray(result.retrievalMethods) ? result.retrievalMethods : [];
+    if (!adminElements.ragTestResult) return;
+    adminElements.ragTestResult.innerHTML = `
+        <div class="rag-result-summary">
+            <span>状态：<strong>${escapeHtml(result.retrievalStatus || "-")}</strong></span>
+            <span>方式：${escapeHtml(methods.join(" / ") || "-")}</span>
+            <span>片段 ${chunks.length} / 图谱事实 ${graphFacts.length} / 引用 ${citations.length}</span>
+        </div>
+        <div class="rag-result-section">
+            <h4>知识片段</h4>
+            ${chunks.length ? chunks.map(renderRagChunk).join("") : '<div class="agent-empty-note">暂无知识片段命中。</div>'}
+        </div>
+        <div class="rag-result-section">
+            <h4>图谱事实</h4>
+            ${graphFacts.length ? graphFacts.map(renderRagGraphFact).join("") : '<div class="agent-empty-note">暂无图谱事实。</div>'}
+        </div>
+        <details class="rag-result-json"><summary>查看完整检索 JSON</summary><pre>${escapeHtml(JSON.stringify(result, null, 2))}</pre></details>
+    `;
+}
+
+function renderRagChunk(chunk) {
+    return `<article class="rag-hit-card">
+        <div><strong>${escapeHtml(chunk.title || chunk.citationId || "未命名片段")}</strong><span>${escapeHtml(chunk.citationId || "-")}</span></div>
+        <p>${escapeHtml(truncateAgentText(chunk.text || chunk.excerpt || "", 280))}</p>
+        <small>分数 ${formatAgentNumber(chunk.score)} · ${escapeHtml(chunk.retrievalMethod || "-")} · ${escapeHtml(chunk.entityType || "-")}:${escapeHtml(chunk.entityId || "-")}</small>
+    </article>`;
+}
+
+function renderRagGraphFact(fact) {
+    return `<article class="rag-hit-card">
+        <div><strong>${escapeHtml(fact.citationId || "图谱事实")}</strong><span>${escapeHtml(fact.predicate || "-")}</span></div>
+        <p>${escapeHtml(truncateAgentText(fact.text || "", 280))}</p>
+        <small>${escapeHtml(fact.subjectName || "-")} → ${escapeHtml(fact.objectName || "-")} · hop ${escapeHtml(fact.hop ?? "-")}</small>
+    </article>`;
+}
+
+function renderRagDetailRows(rows) {
+    return rows.map(([label, value]) => `
+        <div class="rag-detail-row">
+            <span>${escapeHtml(label)}</span>
+            <strong>${escapeHtml(value == null || value === "" ? "-" : String(value))}</strong>
+        </div>
+    `).join("");
 }
 
 function setGlobalStatus(title, hint) {
@@ -1214,6 +1865,8 @@ async function loadSchools() {
         adminElements.schoolTotalMetric.textContent = String(result.total || 0);
     }
     syncSelectOptions();
+    syncAgentDebugSchoolOptions();
+    syncRagSchoolOptions();
     if (adminState.activeTab === "school-map" && adminState.selectedSchoolIdForMap) {
         void loadSchoolMapDetail(adminState.selectedSchoolIdForMap, { renderMap: true });
     }
@@ -2050,29 +2703,38 @@ function syncUserManagementSelectOptions() {
     fillOptionSelect(adminElements.accountFilterSchoolSelect, adminState.schools, "schoolId", "schoolName", "全部学校");
     fillOptionSelect(adminElements.profileSchoolSelect, adminState.schools, "schoolId", "schoolName", "请选择学校");
     fillOptionSelect(adminElements.profileAccountSelect, adminState.userAccounts, "accountId", "username", "请选择账号");
-    fillOptionSelect(adminElements.profileClassSelect, adminState.userClasses, "classId", "className", "不关联班级");
-    if (adminElements.accountRoleSelect) {
-        const selected = new Set(Array.from(adminElements.accountRoleSelect.selectedOptions || []).map(option => option.value));
-        adminElements.accountRoleSelect.innerHTML = "";
-        adminState.userRoles.forEach(role => {
-            const option = document.createElement("option");
-            option.value = role.roleId;
-            option.textContent = `${role.roleName} (${role.roleCode})`;
-            option.selected = selected.has(String(role.roleId));
-            adminElements.accountRoleSelect.appendChild(option);
-        });
+    renderChecklist(adminElements.accountRoleSelect, adminState.userRoles, "roleId", item => `${item.roleName} (${item.roleCode})`);
+    renderChecklist(adminElements.profileClassSelect, adminState.userClasses, "classId", item => `${item.className}${item.gradeName ? ` · ${item.gradeName}` : ""}`);
+    renderChecklist(adminElements.rolePermissionSelect, adminState.userPermissions, "permissionId", item => `${item.permissionName} (${item.permissionCode})`, { tall: true });
+}
+
+function renderChecklist(container, records, valueKey, labelFactory, options = {}) {
+    if (!container) return;
+    const selected = new Set(getChecklistSelectedValues(container));
+    container.innerHTML = "";
+    container.classList.toggle("checklist-box--tall", Boolean(options.tall));
+    if (!records.length) {
+        container.innerHTML = `<div class="checklist-empty">暂无可选项</div>`;
+        return;
     }
-    if (adminElements.rolePermissionSelect) {
-        const selected = new Set(Array.from(adminElements.rolePermissionSelect.selectedOptions || []).map(option => option.value));
-        adminElements.rolePermissionSelect.innerHTML = "";
-        adminState.userPermissions.forEach(permission => {
-            const option = document.createElement("option");
-            option.value = permission.permissionId;
-            option.textContent = `${permission.permissionName} (${permission.permissionCode})`;
-            option.selected = selected.has(String(permission.permissionId));
-            adminElements.rolePermissionSelect.appendChild(option);
-        });
-    }
+    records.forEach(record => {
+        const value = String(record[valueKey]);
+        const id = `${container.id}-${value}`;
+        const label = typeof labelFactory === "function" ? labelFactory(record) : String(record[labelFactory] || value);
+        const item = document.createElement("label");
+        item.className = "checklist-item";
+        item.htmlFor = id;
+        item.innerHTML = `
+            <input type="checkbox" id="${escapeHtml(id)}" value="${escapeHtml(value)}"${selected.has(value) ? " checked" : ""}>
+            <span>${escapeHtml(label)}</span>
+        `;
+        container.appendChild(item);
+    });
+}
+
+function getChecklistSelectedValues(container) {
+    if (!container) return [];
+    return Array.from(container.querySelectorAll('input[type="checkbox"]:checked')).map(input => input.value);
 }
 
 function renderAccountTable() {
@@ -2144,7 +2806,7 @@ function renderRoleTable() {
 
 async function submitUserAccountForm() {
     const accountId = parseNullableNumber(adminElements.accountIdInput.value);
-    const roleIds = Array.from(adminElements.accountRoleSelect.selectedOptions || []).map(option => Number(option.value)).filter(Boolean);
+    const roleIds = getChecklistSelectedValues(adminElements.accountRoleSelect).map(Number).filter(Boolean);
     const body = {
         username: adminElements.accountUsernameInput.value.trim(),
         password: adminElements.accountPasswordInput.value,
@@ -2182,9 +2844,9 @@ function fillUserAccountForm(account) {
     adminElements.accountEmailInput.value = account.email || "";
     adminElements.accountSchoolSelect.value = account.schoolId || "";
     const selectedRoleCodes = new Set(account.roleCodes || []);
-    Array.from(adminElements.accountRoleSelect.options).forEach(option => {
-        const role = adminState.userRoles.find(item => String(item.roleId) === option.value);
-        option.selected = role && selectedRoleCodes.has(role.roleCode);
+    adminElements.accountRoleSelect.querySelectorAll('input[type="checkbox"]').forEach(input => {
+        const role = adminState.userRoles.find(item => String(item.roleId) === input.value);
+        input.checked = Boolean(role && selectedRoleCodes.has(role.roleCode));
     });
 }
 
@@ -2230,7 +2892,7 @@ async function submitUserProfileForm() {
         title: optionalText(adminElements.profileTitleInput.value),
         studentNo: optionalText(adminElements.profileStudentNoInput.value),
         gradeName: optionalText(adminElements.profileGradeInput.value),
-        classIds: Array.from(adminElements.profileClassSelect.selectedOptions || []).map(option => Number(option.value)).filter(Boolean)
+        classIds: getChecklistSelectedValues(adminElements.profileClassSelect).map(Number).filter(Boolean)
     };
     if (profileId) {
         await requestJson(`/api/admin/user-profiles/${profileId}`, { method: "PUT", body });
@@ -2255,8 +2917,8 @@ function fillUserProfileForm(profile) {
     adminElements.profileStudentNoInput.value = profile.studentNo || "";
     adminElements.profileGradeInput.value = profile.gradeName || "";
     const classIds = new Set((profile.classIds || []).map(String));
-    Array.from(adminElements.profileClassSelect.options).forEach(option => {
-        option.selected = classIds.has(option.value);
+    adminElements.profileClassSelect.querySelectorAll('input[type="checkbox"]').forEach(input => {
+        input.checked = classIds.has(input.value);
     });
 }
 
@@ -2287,8 +2949,7 @@ async function importStudentsFromText() {
 
 async function submitRoleForm() {
     const roleId = parseNullableNumber(adminElements.roleIdInput.value);
-    const permissionIds = Array.from(adminElements.rolePermissionSelect.selectedOptions || [])
-            .map(option => Number(option.value)).filter(Boolean);
+    const permissionIds = getChecklistSelectedValues(adminElements.rolePermissionSelect).map(Number).filter(Boolean);
     const body = {
         roleCode: adminElements.roleCodeInput.value.trim(),
         roleName: adminElements.roleNameInput.value.trim(),
@@ -2317,8 +2978,8 @@ function fillRoleForm(role) {
     adminElements.roleNameInput.value = role.roleName || "";
     adminElements.roleScopeInput.value = role.roleScope || "school";
     const permissionIds = new Set((role.permissionIds || []).map(String));
-    Array.from(adminElements.rolePermissionSelect.options || []).forEach(option => {
-        option.selected = permissionIds.has(option.value);
+    adminElements.rolePermissionSelect.querySelectorAll('input[type="checkbox"]').forEach(input => {
+        input.checked = permissionIds.has(input.value);
     });
 }
 
