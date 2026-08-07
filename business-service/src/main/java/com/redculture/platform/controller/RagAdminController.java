@@ -25,12 +25,18 @@ import java.util.Set;
 
 @RestController
 @RequestMapping("/api/admin/rag")
+//RAG 知识库后台管理：查看索引状态、重建索引、测试检索结果。
 public class RagAdminController {
 
+    //重建、同步 RAG 向量索引。
     private final RagIndexService ragIndexService;
+    //读取 RAG 配置，如嵌入模型、向量维度、Qdrant 地址、集合名、索引版本。
     private final RagProperties ragProperties;
+    //查询 MySQL 中知识文档切分后的文本块状态。
     private final ContentChunkMapper contentChunkMapper;
+    //与 Qdrant 向量数据库交互。
     private final ChunkVectorStore vectorStore;
+    //按问题和数据范围执行实际检索。
     private final KnowledgeRetriever knowledgeRetriever;
 
     public RagAdminController(RagIndexService ragIndexService,
@@ -45,6 +51,7 @@ public class RagAdminController {
         this.knowledgeRetriever = knowledgeRetriever;
     }
 
+    //查看 RAG 配置、文本块处理状态和 Qdrant 向量库健康状态。
     @GetMapping("/status")
     public ApiResponse<Map<String, Object>> status() {
         Map<String, Object> status = new LinkedHashMap<>();
@@ -61,6 +68,7 @@ public class RagAdminController {
         return ApiResponse.success(status);
     }
 
+    //重建全部 RAG 向量索引。
     @PostMapping("/reindex")
     public ApiResponse<RagIndexReport> reindex() {
         try {
@@ -70,6 +78,7 @@ public class RagAdminController {
         }
     }
 
+    //输入一个问题和检索范围，直接测试知识库召回了哪些资料。
     @PostMapping("/retrieve-test")
     public ApiResponse<KnowledgeRetrieveResult> retrieveTest(@RequestBody KnowledgeRetrieveRequest request) {
         if (request == null || !StringUtils.hasText(request.getQuery())) {
@@ -89,6 +98,16 @@ public class RagAdminController {
         }
     }
 
+    //用于统计 MySQL 中全部知识文本块的索引状态。
+    /*
+    {
+  "total": 1000,
+  "done": 950,
+  "pending": 30,
+  "failed": 20,
+  "indexedForCurrentConfig": 930
+}
+     */
     private Map<String, Object> chunkStatus() {
         Map<String, Object> status = new LinkedHashMap<>();
         status.put("total", contentChunkMapper.selectCount(null));
@@ -103,11 +122,13 @@ public class RagAdminController {
         return status;
     }
 
+    //是一个复用的统计方法，避免重复写三次相似查询
     private Long countByEmbeddingStatus(EmbeddingStatus status) {
         return contentChunkMapper.selectCount(new LambdaQueryWrapper<ContentChunk>()
                 .eq(ContentChunk::getEmbeddingStatus, status));
     }
 
+    //用于检查 Qdrant 向量数据库是否可用，并统计当前集合中的向量数量。
     private Map<String, Object> qdrantStatus() {
         Map<String, Object> status = new LinkedHashMap<>();
         status.put("reachable", false);

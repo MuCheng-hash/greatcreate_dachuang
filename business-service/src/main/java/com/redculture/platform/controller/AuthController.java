@@ -23,6 +23,9 @@ import org.springframework.web.bind.annotation.RestController;
 
 @RestController
 @RequestMapping("/api/auth")
+/*
+身份认证：学校注册申请、登录、获取当前用户、刷新登录状态、更新个人资料、改密码、退出登录
+ */
 public class AuthController {
 
     private final AuthService authService;
@@ -37,11 +40,13 @@ public class AuthController {
         this.cookieManager = cookieManager;
     }
 
+    //提交学生注册申请。通常包含学校信息及管理员账号信息，等待平台管理员审核。
     @PostMapping("/school-register")
     public ApiResponse<SchoolRegistrationSubmitVO> schoolRegister(@RequestBody SchoolRegisterRequest request) {
         return ApiResponse.success("registration submitted", authService.registerSchool(request));
     }
 
+    //使用账号密码登录，签发令牌并写入浏览器 Cookie。
     @PostMapping("/login")
     public ApiResponse<AuthCurrentUserVO> login(@RequestBody AuthLoginRequest request,
                                                HttpServletRequest servletRequest,
@@ -51,6 +56,7 @@ public class AuthController {
         return ApiResponse.success("login success", user);
     }
 
+    //获取当前已登录用户的身份信息
     @GetMapping("/me")
     public ApiResponse<AuthCurrentUserVO> currentUser(HttpServletRequest request,
                                                       HttpServletResponse response) {
@@ -62,6 +68,7 @@ public class AuthController {
         return ApiResponse.success(user);
     }
 
+    //使用刷新令牌换取新的登录令牌，延长登录状态。
     @PostMapping("/refresh")
     public ApiResponse<AuthCurrentUserVO> refresh(HttpServletRequest request,
                                                   HttpServletResponse response) {
@@ -77,6 +84,7 @@ public class AuthController {
         }
     }
 
+    //修改当前登录用户的个人资料。
     @PutMapping("/profile")
     public ApiResponse<AuthCurrentUserVO> updateProfile(@RequestBody AuthProfileUpdateRequest request,
                                                         HttpServletRequest servletRequest) {
@@ -88,6 +96,7 @@ public class AuthController {
         }
     }
 
+    //修改当前登录用户的密码。
     @PutMapping("/password")
     public ApiResponse<Boolean> changePassword(@RequestBody AuthPasswordChangeRequest request,
                                                HttpServletRequest servletRequest) {
@@ -99,6 +108,7 @@ public class AuthController {
         }
     }
 
+    //退出登录，注销刷新令牌并清理浏览器 Cookie。
     @PostMapping("/logout")
     public ApiResponse<Boolean> logout(HttpServletRequest request, HttpServletResponse response) {
         authTokenService.logout(cookieManager.read(request, cookieManager.refreshCookieName()));

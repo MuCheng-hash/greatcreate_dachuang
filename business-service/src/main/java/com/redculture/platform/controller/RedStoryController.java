@@ -16,6 +16,7 @@ import java.util.List;
 
 @RestController
 @RequestMapping("/api/stories")
+//红色故事资料查询，可按关联地区筛选。
 public class RedStoryController {
 
     private final RedStoryService redStoryService;
@@ -24,11 +25,13 @@ public class RedStoryController {
         this.redStoryService = redStoryService;
     }
 
+    //按照id查询
     @GetMapping("/{id}")
     public ApiResponse<RedStory> getById(@PathVariable Long id) {
         return ApiResponse.success(redStoryService.getById(id));
     }
 
+    //返回查询列表
     @GetMapping
     public ApiResponse<List<RedStory>> list(@RequestParam(required = false) Long relatedRegionId,
                                             @RequestParam(required = false) String storyTitle,

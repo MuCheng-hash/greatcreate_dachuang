@@ -92,3 +92,9 @@ app:
     minimum-vector-score: ${RAG_MINIMUM_VECTOR_SCORE:0.2}
     connect-timeout-ms: ${RAG_CONNECT_TIMEOUT_MS:3000}
     read-timeout-ms: ${RAG_READ_TIMEOUT_MS:15000}
+  knowledge-storage:
+    endpoint: ${MINIO_ENDPOINT:http://127.0.0.1:9000}
+    access-key: ${MINIO_ACCESS_KEY:minioadmin}
+    secret-key: ${MINIO_SECRET_KEY:minioadmin}
+    bucket: ${MINIO_KNOWLEDGE_BUCKET:knowledge}
+    max-file-size-bytes: ${KNOWLEDGE_MAX_FILE_SIZE_BYTES:52428800}

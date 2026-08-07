@@ -19,6 +19,7 @@ import org.springframework.web.bind.annotation.RestController;
 
 @RestController
 @RequestMapping("/api/admin/resources")
+//管理员维护思政教育资源：新增、编辑、详情、分页检索、提交审核、通过和驳回。
 public class ResourceAdminController {
 
     private final LocalEduResourceService localEduResourceService;
@@ -27,6 +28,7 @@ public class ResourceAdminController {
         this.localEduResourceService = localEduResourceService;
     }
 
+    //新增一条教育资源。
     @PostMapping
     public ApiResponse<ResourceAdminVO> create(@RequestBody ResourceCreateRequest request) {
         try {
@@ -36,6 +38,7 @@ public class ResourceAdminController {
         }
     }
 
+    //修改指定资源。
     @PutMapping("/{resourceId}")
     public ApiResponse<ResourceAdminVO> update(@PathVariable Long resourceId,
                                                @RequestBody ResourceUpdateRequest request) {
@@ -46,6 +49,7 @@ public class ResourceAdminController {
         }
     }
 
+    //查询指定资源的后台详情。
     @GetMapping("/{resourceId}")
     public ApiResponse<ResourceAdminVO> detail(@PathVariable Long resourceId) {
         ResourceAdminVO data = localEduResourceService.getResourceAdminDetail(resourceId);
@@ -55,6 +59,7 @@ public class ResourceAdminController {
         return ApiResponse.success(data);
     }
 
+    //按条件分页查询资源列表。
     @GetMapping
     public ApiResponse<PageResult<ResourceAdminVO>> page(@RequestParam(required = false) String keyword,
                                                          @RequestParam(required = false) String resourceCategory,
@@ -68,6 +73,7 @@ public class ResourceAdminController {
         ));
     }
 
+    //将资源提交审核。
     @PostMapping("/{resourceId}/submit-review")
     public ApiResponse<ResourceAdminVO> submitReview(@PathVariable Long resourceId) {
         try {
@@ -77,6 +83,7 @@ public class ResourceAdminController {
         }
     }
 
+    //审核通过资源。
     @PostMapping("/{resourceId}/approve")
     public ApiResponse<ResourceAdminVO> approve(@PathVariable Long resourceId,
                                                 @RequestBody(required = false) ResourceReviewRequest request) {
@@ -87,6 +94,7 @@ public class ResourceAdminController {
         }
     }
 
+    //驳回资源。
     @PostMapping("/{resourceId}/reject")
     public ApiResponse<ResourceAdminVO> reject(@PathVariable Long resourceId,
                                                @RequestBody(required = false) ResourceReviewRequest request) {

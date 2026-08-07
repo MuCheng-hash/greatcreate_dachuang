@@ -18,6 +18,7 @@ import org.springframework.web.bind.annotation.RestController;
 
 @RestController
 @RequestMapping("/api/admin/schools")
+//管理员维护学校：新增、编辑、删除、详情和分页查询。
 public class SchoolAdminController {
 
     private final SchoolService schoolService;
@@ -26,6 +27,7 @@ public class SchoolAdminController {
         this.schoolService = schoolService;
     }
 
+    //新建学校档案。
     @PostMapping
     public ApiResponse<SchoolAdminVO> create(@RequestBody SchoolCreateRequest request) {
         try {
@@ -35,6 +37,7 @@ public class SchoolAdminController {
         }
     }
 
+    //修改某所学校。
     @PutMapping("/{schoolId}")
     public ApiResponse<SchoolAdminVO> update(@PathVariable Long schoolId,
                                              @RequestBody SchoolUpdateRequest request) {
@@ -45,6 +48,7 @@ public class SchoolAdminController {
         }
     }
 
+    //删除某所学校。
     @DeleteMapping("/{schoolId}")
     public ApiResponse<Void> delete(@PathVariable Long schoolId) {
         try {
@@ -55,6 +59,7 @@ public class SchoolAdminController {
         }
     }
 
+    //查询某所学校的后台详情。
     @GetMapping("/{schoolId}")
     public ApiResponse<SchoolAdminVO> detail(@PathVariable Long schoolId) {
         SchoolAdminVO data = schoolService.getSchoolAdminDetail(schoolId);
@@ -64,6 +69,7 @@ public class SchoolAdminController {
         return ApiResponse.success(data);
     }
 
+    //分页查询学校列表，并支持按地区和关键字筛选。
     @GetMapping
     public ApiResponse<PageResult<SchoolAdminVO>> page(@RequestParam(required = false) String keyword,
                                                        @RequestParam(required = false) Long provinceRegionId,

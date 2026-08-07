@@ -21,8 +21,13 @@ import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 @RestController
 @RequestMapping("/api/ai/teaching-plans")
+//AI 教学活动方案：生成教案、流式生成、保存草稿、查看本人已生成的方案。
 public class AiTeachingPlanController {
 
+    /*
+    AiTeachingPlanService负责调用 AI Agent 生成方案、流式转发生成过程、保存 AI 生成的草稿。
+    TeachingActivityPlanService负责从业务数据库查询已经保存的教学活动方案。
+     */
     private final AiTeachingPlanService aiTeachingPlanService;
     private final TeachingActivityPlanService teachingActivityPlanService;
 
@@ -32,6 +37,7 @@ public class AiTeachingPlanController {
         this.teachingActivityPlanService = teachingActivityPlanService;
     }
 
+    //同步生成教学方案。等待 AI 完整生成后，一次性返回结果。
     @PostMapping("/generate")
     public ApiResponse<GeneratedTeachingPlanResponse> generate(@RequestBody TeachingPlanGenerateRequest request,
                                                                HttpServletRequest servletRequest) {
@@ -45,6 +51,7 @@ public class AiTeachingPlanController {
         }
     }
 
+    //流式生成教学方案。AI 生成一段就推送一段，适用于前端实时展示。
     @PostMapping(value = "/generate/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public SseEmitter generateStream(@RequestBody TeachingPlanGenerateRequest request,
                                      HttpServletRequest servletRequest) {
@@ -54,6 +61,7 @@ public class AiTeachingPlanController {
                 request, user.getAccountId(), request == null ? null : request.getThreadId());
     }
 
+    //将 AI 生成的方案保存为草稿，后续可在后台继续编辑或管理。
     @PostMapping("/save-draft")
     public ApiResponse<TeachingActivityPlanAdminVO> saveDraft(@RequestBody GeneratedTeachingPlanSaveRequest request,
                                                               HttpServletRequest servletRequest) {
@@ -65,6 +73,7 @@ public class AiTeachingPlanController {
         }
     }
 
+    //查询当前登录用户所在学校的教学活动方案，最多返回前 50 条。
     @GetMapping("/mine")
     public ApiResponse<PageResult<TeachingActivityPlanAdminVO>> mine(HttpServletRequest servletRequest) {
         AuthCurrentUserVO user = AuthContext.currentUser(servletRequest);
@@ -74,6 +83,14 @@ public class AiTeachingPlanController {
         return ApiResponse.success(teachingActivityPlanService.listBySchoolId(user.getSchoolId(), 1L, 50L));
     }
 
+    //核心权限校验方法
+    /*
+    情况	结果
+未登录，或请求没有学校 ID	抛出 school account is required。
+当前用户是 platform_admin	可操作任意学校的数据。
+当前用户不是平台管理员，但请求的 schoolId 等于自己的学校 ID	允许。
+当前用户不是平台管理员，且请求的是其他学校 ID	拒绝，提示 cannot access another school。
+     */
     private void requireSchoolAccess(Long schoolId, AuthCurrentUserVO user) {
         if (user == null || schoolId == null) {
             throw new IllegalArgumentException("school account is required");

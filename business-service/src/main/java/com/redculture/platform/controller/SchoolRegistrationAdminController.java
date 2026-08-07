@@ -17,6 +17,7 @@ import org.springframework.web.bind.annotation.RestController;
 
 @RestController
 @RequestMapping("/api/admin/registrations")
+//管理员审核学校注册申请：查询申请、查看详情、通过或拒绝。
 public class SchoolRegistrationAdminController {
 
     private final SchoolRegistrationService schoolRegistrationService;
@@ -25,6 +26,7 @@ public class SchoolRegistrationAdminController {
         this.schoolRegistrationService = schoolRegistrationService;
     }
 
+    //分页查询学校注册申请。
     @GetMapping
     public ApiResponse<PageResult<SchoolRegistrationAdminVO>> page(@RequestParam(required = false) String keyword,
                                                                    @RequestParam(required = false) RegistrationReviewStatus reviewStatus,
@@ -33,6 +35,7 @@ public class SchoolRegistrationAdminController {
         return ApiResponse.success(schoolRegistrationService.pageRegistrations(keyword, reviewStatus, pageNum, pageSize));
     }
 
+    //查看某条注册申请的完整详情。
     @GetMapping("/{registrationId}")
     public ApiResponse<SchoolRegistrationAdminVO> detail(@PathVariable Long registrationId) {
         SchoolRegistrationAdminVO data = schoolRegistrationService.getRegistrationDetail(registrationId);
@@ -42,12 +45,14 @@ public class SchoolRegistrationAdminController {
         return ApiResponse.success(data);
     }
 
+    //审核通过一条注册申请。
     @PostMapping("/{registrationId}/approve")
     public ApiResponse<SchoolRegistrationAdminVO> approve(@PathVariable Long registrationId,
                                                           @RequestBody(required = false) RegistrationReviewRequest request) {
         return ApiResponse.success("registration approved", schoolRegistrationService.approveRegistration(registrationId, request));
     }
 
+    //驳回一条注册申请。
     @PostMapping("/{registrationId}/reject")
     public ApiResponse<SchoolRegistrationAdminVO> reject(@PathVariable Long registrationId,
                                                          @RequestBody(required = false) RegistrationReviewRequest request) {

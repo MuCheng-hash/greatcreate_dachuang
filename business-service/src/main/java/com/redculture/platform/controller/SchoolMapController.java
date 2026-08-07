@@ -20,6 +20,7 @@ import java.util.List;
 
 @RestController
 @RequestMapping("/api/school-map")
+//面向学校地图的接口：学校列表、附近学校、学校详情，以及该学校已审核通过的关联资源。
 public class SchoolMapController {
 
     private final SchoolMapService schoolMapService;
@@ -34,6 +35,7 @@ public class SchoolMapController {
         this.schoolAccessService = schoolAccessService;
     }
 
+    //学校列表
     @GetMapping("/schools")
     public ApiResponse<List<SchoolSummaryVO>> listSchools(@RequestParam(required = false) Long countyRegionId,
                                                            @RequestParam(required = false) Long townshipRegionId,
@@ -42,6 +44,7 @@ public class SchoolMapController {
         return ApiResponse.success(schoolMapService.listSchools(countyRegionId, townshipRegionId, keyword, limit));
     }
 
+    //附近学校
     @GetMapping("/schools/nearby")
     public ApiResponse<List<SchoolSummaryVO>> nearbySchools(@RequestParam BigDecimal longitude,
                                                             @RequestParam BigDecimal latitude,
@@ -50,6 +53,7 @@ public class SchoolMapController {
         return ApiResponse.success(schoolMapService.findNearbySchools(longitude, latitude, radiusKm, limit));
     }
 
+    //学校详情
     @GetMapping("/schools/{schoolId}/detail")
     public ApiResponse<SchoolMapDetailVO> schoolDetail(@PathVariable Long schoolId, HttpServletRequest request) {
         try {
@@ -64,6 +68,7 @@ public class SchoolMapController {
         }
     }
 
+    //该学校已审核通过的关联资源。
     @GetMapping("/schools/{schoolId}/resources/{resourceId}")
     public ApiResponse<ApprovedResourceDetailVO> approvedResource(@PathVariable Long schoolId,
                                                                    @PathVariable Long resourceId,
