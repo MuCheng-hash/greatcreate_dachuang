@@ -20,6 +20,16 @@ public class CatalogEntityVO {
     private String summary;
     private String detail;
     private String targetGrade;
+    private String resourceCategory;
+    private String resourceSubcategory;
+    private String organizationName;
+    private String contactPhone;
+    private String openingTimeDesc;
+    private Boolean reservationRequired;
+    private Integer recommendedVisitMinutes;
+    private String activitySuggestion;
+    private String safetyNote;
+    private String coverUrl;
     private String reviewStatus;
     private Boolean active;
     private LocalDateTime createdAt;

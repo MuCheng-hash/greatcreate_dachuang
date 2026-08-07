@@ -75,13 +75,28 @@ public class CatalogProjectionService {
             String relationship = relationship(relation.getRelationType());
             neo4jClient.query("MATCH (source:" + sourceLabel + " {id:$sourceId, published:true}), "
                             + "(target:" + targetLabel + " {id:$targetId, published:true}) "
-                            + "MERGE (source)-[edge:" + relationship + "]->(target) SET edge.published=true")
-                    .bind(relation.getSourceId()).to("sourceId").bind(relation.getTargetId()).to("targetId").run();
+                            + "MERGE (source)-[edge:" + relationship + " {catalogRelationKind:$kind, catalogRelationId:$relationId}]->(target) "
+                            + "SET edge.published=true")
+                    .bind(relation.getSourceId()).to("sourceId").bind(relation.getTargetId()).to("targetId")
+                    .bind(relation.getRelationKind()).to("kind").bind(relation.getRelationId()).to("relationId").run();
             complete(task, "SUCCESS", null);
         } catch (RuntimeException exception) {
             complete(task, "FAILED", exception.getMessage());
         }
         return taskMapper.selectById(task.getTaskId());
+    }
+
+    public void removeRelation(CatalogRelationVO relation) {
+        if (relation == null || relation.getRelationId() == null) {
+            throw new IllegalArgumentException("catalog relation not found");
+        }
+        String sourceLabel = label(entityType(relation.getSourceType()));
+        String targetLabel = label(entityType(relation.getTargetType()));
+        String relationship = relationship(relation.getRelationType());
+        neo4jClient.query("MATCH (source:" + sourceLabel + " {id:$sourceId})-[edge:" + relationship
+                        + " {catalogRelationKind:$kind, catalogRelationId:$relationId}]->(target:" + targetLabel + " {id:$targetId}) DELETE edge")
+                .bind(relation.getSourceId()).to("sourceId").bind(relation.getTargetId()).to("targetId")
+                .bind(relation.getRelationKind()).to("kind").bind(relation.getRelationId()).to("relationId").run();
     }
 
     public CatalogProjectionTask retry(Long taskId) {

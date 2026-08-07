@@ -4,6 +4,7 @@ import lombok.Data;
 
 @Data
 public class CatalogMediaRequest {
+    private Long mediaId;
     private String mediaUrl;
     private String coverUrl;
     private String mediaTitle;
