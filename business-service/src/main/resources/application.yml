@@ -46,6 +46,8 @@ app:
     username: ${APP_ADMIN_USERNAME:admin}
     password: ${APP_ADMIN_PASSWORD:admin123456}
     display-name: ${APP_ADMIN_DISPLAY_NAME:平台管理员}
+  admin-media:
+    storage-dir: ${APP_ADMIN_MEDIA_STORAGE_DIR:${user.dir}/data/resource-media}
   map:
     default-town-region-id: 4
     generated-boundary-radius-km: 1.2
