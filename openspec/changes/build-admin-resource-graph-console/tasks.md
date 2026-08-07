@@ -28,3 +28,12 @@
 
 - [x] 6.1 Count successful formal-account chat turns from Agent conversation records
 - [x] 6.2 Verify the optional Agent metric contract and dashboard rendering
+
+## 7. Unified Resource Catalog Completion
+
+- [x] 7.1 Consolidate the legacy resource page and graph catalog into one resource-directory workflow
+- [x] 7.2 Add resource-specific catalog fields, server-local image upload, and media lifecycle APIs
+- [x] 7.3 Add filtered catalog paging and relation listing/deletion with server-owned relation options
+- [x] 7.4 Complete source, media, and related-story editing in the static admin console
+- [x] 7.5 Add focused regression tests and browser acceptance for the unified resource workflow
+- [x] 7.6 Allow images to be selected during entity creation and automatically upload them after the draft is saved

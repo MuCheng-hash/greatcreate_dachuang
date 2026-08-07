@@ -48,3 +48,9 @@ venv/
 hs_err_pid*
 llm-service/data/*.sqlite3*
 llm-service/*.sqlite3*
+
+# Local generated verification artifacts
+.npm-cache-codex/
+.playwright-cli/
+output/playwright/
+tmp/
