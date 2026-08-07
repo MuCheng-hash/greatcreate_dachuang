@@ -5,60 +5,72 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>后台管理台 | 乡村学校思政资源地图</title>
     <meta name="description" content="乡村学校周边思政教育资源数字地图平台后台管理台。">
-    <link rel="stylesheet" href="/admin.css?v=20260805-map">
+    <link rel="stylesheet" href="/admin.css?v=20260807-ui">
 </head>
 <body>
 <div class="admin-shell">
-    <header class="admin-header">
-        <div class="brand-cluster">
-            <span class="brand-mark">HB</span>
+        <aside class="admin-sidebar">
+        <div class="side-brand">
+            <span class="brand-mark">乡</span>
             <div class="brand-copy">
+                <p class="eyebrow">Rural Civic Atlas</p>
+                <h1>思政资源工作台</h1>
+                <p>乡村学校管理员端</p>
+            </div>
+        </div>
+
+        <nav class="tab-strip" aria-label="后台模块">
+            <button class="tab-chip" data-tab="registrations" type="button">注册审核</button>
+            <button class="tab-chip is-active" data-tab="schools" type="button">学校管理</button>
+            <button class="tab-chip" data-tab="resources" type="button">资源管理</button>
+            <button class="tab-chip" data-tab="school-map" type="button">学校地图</button>
+            <button class="tab-chip" data-tab="plans" type="button">活动方案</button>
+            <button class="tab-chip" data-tab="agent-ops" type="button">Agent 运维</button>
+        </nav>
+
+        <div class="admin-sidebar-foot">
+            <a class="side-link" href="/map">返回地图首页</a>
+            <button class="side-link" id="logoutButton" type="button">退出登录</button>
+        </div>
+    </aside>
+
+    <div class="admin-main">
+        <header class="admin-topbar">
+            <div class="topbar-title">
                 <p class="eyebrow">Rural Civic Atlas</p>
                 <h1>乡村学校思政资源后台管理台</h1>
                 <p>围绕学校、资源、周边关联和活动方案，完成平台核心数据建设。</p>
             </div>
-        </div>
+            <div class="header-actions">
+                <button class="accent-button" id="refreshDashboardButton" type="button">刷新全局数据</button>
+            </div>
+        </header>
 
-        <div class="header-actions">
-            <a class="ghost-link" href="/map">返回地图首页</a>
-            <button class="ghost-button" id="logoutButton" type="button">退出登录</button>
-            <button class="accent-button" id="refreshDashboardButton" type="button">刷新全局数据</button>
-        </div>
-    </header>
+        <div class="admin-content">
+            <section class="overview-strip">
+                <article class="metric-card">
+                    <span>学校总数</span>
+                    <strong id="schoolTotalMetric">0</strong>
+                    <small>后台可维护学校主数据</small>
+                </article>
+                <article class="metric-card">
+                    <span>资源总数</span>
+                    <strong id="resourceTotalMetric">0</strong>
+                    <small>周边思政教育资源池</small>
+                </article>
+                <article class="metric-card">
+                    <span>活动方案</span>
+                    <strong id="planTotalMetric">0</strong>
+                    <small>课堂与实践落地内容</small>
+                </article>
+                <article class="metric-card metric-card--status">
+                    <span>系统状态</span>
+                    <strong id="globalStatusText">待命</strong>
+                    <small id="globalStatusHint">准备连接后台接口。</small>
+                </article>
+            </section>
 
-    <section class="overview-strip">
-        <article class="metric-card">
-            <span>学校总数</span>
-            <strong id="schoolTotalMetric">0</strong>
-            <small>后台可维护学校主数据</small>
-        </article>
-        <article class="metric-card">
-            <span>资源总数</span>
-            <strong id="resourceTotalMetric">0</strong>
-            <small>周边思政教育资源池</small>
-        </article>
-        <article class="metric-card">
-            <span>活动方案</span>
-            <strong id="planTotalMetric">0</strong>
-            <small>课堂与实践落地内容</small>
-        </article>
-        <article class="metric-card metric-card--status">
-            <span>系统状态</span>
-            <strong id="globalStatusText">待命</strong>
-            <small id="globalStatusHint">准备连接后台接口。</small>
-        </article>
-    </section>
-
-    <section class="tab-strip" aria-label="后台模块">
-        <button class="tab-chip" data-tab="registrations" type="button">注册审核</button>
-        <button class="tab-chip is-active" data-tab="schools" type="button">学校管理</button>
-        <button class="tab-chip" data-tab="resources" type="button">资源管理</button>
-        <button class="tab-chip" data-tab="school-map" type="button">学校地图</button>
-        <button class="tab-chip" data-tab="plans" type="button">活动方案</button>
-        <button class="tab-chip" data-tab="agent-ops" type="button">Agent 运维</button>
-    </section>
-
-    <main class="workspace-stack">
+            <main class="workspace-stack">
         <section class="workspace-panel" data-panel="registrations">
             <div class="panel-heading">
                 <div>
@@ -792,9 +804,11 @@
                 <div id="agentTimelineList" class="agent-timeline-shell" aria-live="polite"></div>
             </article>
         </section>
-    </main>
+            </main>
+        </div>
+    </div>
 </div>
 
-<script src="/admin.js?v=20260805-map"></script>
+<script src="/admin.js?v=20260807-ui"></script>
 </body>
 </html>
