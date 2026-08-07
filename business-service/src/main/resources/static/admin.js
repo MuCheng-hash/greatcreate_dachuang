@@ -1,5 +1,5 @@
 const adminState = {
-    activeTab: "schools",
+    activeTab: "dashboard",
     registrations: [],
     schools: [],
     resources: [],
@@ -54,6 +54,28 @@ const adminElements = {
     resourceTotalMetric: document.querySelector("#resourceTotalMetric"),
     planTotalMetric: document.querySelector("#planTotalMetric"),
     refreshDashboardButton: document.querySelector("#refreshDashboardButton"),
+    dashboardRefreshButton: document.querySelector("#dashboardRefreshButton"),
+    dashboardProjectionButton: document.querySelector("#dashboardProjectionButton"),
+    dashboardUpdatedAt: document.querySelector("#dashboardUpdatedAt"),
+    dashboardResourceMetric: document.querySelector("#dashboardResourceMetric"),
+    dashboardSchoolMetric: document.querySelector("#dashboardSchoolMetric"),
+    dashboardTeacherMetric: document.querySelector("#dashboardTeacherMetric"),
+    dashboardStudentMetric: document.querySelector("#dashboardStudentMetric"),
+    dashboardPlanMetric: document.querySelector("#dashboardPlanMetric"),
+    dashboardQuestionMetric: document.querySelector("#dashboardQuestionMetric"),
+    dashboardQuestionHint: document.querySelector("#dashboardQuestionHint"),
+    dashboardRagStatus: document.querySelector("#dashboardRagStatus"),
+    dashboardRagDone: document.querySelector("#dashboardRagDone"),
+    dashboardRagPending: document.querySelector("#dashboardRagPending"),
+    dashboardRagFailed: document.querySelector("#dashboardRagFailed"),
+    dashboardRagHint: document.querySelector("#dashboardRagHint"),
+    dashboardQdrantStatus: document.querySelector("#dashboardQdrantStatus"),
+    dashboardQdrantCollection: document.querySelector("#dashboardQdrantCollection"),
+    dashboardQdrantAlias: document.querySelector("#dashboardQdrantAlias"),
+    dashboardQdrantPoints: document.querySelector("#dashboardQdrantPoints"),
+    dashboardProjectionPending: document.querySelector("#dashboardProjectionPending"),
+    dashboardProjectionFailed: document.querySelector("#dashboardProjectionFailed"),
+    dashboardProjectionTotal: document.querySelector("#dashboardProjectionTotal"),
     logoutButton: document.querySelector("#logoutButton"),
     tabButtons: Array.from(document.querySelectorAll(".tab-strip .tab-chip[data-tab]")),
     panels: Array.from(document.querySelectorAll(".workspace-panel")),
@@ -734,10 +756,16 @@ function bindAdminEvents() {
     initializeAgentDebugPanel();
     initializeRagKnowledgePanel();
 
-    adminElements.refreshDashboardButton?.addEventListener("click", () => {
-        void bootstrapAdmin();
-    });
-    adminElements.logoutButton?.addEventListener("click", () => void logoutAdmin());
+      adminElements.refreshDashboardButton?.addEventListener("click", () => {
+          void bootstrapAdmin();
+      });
+      adminElements.dashboardRefreshButton?.addEventListener("click", () => void loadDashboardOverview());
+      adminElements.dashboardProjectionButton?.addEventListener("click", () => {
+          setActiveTab("catalog");
+          void loadCatalog();
+          document.querySelector("#catalogLoadTasks")?.click();
+      });
+      adminElements.logoutButton?.addEventListener("click", () => void logoutAdmin());
 
     adminElements.tabButtons.forEach(button => {
         button.addEventListener("click", () => {
@@ -848,15 +876,18 @@ async function bootstrapAdmin() {
             loadSchoolProvinceOptions(),
             loadRegistrations(),
             loadSchools(),
-            loadResources(),
-            loadPlans()
-        ]);
-        syncSelectOptions();
+              loadResources(),
+              loadPlans()
+          ]);
+          const dashboardAvailable = await loadDashboardOverview();
+          syncSelectOptions();
         if (adminState.activeTab === "school-map") {
             await loadSchoolMapDetail(adminState.selectedSchoolIdForMap, { renderMap: true });
         }
         await loadUserManagementData();
-        setGlobalStatus("在线", "后台接口联通正常，可以开始录入和维护数据。");
+          setGlobalStatus(dashboardAvailable ? "在线" : "部分可用", dashboardAvailable
+              ? "后台接口联通正常，可以开始录入和维护数据。"
+              : "核心数据已加载，驾驶舱部分状态暂不可用。");
     } catch (error) {
         setGlobalStatus("异常", error.message || "后台接口请求失败。");
     }
@@ -3663,3 +3694,92 @@ function escapeHtml(value) {
         .replaceAll('"', "&quot;")
         .replaceAll("'", "&#39;");
 }
+
+// 统一目录作为既有静态后台的增量模块，复用 requestJson 与 tab 切换样式。
+function mountCatalogWorkspace() {
+    const tabs = document.querySelector(".tab-strip");
+    const workspace = document.querySelector(".workspace-stack");
+    if (!tabs || !workspace || document.querySelector('[data-panel="catalog"]')) return;
+    const tab = document.createElement("button");
+    tab.className = "tab-chip"; tab.type = "button"; tab.dataset.tab = "catalog"; tab.textContent = "图谱目录与导入";
+    tabs.appendChild(tab);
+    const panel = document.createElement("section");
+    panel.className = "workspace-panel"; panel.dataset.panel = "catalog";
+    panel.innerHTML = `<div class="panel-heading"><div><p class="eyebrow">Module 07</p><h2>资源与图谱目录</h2></div><div class="panel-tools"><select id="catalogType" class="line-input"><option value="">全部实体</option><option value="RESOURCE">资源</option><option value="SITE">遗址</option><option value="MEMORIAL">纪念馆</option><option value="HERO">人物</option><option value="EVENT">事件</option><option value="STORY">故事</option></select><input id="catalogKeyword" class="line-input" placeholder="名称、编码或别名"><button id="catalogSearch" class="ghost-button" type="button">查询</button><a class="accent-button" href="/api/admin/catalog/import/template">下载 Excel 模板</a></div></div><div class="workspace-grid"><article class="form-card"><div class="card-topline"><h3>新增图谱实体</h3></div><form id="catalogForm" class="data-form"><label><span>实体类型</span><select id="catalogFormType"><option value="SITE">遗址</option><option value="MEMORIAL">纪念馆</option><option value="HERO">人物</option><option value="EVENT">事件</option><option value="STORY">故事</option></select></label><div class="field-grid two-col"><label><span>编码</span><input id="catalogCode"></label><label><span>名称</span><input id="catalogName"></label><label><span>别名</span><input id="catalogAlias"></label><label><span>区域 ID</span><input id="catalogRegion" type="number"></label></div><label><span>简介</span><textarea id="catalogSummary"></textarea></label><label><span>详情</span><textarea id="catalogDetail"></textarea></label><div class="form-actions"><button class="accent-button" type="submit">保存待审核</button></div></form></article><article class="table-card"><div class="card-topline"><h3>目录列表</h3><span id="catalogCount" class="mini-stat">0 条</span></div><div class="table-shell"><table><thead><tr><th>类型</th><th>名称</th><th>状态</th><th>操作</th></tr></thead><tbody id="catalogTable"></tbody></table></div></article></div></section>`;
+    workspace.appendChild(panel);
+    tab.addEventListener("click", () => { document.querySelectorAll(".tab-chip").forEach(x => x.classList.toggle("is-active", x === tab)); document.querySelectorAll(".workspace-panel").forEach(x => x.classList.toggle("is-active", x === panel)); void loadCatalog(); });
+    document.querySelector("#catalogSearch").addEventListener("click", () => void loadCatalog());
+    const catalogForm = document.querySelector("#catalogForm");
+    catalogForm.querySelector(".form-actions").insertAdjacentHTML("beforebegin", `<div class="field-grid two-col"><label><span>图片 URL</span><input id="catalogImageUrl" type="url"></label><label><span>来源 URL</span><input id="catalogSourceUrl" type="url"></label><label><span>来源可信度（1-5）</span><input id="catalogCredibility" type="number" min="1" max="5"></label></div>`);
+    catalogForm.addEventListener("submit", async event => { event.preventDefault(); const imageUrl=optionalText(document.querySelector("#catalogImageUrl").value),sourceUrl=optionalText(document.querySelector("#catalogSourceUrl").value); const body={entityType:document.querySelector("#catalogFormType").value,code:document.querySelector("#catalogCode").value.trim(),name:document.querySelector("#catalogName").value.trim(),alias:optionalText(document.querySelector("#catalogAlias").value),regionId:parseNullableNumber(document.querySelector("#catalogRegion").value),summary:optionalText(document.querySelector("#catalogSummary").value),detail:optionalText(document.querySelector("#catalogDetail").value),media:imageUrl?[{mediaUrl:imageUrl,mediaType:"image",primary:true}]:[],sources:sourceUrl?[{sourceUrl,credibilityScore:parseNullableNumber(document.querySelector("#catalogCredibility").value)}]:[]}; await requestJson("/api/admin/catalog/entities",{method:"POST",body}); event.target.reset(); await loadCatalog(); });
+    const importInput=document.createElement("input"); importInput.type="file"; importInput.accept=".xlsx"; importInput.hidden=true; importInput.id="catalogImportFile"; tabs.appendChild(importInput);
+    const previewButton=document.createElement("button"); previewButton.type="button"; previewButton.className="ghost-button"; previewButton.textContent="上传预检"; panel.querySelector(".panel-tools").appendChild(previewButton);
+    const importResult=document.createElement("div"); importResult.className="status-box"; panel.querySelector(".panel-heading").appendChild(importResult);
+    previewButton.addEventListener("click",()=>importInput.click()); importInput.addEventListener("change",async()=>{const file=importInput.files?.[0];if(!file)return;const form=new FormData();form.append("file",file);const headers={Accept:"application/json"};const token=readCookie("XSRF-TOKEN");if(token)headers["X-CSRF-TOKEN"]=token;const response=await fetch("/api/admin/catalog/import/preview",{method:"POST",credentials:"include",headers,body:form});const payload=await response.json();if(!response.ok||payload.code!==200)throw new ApiError(payload.message||"导入预检失败",response.status);const batch=payload.data;importResult.innerHTML=`预检完成：${batch.validRows} 行可导入，${batch.invalidRows} 行错误，${batch.duplicateRows} 行重复。 <button class="action-button" id="catalogImportConfirm">确认导入</button> <a class="action-button" href="/api/admin/catalog/import/${batch.batchId}/report">下载报告</a>`;document.querySelector("#catalogImportConfirm").addEventListener("click",async()=>{await requestJson(`/api/admin/catalog/import/${batch.batchId}/confirm`,{method:"POST",body:{}});importResult.textContent="已导入合法行，等待管理员审核发布。";await loadCatalog();});});
+    const relationCard=document.createElement("article"); relationCard.className="form-card"; relationCard.innerHTML=`<div class="card-topline"><h3>维护图谱关系</h3></div><form id="catalogRelationForm" class="data-form"><div class="field-grid two-col"><label><span>源类型</span><select id="catalogRelationSourceType"><option value="SITE">遗址</option><option value="MEMORIAL">纪念馆</option><option value="EVENT">事件</option><option value="STORY">故事</option></select></label><label><span>源实体 ID</span><input id="catalogRelationSourceId" type="number" min="1"></label><label><span>目标类型</span><select id="catalogRelationTargetType"><option value="EVENT">事件</option><option value="HERO">人物</option><option value="SITE">遗址</option><option value="MEMORIAL">纪念馆</option><option value="RESOURCE">资源</option></select></label><label><span>目标实体 ID</span><input id="catalogRelationTargetId" type="number" min="1"></label><label><span>关系类型</span><input id="catalogRelationType" placeholder="如 OCCURRED_AT"></label></div><label><span>备注</span><input id="catalogRelationRemark"></label><div class="form-actions"><button class="accent-button" type="submit">创建并投影</button></div></form>`; panel.querySelector(".workspace-grid").appendChild(relationCard);
+    relationCard.querySelector("form").addEventListener("submit",async event=>{event.preventDefault();const body={sourceType:document.querySelector("#catalogRelationSourceType").value,sourceId:parseNullableNumber(document.querySelector("#catalogRelationSourceId").value),targetType:document.querySelector("#catalogRelationTargetType").value,targetId:parseNullableNumber(document.querySelector("#catalogRelationTargetId").value),relationType:document.querySelector("#catalogRelationType").value.trim(),remark:optionalText(document.querySelector("#catalogRelationRemark").value)};if(!body.sourceId||!body.targetId||!body.relationType){setGlobalStatus("校验失败","关系两端、类型均不能为空。");return;}await requestJson("/api/admin/catalog/relations",{method:"POST",body});event.target.reset();setGlobalStatus("已投影","图谱关系已创建。");});
+    const taskCard=document.createElement("article"); taskCard.className="table-card"; taskCard.innerHTML=`<div class="card-topline"><h3>图谱与 RAG 投影任务</h3><button id="catalogLoadTasks" class="ghost-button" type="button">刷新任务</button></div><div class="table-shell"><table><thead><tr><th>类型</th><th>状态</th><th>尝试</th><th>错误</th><th>操作</th></tr></thead><tbody id="catalogTaskTable"></tbody></table></div>`; panel.querySelector(".workspace-grid").appendChild(taskCard);
+    async function loadProjectionTasks(){const tasks=await requestJson("/api/admin/catalog/projection-tasks");const body=taskCard.querySelector("#catalogTaskTable");body.innerHTML=(tasks||[]).map(task=>`<tr><td>${escapeHtml(task.taskType)} ${escapeHtml(task.entityType)}#${task.entityId}</td><td>${renderStatus(task.status)}</td><td>${task.attemptCount||0}</td><td>${escapeHtml(task.lastError||"-")}</td><td>${task.status==="FAILED"?`<button class="action-button" data-retry-task="${task.taskId}">重试</button>`:"-"}</td></tr>`).join("")||"<tr><td colspan=\"5\">暂无投影任务。</td></tr>";body.querySelectorAll("[data-retry-task]").forEach(button=>button.addEventListener("click",async()=>{await requestJson(`/api/admin/catalog/projection-tasks/${button.dataset.retryTask}/retry`,{method:"POST",body:{}});await loadProjectionTasks();}));}
+    taskCard.querySelector("#catalogLoadTasks").addEventListener("click",()=>void loadProjectionTasks());
+    void loadProjectionTasks();
+}
+async function loadCatalog() { const type=document.querySelector("#catalogType")?.value||""; const keyword=document.querySelector("#catalogKeyword")?.value?.trim()||""; const result=await requestJson(`/api/admin/catalog/entities?pageNum=1&pageSize=50${type?`&entityType=${type}`:""}${keyword?`&keyword=${encodeURIComponent(keyword)}`:""}`); const rows=result.records||[]; document.querySelector("#catalogCount").textContent=`${rows.length} 条`; document.querySelector("#catalogTable").innerHTML=rows.map(x=>`<tr><td>${escapeHtml(x.entityType)}</td><td><strong>${escapeHtml(x.name)}</strong><div class="status-box">${escapeHtml(x.code||"-")}</div></td><td>${renderStatus(x.reviewStatus)}</td><td><button class="action-button" data-approve="${x.entityType}:${x.entityId}">通过并投影</button><button class="action-button" data-deactivate="${x.entityType}:${x.entityId}">停用</button></td></tr>`).join("")||"<tr><td colspan=\"4\">暂无目录数据。</td></tr>"; document.querySelectorAll("[data-approve]").forEach(b=>b.addEventListener("click",async()=>{const [t,id]=b.dataset.approve.split(":");await requestJson(`/api/admin/catalog/entities/${t}/${id}/approve`,{method:"POST",body:{}});await loadCatalog();})); document.querySelectorAll("[data-deactivate]").forEach(b=>b.addEventListener("click",async()=>{const [t,id]=b.dataset.deactivate.split(":");await requestJson(`/api/admin/catalog/entities/${t}/${id}`,{method:"DELETE"});await loadCatalog();})); }
+async function loadDashboardOverview() {
+    try {
+        const data = await requestJson("/api/admin/dashboard/overview");
+        const rag = data.ragStatus || {};
+        const projection = data.projectionStatus || {};
+        setDashboardMetric(adminElements.dashboardResourceMetric, data.resourceCount);
+        setDashboardMetric(adminElements.dashboardSchoolMetric, data.schoolCount);
+        setDashboardMetric(adminElements.dashboardTeacherMetric, data.teacherCount);
+        setDashboardMetric(adminElements.dashboardStudentMetric, data.studentCount);
+        setDashboardMetric(adminElements.dashboardPlanMetric, data.teachingPlanCount);
+        setDashboardMetric(adminElements.dashboardQuestionMetric, data.questionCount, data.questionStatus !== "ok");
+        setDashboardText(adminElements.dashboardQuestionHint, data.questionStatus === "ok" ? "成功完成的智能问答轮次" : "Agent 服务暂不可用");
+        setDashboardMetric(adminElements.dashboardRagDone, rag.done);
+        setDashboardMetric(adminElements.dashboardRagPending, rag.pending);
+        setDashboardMetric(adminElements.dashboardRagFailed, rag.failed);
+        setDashboardStatus(adminElements.dashboardRagStatus, rag.status, dashboardStatusLabel(rag.status));
+        setDashboardText(adminElements.dashboardRagHint, rag.message || `RAG ${rag.enabled ? "已启用" : "已停用"}`);
+        setDashboardStatus(adminElements.dashboardQdrantStatus, rag.reachable ? "ok" : "unavailable", rag.reachable ? "可达" : "不可达");
+        setDashboardText(adminElements.dashboardQdrantCollection, rag.collection || "-");
+        setDashboardText(adminElements.dashboardQdrantAlias, rag.aliasTarget || "未切换 Alias");
+        setDashboardMetric(adminElements.dashboardQdrantPoints, rag.pointCount, !rag.reachable);
+        setDashboardMetric(adminElements.dashboardProjectionPending, projection.pending);
+        setDashboardMetric(adminElements.dashboardProjectionFailed, projection.failed);
+        setDashboardMetric(adminElements.dashboardProjectionTotal, projection.total ?? data.pendingProjectionCount);
+        setDashboardText(adminElements.dashboardUpdatedAt, `更新于 ${new Date().toLocaleString("zh-CN", { hour12: false })}`);
+        return true;
+    } catch (error) {
+        [adminElements.dashboardResourceMetric, adminElements.dashboardSchoolMetric, adminElements.dashboardTeacherMetric,
+            adminElements.dashboardStudentMetric, adminElements.dashboardPlanMetric, adminElements.dashboardQuestionMetric,
+            adminElements.dashboardRagDone, adminElements.dashboardRagPending, adminElements.dashboardRagFailed,
+            adminElements.dashboardQdrantPoints, adminElements.dashboardProjectionPending, adminElements.dashboardProjectionFailed,
+            adminElements.dashboardProjectionTotal].forEach(element => setDashboardMetric(element, null, true));
+        setDashboardStatus(adminElements.dashboardRagStatus, "unavailable", "不可用");
+        setDashboardStatus(adminElements.dashboardQdrantStatus, "unavailable", "不可用");
+        setDashboardText(adminElements.dashboardRagHint, error.message || "驾驶舱指标加载失败。");
+        setDashboardText(adminElements.dashboardUpdatedAt, "概览服务暂不可用");
+        return false;
+    }
+}
+
+function setDashboardMetric(element, value, unavailable = false) {
+    if (element) element.textContent = unavailable || value === null || value === undefined ? "-" : String(value);
+}
+
+function setDashboardText(element, value) {
+    if (element) element.textContent = value;
+}
+
+function setDashboardStatus(element, status, label) {
+    if (!element) return;
+    const normalized = String(status || "unavailable").toLowerCase();
+    element.className = `status-pill status-${normalized}`;
+    element.textContent = label || dashboardStatusLabel(normalized);
+}
+
+function dashboardStatusLabel(status) {
+    return ({ ok: "正常", degraded: "降级", unavailable: "不可用", disabled: "已停用" })[String(status || "").toLowerCase()] || "未知";
+}
+mountCatalogWorkspace();
