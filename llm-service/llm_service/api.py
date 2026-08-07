@@ -495,13 +495,17 @@ def create_app(
         trace_id: str | None = Query(default=None, alias="traceId"),
         started_after: str | None = Query(default=None, alias="startedAfter"),
         started_before: str | None = Query(default=None, alias="startedBefore"),
+        include_question_metrics: bool = Query(default=False, alias="includeQuestionMetrics"),
         _admin: None = Depends(require_observability_admin),
     ) -> dict[str, Any]:
-        return observability.summary({
+        summary = observability.summary({
             "user_id": user_id, "session_id": session_id, "feature": feature,
             "model": model_name, "status": status, "trace_id": trace_id,
             "started_after": started_after, "started_before": started_before,
         })
+        if include_question_metrics:
+            summary["completedQuestionCount"] = repository.count_completed_formal_account_chat_turns()
+        return summary
 
     @app.get("/admin/observability/tool-traces")
     async def tool_traces(
