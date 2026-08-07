@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@lucide/vue": "^1.25.0",
+    "axios": "^1.19.0",
     "dompurify": "^3.4.12",
     "marked": "^18.0.7",
     "pinia": "^2.3.0",
