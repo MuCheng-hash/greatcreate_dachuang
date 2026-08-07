@@ -3697,6 +3697,7 @@ function escapeHtml(value) {
 
 // 统一目录作为既有静态后台的增量模块，复用 requestJson 与 tab 切换样式。
 function mountCatalogWorkspace() {
+    return mountCatalogOperations();
     const tabs = document.querySelector(".tab-strip");
     const workspace = document.querySelector(".workspace-stack");
     if (!tabs || !workspace || document.querySelector('[data-panel="catalog"]')) return;
@@ -3782,4 +3783,194 @@ function setDashboardStatus(element, status, label) {
 function dashboardStatusLabel(status) {
     return ({ ok: "正常", degraded: "降级", unavailable: "不可用", disabled: "已停用" })[String(status || "").toLowerCase()] || "未知";
 }
+const catalogDirectoryState = { selected: null, relationOptions: [], pendingMediaPreviewUrls: [] };
+
+const catalogEntityLabels = {
+    RESOURCE: "资源", SITE: "遗址", MEMORIAL: "纪念馆", HERO: "人物", EVENT: "历史事件", STORY: "红色故事"
+};
+
+function mountUnifiedCatalogResourceWorkspace() {
+    const root = document.querySelector("#catalogResourceWorkspace");
+    if (!root || root.dataset.ready === "true") return;
+    root.dataset.ready = "true";
+    root.innerHTML = `
+        <div class="panel-heading">
+            <div><p class="eyebrow">Module 02</p><h2>统一资源目录</h2></div>
+            <div class="panel-tools">
+                <select id="catalogDirectoryType" class="line-input"><option value="">全部类型</option>${Object.entries(catalogEntityLabels).map(([key, label]) => `<option value="${key}">${label}</option>`).join("")}</select>
+                <select id="catalogDirectoryCategory" class="line-input"><option value="">全部资源分类</option><option value="red_culture">红色文化</option><option value="local_history">地方历史</option><option value="labor_education">劳动教育</option><option value="social_practice">社会实践</option><option value="other">其他</option></select>
+                <select id="catalogDirectoryReview" class="line-input"><option value="">全部审核状态</option><option value="draft">草稿</option><option value="pending">待审核</option><option value="approved">已通过</option><option value="rejected">已驳回</option></select>
+                <input id="catalogDirectoryKeyword" class="line-input" type="search" placeholder="名称、编码、别名或地址">
+                <button id="catalogDirectorySearch" class="ghost-button" type="button">查询</button>
+                <button id="catalogDirectoryCreate" class="accent-button" type="button">新增实体</button>
+            </div>
+        </div>
+        <div class="workspace-grid">
+            <article class="form-card">
+                <div class="card-topline"><h3 id="catalogDirectoryFormTitle">新增待审核实体</h3><button id="catalogDirectoryReset" class="ghost-button" type="button">清空</button></div>
+                <form id="catalogDirectoryForm" class="data-form">
+                    <input id="catalogDirectoryId" type="hidden">
+                    <div class="field-grid two-col">
+                        <label><span>实体类型</span><select id="catalogDirectoryFormType">${Object.entries(catalogEntityLabels).map(([key, label]) => `<option value="${key}">${label}</option>`).join("")}</select></label>
+                        <label><span>编码</span><input id="catalogDirectoryCode" required placeholder="RES_HEB_0001"></label>
+                        <label><span>名称</span><input id="catalogDirectoryName" required placeholder="输入名称"></label>
+                        <label><span>别名</span><input id="catalogDirectoryAlias" placeholder="可选"></label>
+                        <label><span>区域 ID</span><input id="catalogDirectoryRegion" type="number" min="1" placeholder="可选"></label>
+                        <label><span>适用学段</span><input id="catalogDirectoryGrade" placeholder="如：小学中年级"></label>
+                        <label><span>经度</span><input id="catalogDirectoryLongitude" type="number" step="0.0000001" placeholder="可选"></label>
+                        <label><span>纬度</span><input id="catalogDirectoryLatitude" type="number" step="0.0000001" placeholder="可选"></label>
+                    </div>
+                    <div class="form-actions"><input id="catalogDirectoryPendingMediaFiles" type="file" accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp" multiple hidden><button id="catalogDirectoryPickImages" class="accent-button" type="button">选择展示图片</button><span id="catalogDirectoryPendingMediaHint" class="mini-stat">暂未选择图片</span></div>
+                    <p class="status-box">支持 JPG、PNG 或 WebP 图片，每张不超过 10MB。保存草稿成功后将自动上传并关联。</p>
+                    <div id="catalogDirectoryPendingMediaPreview" class="catalog-pending-media-preview" hidden></div>
+                    <div id="catalogDirectoryResourceFields" class="field-grid two-col">
+                        <label><span>资源分类</span><select id="catalogDirectoryCategoryInput"><option value="red_culture">红色文化</option><option value="intangible_culture">非遗文化</option><option value="traditional_culture">传统文化</option><option value="local_history">地方历史</option><option value="public_culture">公共文化</option><option value="labor_education">劳动教育</option><option value="public_welfare">公益实践</option><option value="ecological_civilization">生态文明</option><option value="patriotism_base">爱国主义基地</option><option value="social_practice">社会实践</option><option value="other">其他</option></select></label>
+                        <label><span>资源子类</span><input id="catalogDirectorySubcategory" placeholder="纪念馆 / 文化墙 / 劳动基地"></label>
+                        <label><span>所属机构</span><input id="catalogDirectoryOrganization" placeholder="可选"></label>
+                        <label><span>联系电话</span><input id="catalogDirectoryPhone" placeholder="可选"></label>
+                        <label><span>开放时间</span><input id="catalogDirectoryOpening" placeholder="可选"></label>
+                        <label><span>建议时长（分钟）</span><input id="catalogDirectoryMinutes" type="number" min="1"></label>
+                    </div>
+                    <label><span>地址</span><input id="catalogDirectoryAddress" placeholder="输入地址"></label>
+                    <label><span>简介 / 历史概要</span><textarea id="catalogDirectorySummary"></textarea></label>
+                    <label><span>教育价值 / 详情</span><textarea id="catalogDirectoryDetail"></textarea></label>
+                    <div id="catalogDirectoryResourceTextFields">
+                        <label><span>活动建议</span><textarea id="catalogDirectoryActivity"></textarea></label>
+                        <label><span>安全提示</span><textarea id="catalogDirectorySafety"></textarea></label>
+                        <label class="switch-field"><input id="catalogDirectoryReservation" type="checkbox"><span>需要预约</span></label>
+                    </div>
+                    <div class="form-actions"><button class="accent-button" type="submit">保存草稿</button></div>
+                </form>
+            </article>
+            <article class="table-card">
+                <div class="card-topline"><h3>全平台资源与图谱实体</h3><span id="catalogDirectoryCount" class="mini-stat">0 条</span></div>
+                <div class="table-shell"><table><thead><tr><th>封面</th><th>实体</th><th>类型 / 分类</th><th>坐标</th><th>状态</th><th>操作</th></tr></thead><tbody id="catalogDirectoryTable"></tbody></table></div>
+            </article>
+        </div>
+        <div id="catalogDirectoryDetails" class="workspace-grid" hidden>
+            <article class="form-card"><div class="card-topline"><h3>来源信息</h3><button id="catalogDirectoryAddSource" class="ghost-button" type="button">新增来源</button></div><div id="catalogDirectorySourceList" class="compact-list"></div><div class="form-actions"><button id="catalogDirectorySaveSources" class="accent-button" type="button">保存来源</button></div></article>
+            <article class="form-card"><div class="card-topline"><h3>关联故事与图谱关系</h3></div><form id="catalogDirectoryRelationForm" class="data-form"><div class="field-grid two-col"><label><span>源实体类型</span><select id="catalogDirectoryRelationSourceType"></select></label><label><span>源实体 ID</span><input id="catalogDirectoryRelationSourceId" type="number" min="1"></label><label><span>目标实体类型</span><select id="catalogDirectoryRelationTargetType"></select></label><label><span>目标实体 ID</span><input id="catalogDirectoryRelationTargetId" type="number" min="1"></label><label><span>白名单关系类型</span><select id="catalogDirectoryRelationType"></select></label><label><span>备注</span><input id="catalogDirectoryRelationRemark"></label></div><div class="form-actions"><button class="accent-button" type="submit">创建关系</button></div></form><div id="catalogDirectoryRelationList" class="compact-list"></div></article>
+        </div>
+        <div id="catalogDirectoryImagePreviewModal" class="modal-shell" role="dialog" aria-modal="true" aria-labelledby="catalogDirectoryImagePreviewTitle" hidden><div class="modal-backdrop" data-close-catalog-image-preview></div><section class="modal-card catalog-image-preview-modal"><div class="card-topline"><h3 id="catalogDirectoryImagePreviewTitle">图片预览</h3><button id="catalogDirectoryCloseImagePreview" class="ghost-button" type="button">关闭</button></div><img id="catalogDirectoryImagePreviewImage" alt=""><p id="catalogDirectoryImagePreviewName" class="status-box"></p></section></div>`;
+    root.querySelector("#catalogDirectorySearch").addEventListener("click", () => void loadResources());
+    root.querySelector("#catalogDirectoryCreate").addEventListener("click", resetCatalogDirectoryForm);
+    root.querySelector("#catalogDirectoryReset").addEventListener("click", resetCatalogDirectoryForm);
+    root.querySelector("#catalogDirectoryForm").addEventListener("submit", event => { event.preventDefault(); void saveCatalogDirectoryEntity(); });
+    root.querySelector("#catalogDirectoryFormType").addEventListener("change", updateCatalogDirectoryFieldVisibility);
+    root.querySelector("#catalogDirectoryPickImages").addEventListener("click", () => root.querySelector("#catalogDirectoryPendingMediaFiles").click());
+    root.querySelector("#catalogDirectoryPendingMediaFiles").addEventListener("change", renderCatalogDirectoryPendingMedia);
+    root.querySelector("#catalogDirectoryCloseImagePreview").addEventListener("click", closeCatalogDirectoryImagePreview);
+    root.querySelector("[data-close-catalog-image-preview]").addEventListener("click", closeCatalogDirectoryImagePreview);
+    root.querySelector("#catalogDirectoryAddSource").addEventListener("click", () => { appendCatalogSource(); });
+    root.querySelector("#catalogDirectorySaveSources").addEventListener("click", () => void saveCatalogDirectorySources());
+    root.querySelector("#catalogDirectoryRelationForm").addEventListener("submit", event => { event.preventDefault(); void createCatalogDirectoryRelation(); });
+    ["catalogDirectoryRelationSourceType", "catalogDirectoryRelationTargetType"].forEach(id => root.querySelector(`#${id}`).addEventListener("change", renderCatalogRelationTypes));
+    updateCatalogDirectoryFieldVisibility();
+    void loadCatalogRelationOptions();
+    void loadResources();
+}
+
+async function loadResources() {
+    const root = document.querySelector("#catalogResourceWorkspace");
+    if (!root?.dataset.ready) return;
+    const params = new URLSearchParams({ pageNum: "1", pageSize: "50" });
+    const type = root.querySelector("#catalogDirectoryType").value;
+    const category = root.querySelector("#catalogDirectoryCategory").value;
+    const reviewStatus = root.querySelector("#catalogDirectoryReview").value;
+    const keyword = root.querySelector("#catalogDirectoryKeyword").value.trim();
+    if (type) params.set("entityType", type);
+    if (category) params.set("resourceCategory", category);
+    if (reviewStatus) params.set("reviewStatus", reviewStatus);
+    if (keyword) params.set("keyword", keyword);
+    const result = await requestJson(`/api/admin/catalog/entities?${params}`);
+    renderCatalogDirectoryTable(result.records || [], result.total || 0);
+    if (adminElements.resourceTotalMetric) adminElements.resourceTotalMetric.textContent = String(result.total || 0);
+}
+
+function renderCatalogDirectoryTable(records, total) {
+    const root = document.querySelector("#catalogResourceWorkspace");
+    root.querySelector("#catalogDirectoryCount").textContent = `${total} 条`;
+    const table = root.querySelector("#catalogDirectoryTable");
+    if (!records.length) { table.innerHTML = '<tr><td colspan="6">暂无符合条件的实体。</td></tr>'; return; }
+    table.innerHTML = records.map(item => `<tr><td>${item.coverUrl ? `<img class="catalog-cover" src="${escapeHtml(item.coverUrl)}" alt="">` : "-"}</td><td><strong>${escapeHtml(item.name || "-")}</strong><div class="status-box">${escapeHtml(item.code || "-")}</div></td><td>${escapeHtml(catalogEntityLabels[item.entityType?.toUpperCase()] || item.entityType || "-")}<div class="status-box">${escapeHtml(item.resourceCategory || "-")}</div></td><td>${item.longitude && item.latitude ? `${escapeHtml(item.longitude)}, ${escapeHtml(item.latitude)}` : "未设置"}</td><td>${renderStatus(item.reviewStatus)}<div class="status-box">${item.active ? "启用" : "已停用"}</div></td><td><div class="table-actions"><button class="action-button" data-edit="${item.entityType}:${item.entityId}">编辑</button>${item.active ? `<button class="action-button" data-submit="${item.entityType}:${item.entityId}">提交审核</button><button class="action-button" data-approve="${item.entityType}:${item.entityId}">通过</button><button class="action-button" data-deactivate="${item.entityType}:${item.entityId}">停用</button>` : "-"}</div></td></tr>`).join("");
+    table.querySelectorAll("[data-edit]").forEach(button => button.addEventListener("click", () => { const [type, id] = button.dataset.edit.split(":"); void openCatalogDirectoryEntity(type.toUpperCase(), id); }));
+    table.querySelectorAll("[data-submit]").forEach(button => button.addEventListener("click", () => void runCatalogEntityAction(button.dataset.submit, "submit-review")));
+    table.querySelectorAll("[data-approve]").forEach(button => button.addEventListener("click", () => void runCatalogEntityAction(button.dataset.approve, "approve")));
+    table.querySelectorAll("[data-deactivate]").forEach(button => button.addEventListener("click", () => void deactivateCatalogEntity(button.dataset.deactivate)));
+}
+
+function catalogDirectoryPayload({ includeSources = false, includeMedia = false } = {}) {
+    const root = document.querySelector("#catalogResourceWorkspace");
+    const value = id => root.querySelector(`#${id}`).value;
+    const type = value("catalogDirectoryFormType");
+    const payload = { entityType: type, code: value("catalogDirectoryCode").trim(), name: value("catalogDirectoryName").trim(), alias: optionalText(value("catalogDirectoryAlias")), regionId: parseNullableNumber(value("catalogDirectoryRegion")), address: optionalText(value("catalogDirectoryAddress")), longitude: parseNullableNumber(value("catalogDirectoryLongitude")), latitude: parseNullableNumber(value("catalogDirectoryLatitude")), summary: optionalText(value("catalogDirectorySummary")), detail: optionalText(value("catalogDirectoryDetail")), targetGrade: optionalText(value("catalogDirectoryGrade")) };
+    if (type === "RESOURCE") Object.assign(payload, { resourceCategory: value("catalogDirectoryCategoryInput"), resourceSubcategory: optionalText(value("catalogDirectorySubcategory")), organizationName: optionalText(value("catalogDirectoryOrganization")), contactPhone: optionalText(value("catalogDirectoryPhone")), openingTimeDesc: optionalText(value("catalogDirectoryOpening")), reservationRequired: root.querySelector("#catalogDirectoryReservation").checked, recommendedVisitMinutes: parseNullableNumber(value("catalogDirectoryMinutes")), activitySuggestion: optionalText(value("catalogDirectoryActivity")), safetyNote: optionalText(value("catalogDirectorySafety")) });
+    if (includeSources) payload.sources = catalogDirectorySources();
+    if (includeMedia) payload.media = catalogDirectoryState.selected?.media || [];
+    return payload;
+}
+
+async function saveCatalogDirectoryEntity() {
+    const root = document.querySelector("#catalogResourceWorkspace");
+    const id = parseNullableNumber(root.querySelector("#catalogDirectoryId").value);
+    const pendingMediaInput = root.querySelector("#catalogDirectoryPendingMediaFiles");
+    const pendingMediaFiles = id ? [] : Array.from(pendingMediaInput.files || []);
+    const payload = catalogDirectoryPayload();
+    if (!payload.code || !payload.name) { setGlobalStatus("校验失败", "实体编码和名称不能为空。"); return; }
+    const item = id ? await requestJson(`/api/admin/catalog/entities/${payload.entityType}/${id}`, { method: "PUT", body: payload }) : await requestJson("/api/admin/catalog/entities", { method: "POST", body: payload });
+    if (pendingMediaFiles.length) await uploadCatalogDirectoryMediaFiles(item.entityType, item.entityId, pendingMediaFiles);
+    pendingMediaInput.value = "";
+    renderCatalogDirectoryPendingMedia();
+    setGlobalStatus(id ? "已更新" : "已创建", id ? "实体已更新；原已发布实体已回到待审核。" : pendingMediaFiles.length ? `草稿已保存，已上传 ${pendingMediaFiles.length} 张图片。` : "草稿已保存，可继续上传图片、维护来源和关联故事。");
+    await openCatalogDirectoryEntity(item.entityType, item.entityId);
+    await loadResources();
+}
+
+async function openCatalogDirectoryEntity(type, id) {
+    const root = document.querySelector("#catalogResourceWorkspace");
+    const item = await requestJson(`/api/admin/catalog/entities/${type}/${id}`);
+    catalogDirectoryState.selected = item;
+    const set = (name, value) => { const input = root.querySelector(`#${name}`); if (input) input.value = value ?? ""; };
+    set("catalogDirectoryId", item.entityId); set("catalogDirectoryFormType", item.entityType?.toUpperCase()); set("catalogDirectoryCode", item.code); set("catalogDirectoryName", item.name); set("catalogDirectoryAlias", item.alias); set("catalogDirectoryRegion", item.regionId); set("catalogDirectoryAddress", item.address); set("catalogDirectoryLongitude", item.longitude); set("catalogDirectoryLatitude", item.latitude); set("catalogDirectorySummary", item.summary); set("catalogDirectoryDetail", item.detail); set("catalogDirectoryGrade", item.targetGrade); set("catalogDirectoryCategoryInput", item.resourceCategory || "other"); set("catalogDirectorySubcategory", item.resourceSubcategory); set("catalogDirectoryOrganization", item.organizationName); set("catalogDirectoryPhone", item.contactPhone); set("catalogDirectoryOpening", item.openingTimeDesc); set("catalogDirectoryMinutes", item.recommendedVisitMinutes); set("catalogDirectoryActivity", item.activitySuggestion); set("catalogDirectorySafety", item.safetyNote);
+    root.querySelector("#catalogDirectoryReservation").checked = Boolean(item.reservationRequired);
+    root.querySelector("#catalogDirectoryFormType").disabled = true;
+    root.querySelector("#catalogDirectoryFormTitle").textContent = `编辑：${item.name}`;
+    root.querySelector("#catalogDirectoryDetails").hidden = false;
+    updateCatalogDirectoryFieldVisibility(); renderCatalogDirectorySources(); await loadCatalogDirectoryRelations();
+    root.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+function resetCatalogDirectoryForm() {
+    const root = document.querySelector("#catalogResourceWorkspace");
+    root.querySelector("#catalogDirectoryForm").reset(); root.querySelector("#catalogDirectoryId").value = ""; root.querySelector("#catalogDirectoryFormType").disabled = false; root.querySelector("#catalogDirectoryFormTitle").textContent = "新增待审核实体"; root.querySelector("#catalogDirectoryDetails").hidden = true; catalogDirectoryState.selected = null; renderCatalogDirectoryPendingMedia(); updateCatalogDirectoryFieldVisibility();
+}
+
+function updateCatalogDirectoryFieldVisibility() { const root=document.querySelector("#catalogResourceWorkspace"); const resource=root.querySelector("#catalogDirectoryFormType").value === "RESOURCE"; root.querySelector("#catalogDirectoryResourceFields").hidden=!resource; root.querySelector("#catalogDirectoryResourceTextFields").hidden=!resource; }
+function renderCatalogDirectoryPendingMedia() { const root=document.querySelector("#catalogResourceWorkspace"), files=Array.from(root.querySelector("#catalogDirectoryPendingMediaFiles").files||[]), hint=root.querySelector("#catalogDirectoryPendingMediaHint"), preview=root.querySelector("#catalogDirectoryPendingMediaPreview"); catalogDirectoryState.pendingMediaPreviewUrls.forEach(url=>URL.revokeObjectURL(url));catalogDirectoryState.pendingMediaPreviewUrls=[];hint.textContent=files.length ? `已选择 ${files.length} 张：${files.map(file=>file.name).join("、")}` : "暂未选择图片";preview.hidden=!files.length;preview.innerHTML=files.map((file,index)=>{const url=URL.createObjectURL(file);catalogDirectoryState.pendingMediaPreviewUrls.push(url);return `<button class="catalog-pending-media-thumbnail" data-pending-preview="${index}" type="button"><img src="${url}" alt="预览 ${escapeHtml(file.name)}"><span>${escapeHtml(file.name)}</span></button>`;}).join("");preview.querySelectorAll("[data-pending-preview]").forEach(button=>button.addEventListener("click",()=>{const index=Number(button.dataset.pendingPreview);openCatalogDirectoryImagePreview(catalogDirectoryState.pendingMediaPreviewUrls[index],files[index].name);})); }
+function openCatalogDirectoryImagePreview(url, name) { const root=document.querySelector("#catalogResourceWorkspace"), modal=root.querySelector("#catalogDirectoryImagePreviewModal");root.querySelector("#catalogDirectoryImagePreviewImage").src=url;root.querySelector("#catalogDirectoryImagePreviewImage").alt=name;root.querySelector("#catalogDirectoryImagePreviewName").textContent=name;modal.hidden=false;document.body.classList.add("modal-open"); }
+function closeCatalogDirectoryImagePreview() { const root=document.querySelector("#catalogResourceWorkspace"), modal=root.querySelector("#catalogDirectoryImagePreviewModal");if(!modal)return;modal.hidden=true;document.body.classList.remove("modal-open"); }
+
+async function runCatalogEntityAction(key, action) { const [rawType, id] = key.split(":"), type = rawType.toUpperCase(); await requestJson(`/api/admin/catalog/entities/${type}/${id}/${action}`, { method: "POST", body: {} }); setGlobalStatus("操作成功", action === "approve" ? "实体已审核并投影。" : "实体已提交审核。"); await loadResources(); if (catalogDirectoryState.selected?.entityId === Number(id)) await openCatalogDirectoryEntity(type, id); }
+async function deactivateCatalogEntity(key) { if (!window.confirm("停用后该实体将从地图、图谱和 RAG 检索中隐藏，是否继续？")) return; const [rawType,id]=key.split(":"), type=rawType.toUpperCase(); await requestJson(`/api/admin/catalog/entities/${type}/${id}`,{method:"DELETE"}); setGlobalStatus("已停用","实体历史数据已保留，公开投影已移除。"); resetCatalogDirectoryForm(); await loadResources(); }
+
+async function uploadCatalogDirectoryMediaFiles(entityType, entityId, files) { for (const file of files) { const headers={ Accept:"application/json" }; const token=readCookie("XSRF-TOKEN"); if(token)headers["X-CSRF-TOKEN"]=token; const body=new FormData();body.append("file",file);const response=await fetch(`/api/admin/catalog/entities/${entityType.toUpperCase()}/${entityId}/media`,{method:"POST",credentials:"include",headers,body});const payload=await response.json();if(!response.ok||payload.code!==200)throw new ApiError(payload.message||"图片上传失败",response.status); } }
+
+function appendCatalogSource(source={}) { const root=document.querySelector("#catalogResourceWorkspace"), list=root.querySelector("#catalogDirectorySourceList"), row=document.createElement("div");row.className="compact-row catalog-source-row";row.innerHTML=`<input class="line-input source-url" type="url" placeholder="来源 URL" value="${escapeHtml(source.sourceUrl||"")}"><input class="line-input source-excerpt" placeholder="来源摘录" value="${escapeHtml(source.sourceExcerpt||"")}"><input class="line-input source-score" type="number" min="1" max="5" placeholder="可信度" value="${escapeHtml(source.credibilityScore||"")}"><button class="action-button" type="button">移除</button>`;row.querySelector("button").addEventListener("click",()=>row.remove());list.appendChild(row); }
+function renderCatalogDirectorySources() { const list=document.querySelector("#catalogDirectorySourceList");list.innerHTML="";(catalogDirectoryState.selected?.sources||[]).forEach(appendCatalogSource);if(!list.children.length)appendCatalogSource(); }
+function catalogDirectorySources() { return Array.from(document.querySelectorAll("#catalogDirectorySourceList .catalog-source-row")).map(row=>({sourceUrl:optionalText(row.querySelector(".source-url").value),sourceExcerpt:optionalText(row.querySelector(".source-excerpt").value),credibilityScore:parseNullableNumber(row.querySelector(".source-score").value)})).filter(source=>source.sourceUrl||source.sourceExcerpt); }
+async function saveCatalogDirectorySources() { const item=catalogDirectoryState.selected;if(!item)return;const updated=await requestJson(`/api/admin/catalog/entities/${item.entityType.toUpperCase()}/${item.entityId}`,{method:"PUT",body:catalogDirectoryPayload({includeSources:true})});setGlobalStatus("来源已保存",updated.reviewStatus === "pending" ? "实体已回到待审核。" : "来源信息已更新。");await openCatalogDirectoryEntity(item.entityType,item.entityId);await loadResources(); }
+
+async function loadCatalogRelationOptions() { catalogDirectoryState.relationOptions=await requestJson("/api/admin/catalog/relation-options"); const root=document.querySelector("#catalogResourceWorkspace"); ["catalogDirectoryRelationSourceType","catalogDirectoryRelationTargetType"].forEach(id=>{root.querySelector(`#${id}`).innerHTML=Object.entries(catalogEntityLabels).map(([key,label])=>`<option value="${key}">${label}</option>`).join("");}); renderCatalogRelationTypes(); }
+function renderCatalogRelationTypes() { const root=document.querySelector("#catalogResourceWorkspace"), source=root.querySelector("#catalogDirectoryRelationSourceType").value.toLowerCase(), target=root.querySelector("#catalogDirectoryRelationTargetType").value.toLowerCase(), select=root.querySelector("#catalogDirectoryRelationType"), options=catalogDirectoryState.relationOptions.filter(item=>item.sourceType===source&&item.targetType===target);select.innerHTML=options.map(item=>`<option value="${item.relationType}">${escapeHtml(item.label)}</option>`).join("")||"<option value=\"\">当前方向无可用关系</option>"; }
+async function createCatalogDirectoryRelation() { const root=document.querySelector("#catalogResourceWorkspace"), item=catalogDirectoryState.selected, body={sourceType:root.querySelector("#catalogDirectoryRelationSourceType").value,sourceId:parseNullableNumber(root.querySelector("#catalogDirectoryRelationSourceId").value),targetType:root.querySelector("#catalogDirectoryRelationTargetType").value,targetId:parseNullableNumber(root.querySelector("#catalogDirectoryRelationTargetId").value),relationType:root.querySelector("#catalogDirectoryRelationType").value,remark:optionalText(root.querySelector("#catalogDirectoryRelationRemark").value)};if(!body.sourceId||!body.targetId||!body.relationType){setGlobalStatus("校验失败","请使用白名单关系并填写两个实体 ID。");return;}await requestJson("/api/admin/catalog/relations",{method:"POST",body});setGlobalStatus("关系已创建","关联关系已写入图谱投影任务。");if(item)await loadCatalogDirectoryRelations(); }
+async function loadCatalogDirectoryRelations() { const item=catalogDirectoryState.selected;if(!item)return;const relations=await requestJson(`/api/admin/catalog/entities/${item.entityType.toUpperCase()}/${item.entityId}/relations`),root=document.querySelector("#catalogResourceWorkspace"),list=root.querySelector("#catalogDirectoryRelationList"); list.innerHTML=relations.map(relation=>`<div class="compact-row"><span>${escapeHtml(relation.sourceType)}#${relation.sourceId} - ${escapeHtml(relation.relationType)} → ${escapeHtml(relation.targetType)}#${relation.targetId}</span><button class="action-button" data-delete-relation="${relation.relationKind}:${relation.relationId}" type="button">删除</button></div>`).join("")||"<p class=\"status-box\">暂无关联故事或图谱关系。</p>";list.querySelectorAll("[data-delete-relation]").forEach(button=>button.addEventListener("click",()=>void deleteCatalogDirectoryRelation(button.dataset.deleteRelation))); const selectedType=item.entityType.toUpperCase();root.querySelector("#catalogDirectoryRelationTargetType").value=selectedType;root.querySelector("#catalogDirectoryRelationTargetId").value=item.entityId;root.querySelector("#catalogDirectoryRelationSourceType").value="STORY";renderCatalogRelationTypes(); }
+async function deleteCatalogDirectoryRelation(key) { if(!window.confirm("确定删除该关联关系？"))return;const [kind,id]=key.split(":");await requestJson(`/api/admin/catalog/relations/${kind}/${id}`,{method:"DELETE"});setGlobalStatus("关系已删除","图谱关系已同步移除。");await loadCatalogDirectoryRelations(); }
+
+function mountCatalogOperations() {
+    const tabs=document.querySelector(".tab-strip"),workspace=document.querySelector(".workspace-stack");if(!tabs||!workspace||document.querySelector('[data-panel="catalog"]'))return;const tab=document.createElement("button");tab.className="tab-chip";tab.type="button";tab.dataset.tab="catalog";tab.textContent="图谱导入";tabs.appendChild(tab);const panel=document.createElement("section");panel.className="workspace-panel";panel.dataset.panel="catalog";panel.innerHTML=`<div class="panel-heading"><div><p class="eyebrow">Module 07</p><h2>图谱导入与投影任务</h2></div><div class="panel-tools"><a class="accent-button" href="/api/admin/catalog/import/template">下载 Excel 模板</a><button id="catalogPreviewImport" class="ghost-button" type="button">上传预检</button></div></div><input id="catalogImportFile" type="file" accept=".xlsx" hidden><div id="catalogImportResult" class="status-box"></div><article class="table-card"><div class="card-topline"><h3>图谱与 RAG 投影任务</h3><button id="catalogLoadTasks" class="ghost-button" type="button">刷新任务</button></div><div class="table-shell"><table><thead><tr><th>类型</th><th>状态</th><th>尝试</th><th>错误</th><th>操作</th></tr></thead><tbody id="catalogTaskTable"></tbody></table></div></article>`;workspace.appendChild(panel);tab.addEventListener("click",()=>{setActiveTab("catalog");void loadCatalogOperations();});panel.querySelector("#catalogPreviewImport").addEventListener("click",()=>panel.querySelector("#catalogImportFile").click());panel.querySelector("#catalogImportFile").addEventListener("change",()=>void previewCatalogImport());panel.querySelector("#catalogLoadTasks").addEventListener("click",()=>void loadCatalogOperations()); }
+async function previewCatalogImport(){const input=document.querySelector("#catalogImportFile"),file=input?.files?.[0];if(!file)return;const headers={Accept:"application/json"},token=readCookie("XSRF-TOKEN");if(token)headers["X-CSRF-TOKEN"]=token;const body=new FormData();body.append("file",file);const response=await fetch("/api/admin/catalog/import/preview",{method:"POST",credentials:"include",headers,body});const payload=await response.json();if(!response.ok||payload.code!==200)throw new ApiError(payload.message||"导入预检失败",response.status);const batch=payload.data,box=document.querySelector("#catalogImportResult");box.innerHTML=`预检完成：${batch.validRows} 行可导入，${batch.invalidRows} 行错误，${batch.duplicateRows} 行重复。 <button id="catalogImportConfirm" class="action-button" type="button">确认导入</button> <a class="action-button" href="/api/admin/catalog/import/${batch.batchId}/report">下载报告</a>`;box.querySelector("#catalogImportConfirm").addEventListener("click",async()=>{await requestJson(`/api/admin/catalog/import/${batch.batchId}/confirm`,{method:"POST",body:{}});box.textContent="已导入合法行，等待审核发布。";await loadResources();});}
+async function loadCatalogOperations(){const body=document.querySelector("#catalogTaskTable");if(!body)return;const tasks=await requestJson("/api/admin/catalog/projection-tasks");body.innerHTML=(tasks||[]).map(task=>`<tr><td>${escapeHtml(task.taskType)} ${escapeHtml(task.entityType)}#${task.entityId}</td><td>${renderStatus(task.status)}</td><td>${task.attemptCount||0}</td><td>${escapeHtml(task.lastError||"-")}</td><td>${task.status==="FAILED"?`<button class="action-button" data-retry-task="${task.taskId}">重试</button>`:"-"}</td></tr>`).join("")||'<tr><td colspan="5">暂无投影任务。</td></tr>';body.querySelectorAll("[data-retry-task]").forEach(button=>button.addEventListener("click",async()=>{await requestJson(`/api/admin/catalog/projection-tasks/${button.dataset.retryTask}/retry`,{method:"POST",body:{}});await loadCatalogOperations();}));}
+async function loadCatalog(){return loadCatalogOperations();}
+
+mountUnifiedCatalogResourceWorkspace();
 mountCatalogWorkspace();
