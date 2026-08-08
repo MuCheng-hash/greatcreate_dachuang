@@ -1,6 +1,6 @@
 # RAG 与 Agent 接口约定
 
-> 版本：v1.2
+> 版本：v1.3
 >
 > 状态：待双方确认后冻结
 >
@@ -72,9 +72,8 @@ Agent：校验引用并返回结构化结果
 - Agent 不允许让 LLM 直接生成任意 SQL 或 Cypher 并执行。
 - Agent 不允许信任模型自造的来源名称、URL 或引用 ID。
 - 前端不直接拼接数据库数据作为最终可信上下文。
-- 不因为本协议新增聊天记录表、向量数据库表或其他业务表；P1 仅为已有
-  `content_chunk` 增加检索元数据与索引版本列，并将全文索引扩展为
-  `(chunk_title, chunk_text, retrieval_text) WITH PARSER ngram`。数据库迁移由部署人员按 SQL 脚本一次性执行。
+- 不新增聊天记录表或向量数据库表；P1 仅为已有 `content_chunk` 增加检索元数据与索引版本列，并将全文索引扩展为
+  `(chunk_title, chunk_text, retrieval_text) WITH PARSER ngram`。本轮新增 `rag_web_source`，仅保存管理员维护的权威 Web 域名白名单。所有数据库迁移由部署人员按 SQL 脚本一次性执行。
 
 ## 4. RAG 检索接口
 
@@ -137,6 +136,15 @@ Java 内部接口和 HTTP 接口只实现一种即可，不要求同一份代码
 - `scopeType` 与 `scopeId` 必须同时存在。
 - `topK` 小于等于 0 时使用默认值 `5`；大于 `8` 时按 `8` 处理。
 - 所有 JSON 属性使用 lower camel case，与 Java DTO 的 Jackson 序列化结果保持一致。
+
+#### 内部增强字段
+
+以下字段仅允许 Python Agent 在二次内部检索时传入；前端与公共问答接口不暴露，也不要求调用方填写。
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `hydeQuery` | `String` | 低召回时生成的假设性检索文本；只能用于第二路向量召回，不能作为事实或最终答案上下文。 |
+| `webEvidence` | `Array` | 已由 Agent 按管理员白名单过滤的 HTTPS 外部摘要；每项包含 `title`、`domain`、`url`、`excerpt`、`rank`。 |
 
 ## 5. RAG 检索响应
 
@@ -211,7 +219,7 @@ Java 内部接口和 HTTP 接口只实现一种即可，不要求同一份代码
 | `chunks` | `Array` | 内容分块证据，无结果时返回 `[]` |
 | `graphFacts` | `Array` | Neo4j 或其他结构化关系事实，无结果时返回 `[]` |
 | `citationCandidates` | `Array` | 给 Agent 和 LLM 使用的可展示引用候选，无结果时返回 `[]` |
-| `retrievalMethods` | `Array<String>` | 实际使用的召回方式，可包含 `dense`、`lexical`、`rrf`、`heuristic-rerank`、`knowledge-graph` |
+| `retrievalMethods` | `Array<String>` | 实际使用的召回方式，可包含 `dense`、`lexical`、`hyde`、`web`、`rrf`、`heuristic-rerank`、`cross-encoder-rerank`、`knowledge-graph` |
 | `retrievalTrace` | `Object` | 内部检索 Trace；仅在 Agent `debug=true` 的检索阶段 SSE 事件中透出详细内容 |
 
 响应规则：
@@ -232,7 +240,7 @@ Java 内部接口和 HTTP 接口只实现一种即可，不要求同一份代码
 | `title` | `String` | 内容分块标题 |
 | `text` | `String` | 可供 LLM 使用的内容，建议限制长度 |
 | `score` | `Double` | 检索分数；图谱事实可为空 |
-| `retrievalMethod` | `String` | 重排后的检索方式：`hybrid-rrf+heuristic-rerank`、`dense+heuristic-rerank` 或 `lexical+heuristic-rerank` |
+| `retrievalMethod` | `String` | 重排后的检索方式；常见值为 `hybrid-rrf+heuristic-rerank`、`dense+heuristic-rerank`、`lexical+heuristic-rerank`、`hyde+heuristic-rerank` 或 `cross-encoder-rerank` |
 | `entityType` | `String` | 关联实体类型，例如 `school`、`resource` |
 | `entityId` | `Long` | 关联实体 ID |
 | `sourceId` | `Long` | `data_source` 主键，可为空 |
@@ -261,12 +269,12 @@ Java 内部接口和 HTTP 接口只实现一种即可，不要求同一份代码
 |---|---|---|
 | `citationId` | `String` | 唯一且稳定，Agent 只能引用此字段中的值 |
 | `title` | `String` | 展示标题 |
-| `sourceType` | `String` | 例如 `content_chunk`、`entity_source`、`graph_fact` |
+| `sourceType` | `String` | 例如 `content_chunk`、`entity_source`、`graph_fact`、`web` |
 | `relatedEntityType` | `String` | 关联实体类型 |
 | `relatedEntityId` | `Long` | 关联实体 ID |
 | `excerpt` | `String` | 来源摘要 |
 | `url` | `String` | 来源 URL，可为空 |
-| `evidenceType` | `String` | `chunk` 或 `graph`，用于联合证据排序 |
+| `evidenceType` | `String` | `chunk`、`graph` 或 `web`，用于联合证据排序；`web` 的 `citationId` 固定为 `web:<hash>`，不得伪装为本地知识块。 |
 | `score` | `Double` | 归一化业务重排分数 |
 | `rank` | `Integer` | 联合证据顺序，从 1 开始 |
 | `retrievalMethod` | `String` | 该证据的重排检索方式 |
@@ -276,14 +284,15 @@ Java 内部接口和 HTTP 接口只实现一种即可，不要求同一份代码
 ```text
 1. 接收用户问题
 2. 确定学校、区域或资源范围
-3. 识别问题意图
-4. 生成 KnowledgeRetrieveRequest
-5. 调用 KnowledgeRetriever
-6. 合并已审核的学校/资源业务数据和 RAG 证据
-7. 按 `rank` 选择联合 Top 8 证据（图谱事实最多 3 条）调用 LLM 生成结构化答案
-8. 校验 LLM 返回的 citationId
-9. 删除非法引用或使用已知引用候选补充
-10. 返回最终问答结果
+3. 对“这个学校/那里”等指代问题，使用近期受限会话做受控 JSON 改写；普通明确问题跳过改写
+4. 生成 `KnowledgeRetrieveRequest`，先执行 Dense + Lexical + 当前图谱路由
+5. 若候选少于 3 条或最高 RRF 低于阈值，才并行生成 HyDE 与白名单 Web 摘要并发起第二次内部检索
+6. 将 Dense、Lexical、HyDE、Web 按 RRF 合并，并对最多 32 条文本/Web 候选调用云端精排；失败时保留启发式重排
+7. 合并已审核的学校/资源业务数据和 RAG 证据
+8. 按 `rank` 选择联合 Top 8 证据（图谱事实最多 3 条）调用 LLM 生成结构化答案
+9. 校验 LLM 返回的 citationId
+10. 删除非法引用或使用已知引用候选补充
+11. 返回最终问答结果
 ```
 
 ### 6.1 首版意图
@@ -310,7 +319,7 @@ Java 内部接口和 HTTP 接口只实现一种即可，不要求同一份代码
 
 - `AgentQaRequest.debug` 为可选布尔值，默认 `false`。
 - `debug=true` 时，`phase.completed` 且 `phase=retrieval` 的 SSE 事件可以返回 `retrievalTrace`。
-- Trace 包含 `intent`、`needGraph`、`graphStatus`、各召回通道候选数、最终方法和 Top 8 特征贡献。
+- Trace 包含 `intent`、`needGraph`、`graphStatus`、改写状态、低召回原因、Dense/Lexical/HyDE/Web 候选数、各路 RRF 贡献、精排状态及 Top 8 特征贡献。
 - `graphStatus` 只允许 `skipped`、`ok`、`empty`、`failed`。
 - Python 仅把精简、限长后的 Trace 写入 LLM Trace `metadata_json`；普通问答 SSE 不增加调试详情。
 - Graph 是 RAG 内部检索通道，不计入 LLM `toolCount`；工具数只统计模型实际发起的工具调用。
@@ -357,7 +366,7 @@ Java 内部接口和 HTTP 接口只实现一种即可，不要求同一份代码
 
 - RAG 同学不要修改 Agent 的 Controller、前端问答渲染和最终响应结构。
 - Agent 同学不要直接修改 RAG 的检索算法或数据库查询实现。
-- 双方都不要为了本协议新增业务表；已有环境按迁移脚本增加 `content_chunk` 检索元数据列并重建三列 `ngram` 全文索引。
+- 双方不要新增与检索无关的业务表；已有环境按迁移脚本增加 `content_chunk` 检索元数据列、重建三列 `ngram` 全文索引，并创建 `rag_web_source` 白名单表。
 - Java 对外的 `/api/ai/teaching-plans/generate` 和
   `/api/ai/teaching-plans/generate/stream` 保持兼容；FastAPI 内部统一调用
   `/agent/messages` 和 `/agent/messages/stream`，不再保留 `/llm/*` 教学方案接口。
@@ -462,16 +471,17 @@ RAG 请求重点：
 | 检索命中内容或图谱事实 | `ok` | 正常组装答案 |
 | 检索正常但无结果 | `empty` | 返回无法确认的说明和澄清问题，不编造事实 |
 | Neo4j 不可用但 MySQL 有结果 | `degraded` | 使用 MySQL 内容继续回答，并说明图谱事实不可用 |
+| HyDE、Web 或云端精排不可用 | `degraded`（仍有证据时） | 保留本地 Dense/Lexical/图谱与启发式重排，不中断回答 |
 | RAG 服务异常 | 无响应或异常 | Agent 使用已有业务上下文兜底，标记回答降级 |
 | 学校/区域/资源范围不明确 | 不调用 RAG | Agent 返回 `UNKNOWN` 或要求用户补充范围 |
 | LLM 返回非法引用 | 不影响 RAG 状态 | Agent 删除非法引用后再返回答案 |
 
 ## 10. 版本和兼容性
 
-- 本协议版本为 `v1.2`。
+- 本协议版本为 `v1.3`。
 - 新增字段必须保持向后兼容，消费者应忽略未知字段。
 - 不得直接重命名或删除已冻结字段；需要变更时升级协议版本。
-- `retrievalMethod` 当前使用 `hybrid-rrf+heuristic-rerank`、`dense+heuristic-rerank`、`lexical+heuristic-rerank`、`knowledge-graph+heuristic-rerank`；顶层 `retrievalMethods` 使用固定能力名，不改变顶层响应结构。
+- `retrievalMethod` 支持 `hybrid-rrf+heuristic-rerank`、`dense+heuristic-rerank`、`lexical+heuristic-rerank`、`hyde+heuristic-rerank`、`cross-encoder-rerank`、`knowledge-graph+heuristic-rerank`；顶层 `retrievalMethods` 使用能力名，不改变顶层响应结构。
 - 部署顺序固定为：执行 MySQL 迁移，启动应用构建新物理 Collection，确认 Alias 切换成功后开放 RAG。回滚时保留新增列和旧 Collection。
 - 后续引入向量数据库时，只替换 RAG 实现，不改变 Agent 请求和响应契约。
 - 如果 RAG 从 Java 内部接口迁移为 Python HTTP 服务，必须保持本文档中的 JSON 字段和语义不变。
