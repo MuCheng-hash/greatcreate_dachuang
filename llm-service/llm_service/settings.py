@@ -136,6 +136,12 @@ class Settings(BaseSettings):
     agent_tool_timeout_seconds: float = Field(
         5.0, validation_alias=AliasChoices("agent_tool_timeout_seconds", "AGENT_TOOL_TIMEOUT_SECONDS")
     )
+    tavily_api_key: str = Field("", validation_alias=AliasChoices("tavily_api_key", "TAVILY_API_KEY"))
+    tavily_base_url: str = "https://api.tavily.com/search"
+    tavily_timeout_seconds: float = 6.0
+    retrieval_rewrite_confidence: float = 0.70
+    retrieval_hyde_max_characters: int = 420
+    retrieval_web_cache_seconds: int = 300
     agent_memory_enabled: bool = Field(
         False,
         validation_alias=AliasChoices("agent_memory_enabled", "AGENT_MEMORY_ENABLED"),

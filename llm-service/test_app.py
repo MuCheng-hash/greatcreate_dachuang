@@ -50,6 +50,47 @@ def test_multimodal_request_builds_image_message(tmp_path: Path):
     assert messages[-1].content[1]["image_url"]["url"].startswith("data:image/png;base64,")
 
 
+def test_controlled_query_rewrite_only_uses_contextual_reference_and_never_generates_facts(tmp_path: Path):
+    settings = settings_for(tmp_path)
+    repository = ConversationRepository(settings.database_path)
+    runtime = AgentRuntime(settings, repository)
+    thread = repository.create_thread("account:1", "SCHOOL", 1)
+    calls: list[str] = []
+
+    class FakeModel:
+        async def generate_json(self, prompt, validator=None, **_kwargs):
+            calls.append(prompt)
+            return {
+                "searchQuery": "里庄小学成立多久？",
+                "intent": "RESOURCE_EXPLANATION",
+                "grade": "四年级",
+                "theme": "校史",
+                "confidence": 0.93,
+            }
+
+    runtime.model = FakeModel()
+    contextual = AgentMessageRequest.model_validate(message_payload(message="这个学校成立多久？"))
+    explicit = AgentMessageRequest.model_validate(message_payload(message="里庄小学成立多久？"))
+
+    rewritten = asyncio.run(runtime._controlled_query_rewrite(contextual, thread))
+    unchanged = asyncio.run(runtime._controlled_query_rewrite(explicit, thread))
+
+    assert rewritten["status"] == "applied"
+    assert rewritten["searchQuery"] == "里庄小学成立多久？"
+    assert unchanged == {"status": "skipped", "searchQuery": "里庄小学成立多久？"}
+    assert len(calls) == 1
+    assert "不得生成任何新事实" in calls[0]
+
+
+def test_authoritative_web_host_allows_only_configured_domain_or_its_subdomain() -> None:
+    domains = ["www.gov.cn"]
+
+    assert AgentRuntime._allowed_web_host("www.gov.cn", domains)
+    assert AgentRuntime._allowed_web_host("news.www.gov.cn", domains)
+    assert not AgentRuntime._allowed_web_host("www.gov.cn.example.org", domains)
+    assert not AgentRuntime._allowed_web_host("example.org", domains)
+
+
 def settings_for(tmp_path: Path, **overrides) -> Settings:
     return Settings(
         _env_file=None,

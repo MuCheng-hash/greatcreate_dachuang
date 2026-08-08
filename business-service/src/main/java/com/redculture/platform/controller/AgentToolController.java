@@ -4,6 +4,7 @@ import com.redculture.platform.common.ApiResponse;
 import com.redculture.platform.config.AgentProperties;
 import com.redculture.platform.entity.LocalEduResource;
 import com.redculture.platform.service.AgentToolService;
+import com.redculture.platform.service.admin.RagWebSourceService;
 import com.redculture.platform.vo.ai.AgentToolRequest;
 import com.redculture.platform.vo.ai.KnowledgeRetrieveResult;
 import org.springframework.util.StringUtils;
@@ -26,10 +27,13 @@ public class AgentToolController {
 
     private final AgentProperties agentProperties;
     private final AgentToolService agentToolService;
+    private final RagWebSourceService ragWebSourceService;
 
-    public AgentToolController(AgentProperties agentProperties, AgentToolService agentToolService) {
+    public AgentToolController(AgentProperties agentProperties, AgentToolService agentToolService,
+                               RagWebSourceService ragWebSourceService) {
         this.agentProperties = agentProperties;
         this.agentToolService = agentToolService;
+        this.ragWebSourceService = ragWebSourceService;
     }
 
     @GetMapping("/health")
@@ -39,6 +43,15 @@ public class AgentToolController {
             return ApiResponse.fail(403, "agent service token is invalid");
         }
         return ApiResponse.success(Map.of("status", "up", "service", "business-service"));
+    }
+
+    @GetMapping("/web-source-domains")
+    public ApiResponse<Map<String, Object>> webSourceDomains(
+            @RequestHeader(value = SERVICE_TOKEN_HEADER, required = false) String token) {
+        if (!authorized(token)) {
+            return ApiResponse.fail(403, "agent service token is invalid");
+        }
+        return ApiResponse.success(Map.of("domains", ragWebSourceService.enabledDomains()));
     }
 
     @PostMapping("/school-context")

@@ -2,6 +2,9 @@ package com.redculture.platform.vo.ai;
 
 import lombok.Data;
 
+import java.util.ArrayList;
+import java.util.List;
+
 @Data
 public class KnowledgeRetrieveRequest {
 
@@ -22,4 +25,10 @@ public class KnowledgeRetrieveRequest {
     private String theme;
 
     private Integer topK;
+
+    /** Optional hypothetical answer used only as an additional dense retrieval query. */
+    private String hydeQuery;
+
+    /** Optional server-filtered Web evidence supplied by the trusted Agent service. */
+    private List<WebEvidenceVO> webEvidence = new ArrayList<>();
 }

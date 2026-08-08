@@ -3,6 +3,7 @@ package com.redculture.platform.controller;
 import com.redculture.platform.common.ApiResponse;
 import com.redculture.platform.config.AgentProperties;
 import com.redculture.platform.service.AgentToolService;
+import com.redculture.platform.service.admin.RagWebSourceService;
 import com.redculture.platform.vo.ai.AgentToolRequest;
 import com.redculture.platform.vo.ai.KnowledgeRetrieveResult;
 import org.junit.jupiter.api.Test;
@@ -20,7 +21,7 @@ class AgentToolControllerTest {
         AgentProperties properties = new AgentProperties();
         properties.setInternalServiceToken("secret");
         AgentToolService service = mock(AgentToolService.class);
-        AgentToolController controller = new AgentToolController(properties, service);
+        AgentToolController controller = new AgentToolController(properties, service, mock(RagWebSourceService.class));
 
         ApiResponse<?> response = controller.knowledgeRetrieve("wrong", new AgentToolRequest());
 
@@ -35,7 +36,7 @@ class AgentToolControllerTest {
         AgentToolService service = mock(AgentToolService.class);
         when(service.knowledgeRetrieve(org.mockito.ArgumentMatchers.any()))
                 .thenReturn(KnowledgeRetrieveResult.empty());
-        AgentToolController controller = new AgentToolController(properties, service);
+        AgentToolController controller = new AgentToolController(properties, service, mock(RagWebSourceService.class));
 
         ApiResponse<KnowledgeRetrieveResult> response = controller.knowledgeRetrieve(
                 "secret", new AgentToolRequest()
@@ -50,12 +51,31 @@ class AgentToolControllerTest {
         AgentProperties properties = new AgentProperties();
         properties.setInternalServiceToken("secret");
         AgentToolController controller = new AgentToolController(
-                properties, mock(AgentToolService.class)
+                properties, mock(AgentToolService.class), mock(RagWebSourceService.class)
         );
 
         assertEquals(403, controller.health("wrong").getCode());
         ApiResponse<?> response = controller.health("secret");
         assertEquals(200, response.getCode());
         assertEquals("up", ((java.util.Map<?, ?>) response.getData()).get("status"));
+    }
+
+    @Test
+    void exposesEnabledWebDomainsOnlyToValidInternalService() {
+        AgentProperties properties = new AgentProperties();
+        properties.setInternalServiceToken("secret");
+        RagWebSourceService sourceService = mock(RagWebSourceService.class);
+        when(sourceService.enabledDomains()).thenReturn(java.util.List.of("www.gov.cn"));
+        AgentToolController controller = new AgentToolController(
+                properties, mock(AgentToolService.class), sourceService
+        );
+
+        assertEquals(403, controller.webSourceDomains("wrong").getCode());
+        ApiResponse<?> response = controller.webSourceDomains("secret");
+
+        assertEquals(200, response.getCode());
+        assertEquals(java.util.List.of("www.gov.cn"),
+                ((java.util.Map<?, ?>) response.getData()).get("domains"));
+        verify(sourceService).enabledDomains();
     }
 }
