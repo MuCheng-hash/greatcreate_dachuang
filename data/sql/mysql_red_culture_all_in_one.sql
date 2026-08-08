@@ -16,6 +16,7 @@ SET FOREIGN_KEY_CHECKS = 0;
 
 -- Reset existing tables so the script can be imported repeatedly.
 DROP TABLE IF EXISTS audit_log;
+DROP TABLE IF EXISTS rag_web_source;
 DROP TABLE IF EXISTS content_chunk;
 DROP TABLE IF EXISTS entity_source_rel;
 DROP TABLE IF EXISTS resource_media;
@@ -1378,3 +1379,16 @@ SET FOREIGN_KEY_CHECKS = 1;
 -- SELECT region_id, region_name, JSON_VALID(boundary_geojson) AS json_valid
 -- FROM administrative_region
 -- ORDER BY region_id;
+-- RAG authoritative Web source whitelist (manual management by platform administrators)
+CREATE TABLE IF NOT EXISTS rag_web_source (
+    source_id BIGINT NOT NULL AUTO_INCREMENT,
+    display_name VARCHAR(120) NOT NULL,
+    domain VARCHAR(255) NOT NULL,
+    enabled TINYINT(1) NOT NULL DEFAULT 1,
+    sort_order INT NOT NULL DEFAULT 100,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (source_id),
+    UNIQUE KEY uk_rag_web_source_domain (domain),
+    KEY idx_rag_web_source_enabled_sort (enabled, sort_order)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='RAG 权威 Web 检索域名白名单';
