@@ -1,5 +1,5 @@
 const adminState = {
-    activeTab: "schools",
+    activeTab: "dashboard",
     registrations: [],
     schools: [],
     resources: [],
@@ -54,6 +54,28 @@ const adminElements = {
     resourceTotalMetric: document.querySelector("#resourceTotalMetric"),
     planTotalMetric: document.querySelector("#planTotalMetric"),
     refreshDashboardButton: document.querySelector("#refreshDashboardButton"),
+    dashboardRefreshButton: document.querySelector("#dashboardRefreshButton"),
+    dashboardProjectionButton: document.querySelector("#dashboardProjectionButton"),
+    dashboardUpdatedAt: document.querySelector("#dashboardUpdatedAt"),
+    dashboardResourceMetric: document.querySelector("#dashboardResourceMetric"),
+    dashboardSchoolMetric: document.querySelector("#dashboardSchoolMetric"),
+    dashboardTeacherMetric: document.querySelector("#dashboardTeacherMetric"),
+    dashboardStudentMetric: document.querySelector("#dashboardStudentMetric"),
+    dashboardPlanMetric: document.querySelector("#dashboardPlanMetric"),
+    dashboardQuestionMetric: document.querySelector("#dashboardQuestionMetric"),
+    dashboardQuestionHint: document.querySelector("#dashboardQuestionHint"),
+    dashboardRagStatus: document.querySelector("#dashboardRagStatus"),
+    dashboardRagDone: document.querySelector("#dashboardRagDone"),
+    dashboardRagPending: document.querySelector("#dashboardRagPending"),
+    dashboardRagFailed: document.querySelector("#dashboardRagFailed"),
+    dashboardRagHint: document.querySelector("#dashboardRagHint"),
+    dashboardQdrantStatus: document.querySelector("#dashboardQdrantStatus"),
+    dashboardQdrantCollection: document.querySelector("#dashboardQdrantCollection"),
+    dashboardQdrantAlias: document.querySelector("#dashboardQdrantAlias"),
+    dashboardQdrantPoints: document.querySelector("#dashboardQdrantPoints"),
+    dashboardProjectionPending: document.querySelector("#dashboardProjectionPending"),
+    dashboardProjectionFailed: document.querySelector("#dashboardProjectionFailed"),
+    dashboardProjectionTotal: document.querySelector("#dashboardProjectionTotal"),
     logoutButton: document.querySelector("#logoutButton"),
     tabButtons: Array.from(document.querySelectorAll(".tab-strip .tab-chip[data-tab]")),
     panels: Array.from(document.querySelectorAll(".workspace-panel")),
@@ -734,10 +756,16 @@ function bindAdminEvents() {
     initializeAgentDebugPanel();
     initializeRagKnowledgePanel();
 
-    adminElements.refreshDashboardButton?.addEventListener("click", () => {
-        void bootstrapAdmin();
-    });
-    adminElements.logoutButton?.addEventListener("click", () => void logoutAdmin());
+      adminElements.refreshDashboardButton?.addEventListener("click", () => {
+          void bootstrapAdmin();
+      });
+      adminElements.dashboardRefreshButton?.addEventListener("click", () => void loadDashboardOverview());
+      adminElements.dashboardProjectionButton?.addEventListener("click", () => {
+          setActiveTab("catalog");
+          void loadCatalog();
+          document.querySelector("#catalogLoadTasks")?.click();
+      });
+      adminElements.logoutButton?.addEventListener("click", () => void logoutAdmin());
 
     adminElements.tabButtons.forEach(button => {
         button.addEventListener("click", () => {
@@ -848,15 +876,18 @@ async function bootstrapAdmin() {
             loadSchoolProvinceOptions(),
             loadRegistrations(),
             loadSchools(),
-            loadResources(),
-            loadPlans()
-        ]);
-        syncSelectOptions();
+              loadResources(),
+              loadPlans()
+          ]);
+          const dashboardAvailable = await loadDashboardOverview();
+          syncSelectOptions();
         if (adminState.activeTab === "school-map") {
             await loadSchoolMapDetail(adminState.selectedSchoolIdForMap, { renderMap: true });
         }
         await loadUserManagementData();
-        setGlobalStatus("在线", "后台接口联通正常，可以开始录入和维护数据。");
+          setGlobalStatus(dashboardAvailable ? "在线" : "部分可用", dashboardAvailable
+              ? "后台接口联通正常，可以开始录入和维护数据。"
+              : "核心数据已加载，驾驶舱部分状态暂不可用。");
     } catch (error) {
         setGlobalStatus("异常", error.message || "后台接口请求失败。");
     }
@@ -1778,10 +1809,16 @@ function setGlobalStatus(title, hint) {
     }
 }
 
-function readCsrfToken() {
-    const item = document.cookie.split(";").map(value => value.trim()).find(value => value.startsWith("XSRF-TOKEN="));
+function readCookie(name) {
+    const prefix = `${name}=`;
+    const item = document.cookie.split(";").map(value => value.trim()).find(value => value.startsWith(prefix));
     if (!item) return "";
-    try { return decodeURIComponent(item.slice("XSRF-TOKEN=".length)); } catch { return item.slice("XSRF-TOKEN=".length); }
+    const value = item.slice(prefix.length);
+    try { return decodeURIComponent(value); } catch { return value; }
+}
+
+function readCsrfToken() {
+    return readCookie("XSRF-TOKEN");
 }
 
 function waitForRetry(delayMs) {
@@ -3663,3 +3700,339 @@ function escapeHtml(value) {
         .replaceAll('"', "&quot;")
         .replaceAll("'", "&#39;");
 }
+
+// 统一目录作为既有静态后台的增量模块，复用 requestJson 与 tab 切换样式。
+function mountCatalogWorkspace() {
+    return mountCatalogOperations();
+    const tabs = document.querySelector(".tab-strip");
+    const workspace = document.querySelector(".workspace-stack");
+    if (!tabs || !workspace || document.querySelector('[data-panel="catalog"]')) return;
+    const tab = document.createElement("button");
+    tab.className = "tab-chip"; tab.type = "button"; tab.dataset.tab = "catalog"; tab.textContent = "图谱目录与导入";
+    tabs.appendChild(tab);
+    const panel = document.createElement("section");
+    panel.className = "workspace-panel"; panel.dataset.panel = "catalog";
+    panel.innerHTML = `<div class="panel-heading"><div><p class="eyebrow">Module 07</p><h2>资源与图谱目录</h2></div><div class="panel-tools"><select id="catalogType" class="line-input"><option value="">全部实体</option><option value="RESOURCE">资源</option><option value="SITE">遗址</option><option value="MEMORIAL">纪念馆</option><option value="HERO">人物</option><option value="EVENT">事件</option><option value="STORY">故事</option></select><input id="catalogKeyword" class="line-input" placeholder="名称、编码或别名"><button id="catalogSearch" class="ghost-button" type="button">查询</button><a class="accent-button" href="/api/admin/catalog/import/template">下载 Excel 模板</a></div></div><div class="workspace-grid"><article class="form-card"><div class="card-topline"><h3>新增图谱实体</h3></div><form id="catalogForm" class="data-form"><label><span>实体类型</span><select id="catalogFormType"><option value="SITE">遗址</option><option value="MEMORIAL">纪念馆</option><option value="HERO">人物</option><option value="EVENT">事件</option><option value="STORY">故事</option></select></label><div class="field-grid two-col"><label><span>编码</span><input id="catalogCode"></label><label><span>名称</span><input id="catalogName"></label><label><span>别名</span><input id="catalogAlias"></label><label><span>区域 ID</span><input id="catalogRegion" type="number"></label></div><label><span>简介</span><textarea id="catalogSummary"></textarea></label><label><span>详情</span><textarea id="catalogDetail"></textarea></label><div class="form-actions"><button class="accent-button" type="submit">保存待审核</button></div></form></article><article class="table-card"><div class="card-topline"><h3>目录列表</h3><span id="catalogCount" class="mini-stat">0 条</span></div><div class="table-shell"><table><thead><tr><th>类型</th><th>名称</th><th>状态</th><th>操作</th></tr></thead><tbody id="catalogTable"></tbody></table></div></article></div></section>`;
+    workspace.appendChild(panel);
+    tab.addEventListener("click", () => { document.querySelectorAll(".tab-chip").forEach(x => x.classList.toggle("is-active", x === tab)); document.querySelectorAll(".workspace-panel").forEach(x => x.classList.toggle("is-active", x === panel)); void loadCatalog(); });
+    document.querySelector("#catalogSearch").addEventListener("click", () => void loadCatalog());
+    const catalogForm = document.querySelector("#catalogForm");
+    catalogForm.querySelector(".form-actions").insertAdjacentHTML("beforebegin", `<div class="field-grid two-col"><label><span>图片 URL</span><input id="catalogImageUrl" type="url"></label><label><span>来源 URL</span><input id="catalogSourceUrl" type="url"></label><label><span>来源可信度（1-5）</span><input id="catalogCredibility" type="number" min="1" max="5"></label></div>`);
+    catalogForm.addEventListener("submit", async event => { event.preventDefault(); const imageUrl=optionalText(document.querySelector("#catalogImageUrl").value),sourceUrl=optionalText(document.querySelector("#catalogSourceUrl").value); const body={entityType:document.querySelector("#catalogFormType").value,code:document.querySelector("#catalogCode").value.trim(),name:document.querySelector("#catalogName").value.trim(),alias:optionalText(document.querySelector("#catalogAlias").value),regionId:parseNullableNumber(document.querySelector("#catalogRegion").value),summary:optionalText(document.querySelector("#catalogSummary").value),detail:optionalText(document.querySelector("#catalogDetail").value),media:imageUrl?[{mediaUrl:imageUrl,mediaType:"image",primary:true}]:[],sources:sourceUrl?[{sourceUrl,credibilityScore:parseNullableNumber(document.querySelector("#catalogCredibility").value)}]:[]}; await requestJson("/api/admin/catalog/entities",{method:"POST",body}); event.target.reset(); await loadCatalog(); });
+    const importInput=document.createElement("input"); importInput.type="file"; importInput.accept=".xlsx"; importInput.hidden=true; importInput.id="catalogImportFile"; tabs.appendChild(importInput);
+    const previewButton=document.createElement("button"); previewButton.type="button"; previewButton.className="ghost-button"; previewButton.textContent="上传预检"; panel.querySelector(".panel-tools").appendChild(previewButton);
+    const importResult=document.createElement("div"); importResult.className="status-box"; panel.querySelector(".panel-heading").appendChild(importResult);
+    previewButton.addEventListener("click",()=>importInput.click()); importInput.addEventListener("change",async()=>{const file=importInput.files?.[0];if(!file)return;const form=new FormData();form.append("file",file);const headers={Accept:"application/json"};const token=readCookie("XSRF-TOKEN");if(token)headers["X-CSRF-TOKEN"]=token;const response=await fetch("/api/admin/catalog/import/preview",{method:"POST",credentials:"include",headers,body:form});const payload=await response.json();if(!response.ok||payload.code!==200)throw new ApiError(payload.message||"导入预检失败",response.status);const batch=payload.data;importResult.innerHTML=`预检完成：${batch.validRows} 行可导入，${batch.invalidRows} 行错误，${batch.duplicateRows} 行重复。 <button class="action-button" id="catalogImportConfirm">确认导入</button> <a class="action-button" href="/api/admin/catalog/import/${batch.batchId}/report">下载报告</a>`;document.querySelector("#catalogImportConfirm").addEventListener("click",async()=>{await requestJson(`/api/admin/catalog/import/${batch.batchId}/confirm`,{method:"POST",body:{}});importResult.textContent="已导入合法行，等待管理员审核发布。";await loadCatalog();});});
+    const relationCard=document.createElement("article"); relationCard.className="form-card"; relationCard.innerHTML=`<div class="card-topline"><h3>维护图谱关系</h3></div><form id="catalogRelationForm" class="data-form"><div class="field-grid two-col"><label><span>源类型</span><select id="catalogRelationSourceType"><option value="SITE">遗址</option><option value="MEMORIAL">纪念馆</option><option value="EVENT">事件</option><option value="STORY">故事</option></select></label><label><span>源实体 ID</span><input id="catalogRelationSourceId" type="number" min="1"></label><label><span>目标类型</span><select id="catalogRelationTargetType"><option value="EVENT">事件</option><option value="HERO">人物</option><option value="SITE">遗址</option><option value="MEMORIAL">纪念馆</option><option value="RESOURCE">资源</option></select></label><label><span>目标实体 ID</span><input id="catalogRelationTargetId" type="number" min="1"></label><label><span>关系类型</span><input id="catalogRelationType" placeholder="如 OCCURRED_AT"></label></div><label><span>备注</span><input id="catalogRelationRemark"></label><div class="form-actions"><button class="accent-button" type="submit">创建并投影</button></div></form>`; panel.querySelector(".workspace-grid").appendChild(relationCard);
+    relationCard.querySelector("form").addEventListener("submit",async event=>{event.preventDefault();const body={sourceType:document.querySelector("#catalogRelationSourceType").value,sourceId:parseNullableNumber(document.querySelector("#catalogRelationSourceId").value),targetType:document.querySelector("#catalogRelationTargetType").value,targetId:parseNullableNumber(document.querySelector("#catalogRelationTargetId").value),relationType:document.querySelector("#catalogRelationType").value.trim(),remark:optionalText(document.querySelector("#catalogRelationRemark").value)};if(!body.sourceId||!body.targetId||!body.relationType){setGlobalStatus("校验失败","关系两端、类型均不能为空。");return;}await requestJson("/api/admin/catalog/relations",{method:"POST",body});event.target.reset();setGlobalStatus("已投影","图谱关系已创建。");});
+    const taskCard=document.createElement("article"); taskCard.className="table-card"; taskCard.innerHTML=`<div class="card-topline"><h3>图谱与 RAG 投影任务</h3><button id="catalogLoadTasks" class="ghost-button" type="button">刷新任务</button></div><div class="table-shell"><table><thead><tr><th>类型</th><th>状态</th><th>尝试</th><th>错误</th><th>操作</th></tr></thead><tbody id="catalogTaskTable"></tbody></table></div>`; panel.querySelector(".workspace-grid").appendChild(taskCard);
+    async function loadProjectionTasks(){const tasks=await requestJson("/api/admin/catalog/projection-tasks");const body=taskCard.querySelector("#catalogTaskTable");body.innerHTML=(tasks||[]).map(task=>`<tr><td>${escapeHtml(task.taskType)} ${escapeHtml(task.entityType)}#${task.entityId}</td><td>${renderStatus(task.status)}</td><td>${task.attemptCount||0}</td><td>${escapeHtml(task.lastError||"-")}</td><td>${task.status==="FAILED"?`<button class="action-button" data-retry-task="${task.taskId}">重试</button>`:"-"}</td></tr>`).join("")||"<tr><td colspan=\"5\">暂无投影任务。</td></tr>";body.querySelectorAll("[data-retry-task]").forEach(button=>button.addEventListener("click",async()=>{await requestJson(`/api/admin/catalog/projection-tasks/${button.dataset.retryTask}/retry`,{method:"POST",body:{}});await loadProjectionTasks();}));}
+    taskCard.querySelector("#catalogLoadTasks").addEventListener("click",()=>void loadProjectionTasks());
+    void loadProjectionTasks();
+}
+async function loadCatalog() { const type=document.querySelector("#catalogType")?.value||""; const keyword=document.querySelector("#catalogKeyword")?.value?.trim()||""; const result=await requestJson(`/api/admin/catalog/entities?pageNum=1&pageSize=50${type?`&entityType=${type}`:""}${keyword?`&keyword=${encodeURIComponent(keyword)}`:""}`); const rows=result.records||[]; document.querySelector("#catalogCount").textContent=`${rows.length} 条`; document.querySelector("#catalogTable").innerHTML=rows.map(x=>`<tr><td>${escapeHtml(x.entityType)}</td><td><strong>${escapeHtml(x.name)}</strong><div class="status-box">${escapeHtml(x.code||"-")}</div></td><td>${renderStatus(x.reviewStatus)}</td><td><button class="action-button" data-approve="${x.entityType}:${x.entityId}">通过并投影</button><button class="action-button" data-deactivate="${x.entityType}:${x.entityId}">停用</button></td></tr>`).join("")||"<tr><td colspan=\"4\">暂无目录数据。</td></tr>"; document.querySelectorAll("[data-approve]").forEach(b=>b.addEventListener("click",async()=>{const [t,id]=b.dataset.approve.split(":");await requestJson(`/api/admin/catalog/entities/${t}/${id}/approve`,{method:"POST",body:{}});await loadCatalog();})); document.querySelectorAll("[data-deactivate]").forEach(b=>b.addEventListener("click",async()=>{const [t,id]=b.dataset.deactivate.split(":");await requestJson(`/api/admin/catalog/entities/${t}/${id}`,{method:"DELETE"});await loadCatalog();})); }
+async function loadDashboardOverview() {
+    try {
+        const data = await requestJson("/api/admin/dashboard/overview");
+        const rag = data.ragStatus || {};
+        const projection = data.projectionStatus || {};
+        setDashboardMetric(adminElements.dashboardResourceMetric, data.resourceCount);
+        setDashboardMetric(adminElements.dashboardSchoolMetric, data.schoolCount);
+        setDashboardMetric(adminElements.dashboardTeacherMetric, data.teacherCount);
+        setDashboardMetric(adminElements.dashboardStudentMetric, data.studentCount);
+        setDashboardMetric(adminElements.dashboardPlanMetric, data.teachingPlanCount);
+        setDashboardMetric(adminElements.dashboardQuestionMetric, data.questionCount, data.questionStatus !== "ok");
+        setDashboardText(adminElements.dashboardQuestionHint, data.questionStatus === "ok" ? "成功完成的智能问答轮次" : "Agent 服务暂不可用");
+        setDashboardMetric(adminElements.dashboardRagDone, rag.done);
+        setDashboardMetric(adminElements.dashboardRagPending, rag.pending);
+        setDashboardMetric(adminElements.dashboardRagFailed, rag.failed);
+        setDashboardStatus(adminElements.dashboardRagStatus, rag.status, dashboardStatusLabel(rag.status));
+        setDashboardText(adminElements.dashboardRagHint, rag.message || `RAG ${rag.enabled ? "已启用" : "已停用"}`);
+        setDashboardStatus(adminElements.dashboardQdrantStatus, rag.reachable ? "ok" : "unavailable", rag.reachable ? "可达" : "不可达");
+        setDashboardText(adminElements.dashboardQdrantCollection, rag.collection || "-");
+        setDashboardText(adminElements.dashboardQdrantAlias, rag.aliasTarget || "未切换 Alias");
+        setDashboardMetric(adminElements.dashboardQdrantPoints, rag.pointCount, !rag.reachable);
+        setDashboardMetric(adminElements.dashboardProjectionPending, projection.pending);
+        setDashboardMetric(adminElements.dashboardProjectionFailed, projection.failed);
+        setDashboardMetric(adminElements.dashboardProjectionTotal, projection.total ?? data.pendingProjectionCount);
+        setDashboardText(adminElements.dashboardUpdatedAt, `更新于 ${new Date().toLocaleString("zh-CN", { hour12: false })}`);
+        return true;
+    } catch (error) {
+        [adminElements.dashboardResourceMetric, adminElements.dashboardSchoolMetric, adminElements.dashboardTeacherMetric,
+            adminElements.dashboardStudentMetric, adminElements.dashboardPlanMetric, adminElements.dashboardQuestionMetric,
+            adminElements.dashboardRagDone, adminElements.dashboardRagPending, adminElements.dashboardRagFailed,
+            adminElements.dashboardQdrantPoints, adminElements.dashboardProjectionPending, adminElements.dashboardProjectionFailed,
+            adminElements.dashboardProjectionTotal].forEach(element => setDashboardMetric(element, null, true));
+        setDashboardStatus(adminElements.dashboardRagStatus, "unavailable", "不可用");
+        setDashboardStatus(adminElements.dashboardQdrantStatus, "unavailable", "不可用");
+        setDashboardText(adminElements.dashboardRagHint, error.message || "驾驶舱指标加载失败。");
+        setDashboardText(adminElements.dashboardUpdatedAt, "概览服务暂不可用");
+        return false;
+    }
+}
+
+function setDashboardMetric(element, value, unavailable = false) {
+    if (element) element.textContent = unavailable || value === null || value === undefined ? "-" : String(value);
+}
+
+function setDashboardText(element, value) {
+    if (element) element.textContent = value;
+}
+
+function setDashboardStatus(element, status, label) {
+    if (!element) return;
+    const normalized = String(status || "unavailable").toLowerCase();
+    element.className = `status-pill status-${normalized}`;
+    element.textContent = label || dashboardStatusLabel(normalized);
+}
+
+function dashboardStatusLabel(status) {
+    return ({ ok: "正常", degraded: "降级", unavailable: "不可用", disabled: "已停用" })[String(status || "").toLowerCase()] || "未知";
+}
+const catalogDirectoryState = { selected: null, relationOptions: [], pendingMediaPreviewUrls: [], regionOptions: new Map(), relationEntityOptions: { source: new Map(), target: new Map() } };
+
+const catalogEntityLabels = {
+    RESOURCE: "资源", SITE: "遗址", MEMORIAL: "纪念馆", HERO: "人物", EVENT: "历史事件", STORY: "红色故事"
+};
+
+function mountUnifiedCatalogResourceWorkspace() {
+    const root = document.querySelector("#catalogResourceWorkspace");
+    if (!root || root.dataset.ready === "true") return;
+    root.dataset.ready = "true";
+    root.innerHTML = `
+        <div class="panel-heading">
+            <div><p class="eyebrow">Module 02</p><h2>统一资源目录</h2></div>
+            <div class="panel-tools">
+                <select id="catalogDirectoryType" class="line-input"><option value="">全部类型</option>${Object.entries(catalogEntityLabels).map(([key, label]) => `<option value="${key}">${label}</option>`).join("")}</select>
+                <select id="catalogDirectoryCategory" class="line-input"><option value="">全部资源分类</option><option value="red_culture">红色文化</option><option value="local_history">地方历史</option><option value="labor_education">劳动教育</option><option value="social_practice">社会实践</option><option value="other">其他</option></select>
+                <select id="catalogDirectoryReview" class="line-input"><option value="">全部审核状态</option><option value="draft">草稿</option><option value="pending">待审核</option><option value="approved">已通过</option><option value="rejected">已驳回</option></select>
+                <input id="catalogDirectoryKeyword" class="line-input" type="search" placeholder="名称、编码、别名或地址">
+                <button id="catalogDirectorySearch" class="ghost-button" type="button">查询</button>
+                <button id="catalogDirectoryCreate" class="accent-button" type="button">新增实体</button>
+            </div>
+        </div>
+        <div class="workspace-grid">
+            <article class="form-card">
+                <div class="card-topline"><h3 id="catalogDirectoryFormTitle">新增待审核实体</h3><button id="catalogDirectoryReset" class="ghost-button" type="button">清空</button></div>
+                <form id="catalogDirectoryForm" class="data-form">
+                    <input id="catalogDirectoryId" type="hidden">
+                    <div class="field-grid two-col">
+                        <label><span>实体类型</span><select id="catalogDirectoryFormType">${Object.entries(catalogEntityLabels).map(([key, label]) => `<option value="${key}">${label}</option>`).join("")}</select></label>
+                        <label><span>编码</span><input id="catalogDirectoryCode" required placeholder="RES_HEB_0001"></label>
+                        <label><span>名称</span><input id="catalogDirectoryName" required placeholder="输入名称"></label>
+                        <label><span>别名</span><input id="catalogDirectoryAlias" placeholder="可选"></label>
+                        <label><span>行政区域</span><div class="catalog-picker"><input id="catalogDirectoryRegionName" autocomplete="off" placeholder="搜索并选择区域" role="combobox" aria-autocomplete="list" aria-expanded="false"><button id="catalogDirectoryRegionToggle" class="catalog-picker-toggle" type="button" title="展开区域候选" aria-label="展开区域候选" aria-expanded="false"><span></span></button><div id="catalogDirectoryRegionOptions" class="catalog-picker-menu" role="listbox" hidden></div></div><input id="catalogDirectoryRegion" type="hidden"></label>
+                        <label><span>适用学段</span><input id="catalogDirectoryGrade" placeholder="如：小学中年级"></label>
+                        <label><span>经度</span><input id="catalogDirectoryLongitude" type="number" step="0.0000001" placeholder="可选"></label>
+                        <label><span>纬度</span><input id="catalogDirectoryLatitude" type="number" step="0.0000001" placeholder="可选"></label>
+                    </div>
+                    <div class="form-actions"><input id="catalogDirectoryPendingMediaFiles" type="file" accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp" multiple hidden><button id="catalogDirectoryPickImages" class="accent-button" type="button">选择展示图片</button><span id="catalogDirectoryPendingMediaHint" class="mini-stat">暂未选择图片</span></div>
+                    <p class="status-box">支持 JPG、PNG 或 WebP 图片，每张不超过 10MB。保存草稿成功后将自动上传并关联。</p>
+                    <div id="catalogDirectoryPendingMediaPreview" class="catalog-pending-media-preview" hidden></div>
+                    <div id="catalogDirectoryResourceFields" class="field-grid two-col">
+                        <label><span>资源分类</span><select id="catalogDirectoryCategoryInput"><option value="red_culture">红色文化</option><option value="intangible_culture">非遗文化</option><option value="traditional_culture">传统文化</option><option value="local_history">地方历史</option><option value="public_culture">公共文化</option><option value="labor_education">劳动教育</option><option value="public_welfare">公益实践</option><option value="ecological_civilization">生态文明</option><option value="patriotism_base">爱国主义基地</option><option value="social_practice">社会实践</option><option value="other">其他</option></select></label>
+                        <label><span>资源子类</span><input id="catalogDirectorySubcategory" placeholder="纪念馆 / 文化墙 / 劳动基地"></label>
+                        <label><span>所属机构</span><input id="catalogDirectoryOrganization" placeholder="可选"></label>
+                        <label><span>联系电话</span><input id="catalogDirectoryPhone" placeholder="可选"></label>
+                        <label><span>开放时间</span><input id="catalogDirectoryOpening" placeholder="可选"></label>
+                        <label><span>建议时长（分钟）</span><input id="catalogDirectoryMinutes" type="number" min="1"></label>
+                    </div>
+                    <label><span>地址</span><input id="catalogDirectoryAddress" placeholder="输入地址"></label>
+                    <label><span>简介 / 历史概要</span><textarea id="catalogDirectorySummary"></textarea></label>
+                    <label><span>教育价值 / 详情</span><textarea id="catalogDirectoryDetail"></textarea></label>
+                    <div id="catalogDirectoryResourceTextFields">
+                        <label><span>活动建议</span><textarea id="catalogDirectoryActivity"></textarea></label>
+                        <label><span>安全提示</span><textarea id="catalogDirectorySafety"></textarea></label>
+                        <label class="switch-field"><input id="catalogDirectoryReservation" type="checkbox"><span>需要预约</span></label>
+                    </div>
+                    <div class="form-actions"><button class="accent-button" type="submit">保存草稿</button></div>
+                </form>
+            </article>
+            <article class="table-card">
+                <div class="card-topline"><h3>全平台资源与图谱实体</h3><span id="catalogDirectoryCount" class="mini-stat">0 条</span></div>
+                <div class="table-shell"><table><thead><tr><th>封面</th><th>实体</th><th>类型 / 分类</th><th>坐标</th><th>状态</th><th>操作</th></tr></thead><tbody id="catalogDirectoryTable"></tbody></table></div>
+            </article>
+        </div>
+        <div id="catalogDirectoryDetails" class="workspace-grid" hidden>
+            <article class="form-card"><div class="card-topline"><h3>来源信息</h3><button id="catalogDirectoryAddSource" class="ghost-button" type="button">新增来源</button></div><div id="catalogDirectorySourceList" class="compact-list"></div><div class="form-actions"><button id="catalogDirectorySaveSources" class="accent-button" type="button">保存来源</button></div></article>
+            <article class="form-card"><div class="card-topline"><h3>关联故事与图谱关系</h3></div><form id="catalogDirectoryRelationForm" class="data-form"><div class="field-grid two-col"><label><span>源实体类型</span><select id="catalogDirectoryRelationSourceType"></select></label><label><span>源实体</span><div class="catalog-picker"><input id="catalogDirectoryRelationSourceName" autocomplete="off" placeholder="搜索名称或编码" role="combobox" aria-autocomplete="list" aria-expanded="false"><button id="catalogDirectoryRelationSourceToggle" class="catalog-picker-toggle" type="button" title="展开源实体候选" aria-label="展开源实体候选" aria-expanded="false"><span></span></button><div id="catalogDirectoryRelationSourceOptions" class="catalog-picker-menu" role="listbox" hidden></div></div><input id="catalogDirectoryRelationSourceId" type="hidden"></label><label><span>目标实体类型</span><select id="catalogDirectoryRelationTargetType"></select></label><label><span>目标实体</span><div class="catalog-picker"><input id="catalogDirectoryRelationTargetName" autocomplete="off" placeholder="搜索名称或编码" role="combobox" aria-autocomplete="list" aria-expanded="false"><button id="catalogDirectoryRelationTargetToggle" class="catalog-picker-toggle" type="button" title="展开目标实体候选" aria-label="展开目标实体候选" aria-expanded="false"><span></span></button><div id="catalogDirectoryRelationTargetOptions" class="catalog-picker-menu" role="listbox" hidden></div></div><input id="catalogDirectoryRelationTargetId" type="hidden"></label><label><span>关系类型</span><select id="catalogDirectoryRelationType"></select></label><label><span>备注</span><input id="catalogDirectoryRelationRemark"></label></div><div class="form-actions"><button class="accent-button" type="submit">创建关系</button></div></form><div id="catalogDirectoryRelationList" class="compact-list"></div></article>
+        </div>
+        <div id="catalogDirectoryImagePreviewModal" class="modal-shell" role="dialog" aria-modal="true" aria-labelledby="catalogDirectoryImagePreviewTitle" hidden><div class="modal-backdrop" data-close-catalog-image-preview></div><section class="modal-card catalog-image-preview-modal"><div class="card-topline"><h3 id="catalogDirectoryImagePreviewTitle">图片预览</h3><button id="catalogDirectoryCloseImagePreview" class="ghost-button" type="button">关闭</button></div><img id="catalogDirectoryImagePreviewImage" alt=""><p id="catalogDirectoryImagePreviewName" class="status-box"></p></section></div>`;
+    root.querySelector("#catalogDirectorySearch").addEventListener("click", () => void loadResources());
+    root.querySelector("#catalogDirectoryCreate").addEventListener("click", resetCatalogDirectoryForm);
+    root.querySelector("#catalogDirectoryReset").addEventListener("click", resetCatalogDirectoryForm);
+    root.querySelector("#catalogDirectoryForm").addEventListener("submit", event => { event.preventDefault(); void saveCatalogDirectoryEntity(); });
+    root.querySelector("#catalogDirectoryFormType").addEventListener("change", updateCatalogDirectoryFieldVisibility);
+    root.querySelector("#catalogDirectoryPickImages").addEventListener("click", () => root.querySelector("#catalogDirectoryPendingMediaFiles").click());
+    root.querySelector("#catalogDirectoryPendingMediaFiles").addEventListener("change", renderCatalogDirectoryPendingMedia);
+    root.querySelector("#catalogDirectoryCloseImagePreview").addEventListener("click", closeCatalogDirectoryImagePreview);
+    root.querySelector("[data-close-catalog-image-preview]").addEventListener("click", closeCatalogDirectoryImagePreview);
+    root.querySelector("#catalogDirectoryAddSource").addEventListener("click", () => { appendCatalogSource(); });
+    root.querySelector("#catalogDirectorySaveSources").addEventListener("click", () => void saveCatalogDirectorySources());
+    root.querySelector("#catalogDirectoryRelationForm").addEventListener("submit", event => { event.preventDefault(); void createCatalogDirectoryRelation(); });
+    root.querySelector("#catalogDirectoryRegionName").addEventListener("input", () => void searchCatalogDirectoryRegions());
+    root.querySelector("#catalogDirectoryRegionName").addEventListener("focus", () => void searchCatalogDirectoryRegions(true));
+    root.querySelector("#catalogDirectoryRegionToggle").addEventListener("click", () => void searchCatalogDirectoryRegions(true));
+    root.querySelector("#catalogDirectoryRegionName").addEventListener("keydown", event => closeCatalogPickerOnEscape(event, "catalogDirectoryRegionName", "catalogDirectoryRegionOptions", "catalogDirectoryRegionToggle"));
+    [["catalogDirectoryRelationSourceType", "source"], ["catalogDirectoryRelationTargetType", "target"]].forEach(([id, side]) => root.querySelector(`#${id}`).addEventListener("change", () => { resetCatalogRelationEntityPicker(side); renderCatalogRelationTypes(); void searchCatalogRelationEntities(side); }));
+    ["source", "target"].forEach(side => { const title = side === "source" ? "Source" : "Target", input = root.querySelector(`#catalogDirectoryRelation${title}Name`); input.addEventListener("input", () => void searchCatalogRelationEntities(side)); input.addEventListener("focus", () => void searchCatalogRelationEntities(side, true)); input.addEventListener("keydown", event => closeCatalogPickerOnEscape(event, `catalogDirectoryRelation${title}Name`, `catalogDirectoryRelation${title}Options`, `catalogDirectoryRelation${title}Toggle`)); root.querySelector(`#catalogDirectoryRelation${title}Toggle`).addEventListener("click", () => void searchCatalogRelationEntities(side, true)); });
+    root.addEventListener("click", event => { if (!event.target.closest(".catalog-picker")) closeCatalogPickers(); });
+    updateCatalogDirectoryFieldVisibility();
+    void loadCatalogRelationOptions();
+    void loadResources();
+}
+
+async function loadResources() {
+    const root = document.querySelector("#catalogResourceWorkspace");
+    if (!root?.dataset.ready) return;
+    const params = new URLSearchParams({ pageNum: "1", pageSize: "50" });
+    const type = root.querySelector("#catalogDirectoryType").value;
+    const category = root.querySelector("#catalogDirectoryCategory").value;
+    const reviewStatus = root.querySelector("#catalogDirectoryReview").value;
+    const keyword = root.querySelector("#catalogDirectoryKeyword").value.trim();
+    if (type) params.set("entityType", type);
+    if (category) params.set("resourceCategory", category);
+    if (reviewStatus) params.set("reviewStatus", reviewStatus);
+    if (keyword) params.set("keyword", keyword);
+    const result = await requestJson(`/api/admin/catalog/entities?${params}`);
+    renderCatalogDirectoryTable(result.records || [], result.total || 0);
+    if (adminElements.resourceTotalMetric) adminElements.resourceTotalMetric.textContent = String(result.total || 0);
+}
+
+function renderCatalogDirectoryTable(records, total) {
+    const root = document.querySelector("#catalogResourceWorkspace");
+    root.querySelector("#catalogDirectoryCount").textContent = `${total} 条`;
+    const table = root.querySelector("#catalogDirectoryTable");
+    if (!records.length) { table.innerHTML = '<tr><td colspan="6">暂无符合条件的实体。</td></tr>'; return; }
+    table.innerHTML = records.map(item => `<tr><td>${item.coverUrl ? `<img class="catalog-cover" src="${escapeHtml(item.coverUrl)}" alt="">` : "-"}</td><td><strong>${escapeHtml(item.name || "-")}</strong><div class="status-box">${escapeHtml(item.code || "-")}</div></td><td>${escapeHtml(catalogEntityLabels[item.entityType?.toUpperCase()] || item.entityType || "-")}<div class="status-box">${escapeHtml(item.resourceCategory || "-")}</div></td><td>${item.longitude && item.latitude ? `${escapeHtml(item.longitude)}, ${escapeHtml(item.latitude)}` : "未设置"}</td><td>${renderStatus(item.reviewStatus)}<div class="status-box">${item.active ? "启用" : "已停用"}</div></td><td><div class="table-actions"><button class="action-button" data-edit="${item.entityType}:${item.entityId}">编辑</button>${item.active ? `<button class="action-button" data-submit="${item.entityType}:${item.entityId}">提交审核</button><button class="action-button" data-approve="${item.entityType}:${item.entityId}">通过</button><button class="action-button" data-deactivate="${item.entityType}:${item.entityId}">停用</button>` : "-"}</div></td></tr>`).join("");
+    table.querySelectorAll("[data-edit]").forEach(button => button.addEventListener("click", () => { const [type, id] = button.dataset.edit.split(":"); void openCatalogDirectoryEntity(type.toUpperCase(), id); }));
+    table.querySelectorAll("[data-submit]").forEach(button => button.addEventListener("click", () => void runCatalogEntityAction(button.dataset.submit, "submit-review")));
+    table.querySelectorAll("[data-approve]").forEach(button => button.addEventListener("click", () => void runCatalogEntityAction(button.dataset.approve, "approve")));
+    table.querySelectorAll("[data-deactivate]").forEach(button => button.addEventListener("click", () => void deactivateCatalogEntity(button.dataset.deactivate)));
+}
+
+function catalogDirectoryPayload({ includeSources = false, includeMedia = false } = {}) {
+    const root = document.querySelector("#catalogResourceWorkspace");
+    const value = id => root.querySelector(`#${id}`).value;
+    const type = value("catalogDirectoryFormType");
+    const payload = { entityType: type, code: value("catalogDirectoryCode").trim(), name: value("catalogDirectoryName").trim(), alias: optionalText(value("catalogDirectoryAlias")), regionId: parseNullableNumber(value("catalogDirectoryRegion")), address: optionalText(value("catalogDirectoryAddress")), longitude: parseNullableNumber(value("catalogDirectoryLongitude")), latitude: parseNullableNumber(value("catalogDirectoryLatitude")), summary: optionalText(value("catalogDirectorySummary")), detail: optionalText(value("catalogDirectoryDetail")), targetGrade: optionalText(value("catalogDirectoryGrade")) };
+    if (type === "RESOURCE") Object.assign(payload, { resourceCategory: value("catalogDirectoryCategoryInput"), resourceSubcategory: optionalText(value("catalogDirectorySubcategory")), organizationName: optionalText(value("catalogDirectoryOrganization")), contactPhone: optionalText(value("catalogDirectoryPhone")), openingTimeDesc: optionalText(value("catalogDirectoryOpening")), reservationRequired: root.querySelector("#catalogDirectoryReservation").checked, recommendedVisitMinutes: parseNullableNumber(value("catalogDirectoryMinutes")), activitySuggestion: optionalText(value("catalogDirectoryActivity")), safetyNote: optionalText(value("catalogDirectorySafety")) });
+    if (includeSources) payload.sources = catalogDirectorySources();
+    if (includeMedia) payload.media = catalogDirectoryState.selected?.media || [];
+    return payload;
+}
+
+async function saveCatalogDirectoryEntity() {
+    const root = document.querySelector("#catalogResourceWorkspace");
+    const id = parseNullableNumber(root.querySelector("#catalogDirectoryId").value);
+    const pendingMediaInput = root.querySelector("#catalogDirectoryPendingMediaFiles");
+    const pendingMediaFiles = id ? [] : Array.from(pendingMediaInput.files || []);
+    const payload = catalogDirectoryPayload();
+    if (!payload.code || !payload.name) { setGlobalStatus("校验失败", "实体编码和名称不能为空。"); return; }
+    const item = id ? await requestJson(`/api/admin/catalog/entities/${payload.entityType}/${id}`, { method: "PUT", body: payload }) : await requestJson("/api/admin/catalog/entities", { method: "POST", body: payload });
+    if (pendingMediaFiles.length) await uploadCatalogDirectoryMediaFiles(item.entityType, item.entityId, pendingMediaFiles);
+    pendingMediaInput.value = "";
+    renderCatalogDirectoryPendingMedia();
+    setGlobalStatus(id ? "已更新" : "已创建", id ? "实体已更新；原已发布实体已回到待审核。" : pendingMediaFiles.length ? `草稿已保存，已上传 ${pendingMediaFiles.length} 张图片。` : "草稿已保存，可继续上传图片、维护来源和关联故事。");
+    await openCatalogDirectoryEntity(item.entityType, item.entityId);
+    await loadResources();
+}
+
+async function openCatalogDirectoryEntity(type, id) {
+    const root = document.querySelector("#catalogResourceWorkspace");
+    const item = await requestJson(`/api/admin/catalog/entities/${type}/${id}`);
+    catalogDirectoryState.selected = item;
+    const set = (name, value) => { const input = root.querySelector(`#${name}`); if (input) input.value = value ?? ""; };
+    set("catalogDirectoryId", item.entityId); set("catalogDirectoryFormType", item.entityType?.toUpperCase()); set("catalogDirectoryCode", item.code); set("catalogDirectoryName", item.name); set("catalogDirectoryAlias", item.alias); set("catalogDirectoryAddress", item.address); set("catalogDirectoryLongitude", item.longitude); set("catalogDirectoryLatitude", item.latitude); set("catalogDirectorySummary", item.summary); set("catalogDirectoryDetail", item.detail); set("catalogDirectoryGrade", item.targetGrade); set("catalogDirectoryCategoryInput", item.resourceCategory || "other"); set("catalogDirectorySubcategory", item.resourceSubcategory); set("catalogDirectoryOrganization", item.organizationName); set("catalogDirectoryPhone", item.contactPhone); set("catalogDirectoryOpening", item.openingTimeDesc); set("catalogDirectoryMinutes", item.recommendedVisitMinutes); set("catalogDirectoryActivity", item.activitySuggestion); set("catalogDirectorySafety", item.safetyNote);
+    await setCatalogDirectoryRegion(item.regionId);
+    root.querySelector("#catalogDirectoryReservation").checked = Boolean(item.reservationRequired);
+    root.querySelector("#catalogDirectoryFormType").disabled = true;
+    root.querySelector("#catalogDirectoryFormTitle").textContent = `编辑：${item.name}`;
+    root.querySelector("#catalogDirectoryDetails").hidden = false;
+    updateCatalogDirectoryFieldVisibility(); renderCatalogDirectorySources(); await loadCatalogDirectoryRelations();
+    root.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+function resetCatalogDirectoryForm() {
+    const root = document.querySelector("#catalogResourceWorkspace");
+    root.querySelector("#catalogDirectoryForm").reset(); root.querySelector("#catalogDirectoryId").value = ""; root.querySelector("#catalogDirectoryRegion").value = ""; catalogDirectoryState.regionOptions.clear(); root.querySelector("#catalogDirectoryRegionOptions").innerHTML = ""; closeCatalogPickers(); root.querySelector("#catalogDirectoryFormType").disabled = false; root.querySelector("#catalogDirectoryFormTitle").textContent = "新增待审核实体"; root.querySelector("#catalogDirectoryDetails").hidden = true; catalogDirectoryState.selected = null; renderCatalogDirectoryPendingMedia(); updateCatalogDirectoryFieldVisibility();
+}
+
+function setCatalogPickerOpen(input, menu, toggle, open) { menu.hidden = !open; input.setAttribute("aria-expanded", String(open)); toggle.setAttribute("aria-expanded", String(open)); }
+function closeCatalogPicker(inputId, menuId, toggleId) { const root=document.querySelector("#catalogResourceWorkspace");if(!root)return;const input=root.querySelector(`#${inputId}`),menu=root.querySelector(`#${menuId}`),toggle=root.querySelector(`#${toggleId}`);if(input&&menu&&toggle)setCatalogPickerOpen(input,menu,toggle,false); }
+function closeCatalogPickers() { closeCatalogPicker("catalogDirectoryRegionName", "catalogDirectoryRegionOptions", "catalogDirectoryRegionToggle"); closeCatalogPicker("catalogDirectoryRelationSourceName", "catalogDirectoryRelationSourceOptions", "catalogDirectoryRelationSourceToggle"); closeCatalogPicker("catalogDirectoryRelationTargetName", "catalogDirectoryRelationTargetOptions", "catalogDirectoryRelationTargetToggle"); }
+function closeCatalogPickerOnEscape(event, inputId, menuId, toggleId) { if(event.key!=="Escape")return;closeCatalogPicker(inputId,menuId,toggleId);event.currentTarget.blur(); }
+function catalogRegionLabel(region) { return region.regionName || "未命名行政区域"; }
+function renderCatalogDirectoryRegions(regions) { const root=document.querySelector("#catalogResourceWorkspace"),input=root.querySelector("#catalogDirectoryRegionName"),toggle=root.querySelector("#catalogDirectoryRegionToggle"),options=root.querySelector("#catalogDirectoryRegionOptions");catalogDirectoryState.regionOptions.clear();options.innerHTML=(regions||[]).map(region=>{const label=catalogRegionLabel(region);catalogDirectoryState.regionOptions.set(label,region);return `<button class="catalog-picker-option" data-region-label="${escapeHtml(label)}" type="button" role="option">${escapeHtml(label)}</button>`;}).join("")||"<p class=\"catalog-picker-empty\">没有匹配的行政区域</p>";options.querySelectorAll("[data-region-label]").forEach(button=>button.addEventListener("click",()=>selectCatalogDirectoryRegion(button.dataset.regionLabel)));setCatalogPickerOpen(input,options,toggle,true); }
+function selectCatalogDirectoryRegion(label) { const root=document.querySelector("#catalogResourceWorkspace"),region=catalogDirectoryState.regionOptions.get(label);if(!region)return;root.querySelector("#catalogDirectoryRegionName").value=label;root.querySelector("#catalogDirectoryRegion").value=region.regionId||"";closeCatalogPicker("catalogDirectoryRegionName","catalogDirectoryRegionOptions","catalogDirectoryRegionToggle"); }
+async function searchCatalogDirectoryRegions(showAll=false) { const root=document.querySelector("#catalogResourceWorkspace"),input=root.querySelector("#catalogDirectoryRegionName"),query=input.value.trim(),selected=catalogDirectoryState.regionOptions.get(query),params=new URLSearchParams();if(selected&&!showAll){selectCatalogDirectoryRegion(query);return;}if(query&&!showAll)params.set("regionName",query);const regions=await requestJson(`/api/regions${params.size?`?${params}`:""}`);if(!showAll&&input.value.trim()!==query)return;renderCatalogDirectoryRegions(regions||[]);root.querySelector("#catalogDirectoryRegion").value=selected?.regionId||""; }
+async function setCatalogDirectoryRegion(regionId) { const root=document.querySelector("#catalogResourceWorkspace"),input=root.querySelector("#catalogDirectoryRegionName"),toggle=root.querySelector("#catalogDirectoryRegionToggle"),options=root.querySelector("#catalogDirectoryRegionOptions");root.querySelector("#catalogDirectoryRegion").value=regionId||"";input.value="";setCatalogPickerOpen(input,options,toggle,false);if(!regionId)return;const region=await requestJson(`/api/regions/${regionId}`);if(!region)return;const label=catalogRegionLabel(region);catalogDirectoryState.regionOptions.set(label,region);options.innerHTML=`<button class="catalog-picker-option" data-region-label="${escapeHtml(label)}" type="button" role="option">${escapeHtml(label)}</button>`;options.querySelector("[data-region-label]").addEventListener("click",()=>selectCatalogDirectoryRegion(label));input.value=label; }
+function updateCatalogDirectoryFieldVisibility() { const root=document.querySelector("#catalogResourceWorkspace"); const resource=root.querySelector("#catalogDirectoryFormType").value === "RESOURCE"; root.querySelector("#catalogDirectoryResourceFields").hidden=!resource; root.querySelector("#catalogDirectoryResourceTextFields").hidden=!resource; }
+function renderCatalogDirectoryPendingMedia() { const root=document.querySelector("#catalogResourceWorkspace"), files=Array.from(root.querySelector("#catalogDirectoryPendingMediaFiles").files||[]), hint=root.querySelector("#catalogDirectoryPendingMediaHint"), preview=root.querySelector("#catalogDirectoryPendingMediaPreview"); catalogDirectoryState.pendingMediaPreviewUrls.forEach(url=>URL.revokeObjectURL(url));catalogDirectoryState.pendingMediaPreviewUrls=[];hint.textContent=files.length ? `已选择 ${files.length} 张：${files.map(file=>file.name).join("、")}` : "暂未选择图片";preview.hidden=!files.length;preview.innerHTML=files.map((file,index)=>{const url=URL.createObjectURL(file);catalogDirectoryState.pendingMediaPreviewUrls.push(url);return `<button class="catalog-pending-media-thumbnail" data-pending-preview="${index}" type="button"><img src="${url}" alt="预览 ${escapeHtml(file.name)}"><span>${escapeHtml(file.name)}</span></button>`;}).join("");preview.querySelectorAll("[data-pending-preview]").forEach(button=>button.addEventListener("click",()=>{const index=Number(button.dataset.pendingPreview);openCatalogDirectoryImagePreview(catalogDirectoryState.pendingMediaPreviewUrls[index],files[index].name);})); }
+function openCatalogDirectoryImagePreview(url, name) { const root=document.querySelector("#catalogResourceWorkspace"), modal=root.querySelector("#catalogDirectoryImagePreviewModal");root.querySelector("#catalogDirectoryImagePreviewImage").src=url;root.querySelector("#catalogDirectoryImagePreviewImage").alt=name;root.querySelector("#catalogDirectoryImagePreviewName").textContent=name;modal.hidden=false;document.body.classList.add("modal-open"); }
+function closeCatalogDirectoryImagePreview() { const root=document.querySelector("#catalogResourceWorkspace"), modal=root.querySelector("#catalogDirectoryImagePreviewModal");if(!modal)return;modal.hidden=true;document.body.classList.remove("modal-open"); }
+
+async function runCatalogEntityAction(key, action) { const [rawType, id] = key.split(":"), type = rawType.toUpperCase(); await requestJson(`/api/admin/catalog/entities/${type}/${id}/${action}`, { method: "POST", body: {} }); setGlobalStatus("操作成功", action === "approve" ? "实体已审核并投影。" : "实体已提交审核。"); await loadResources(); if (catalogDirectoryState.selected?.entityId === Number(id)) await openCatalogDirectoryEntity(type, id); }
+async function deactivateCatalogEntity(key) { if (!window.confirm("停用后该实体将从地图、图谱和 RAG 检索中隐藏，是否继续？")) return; const [rawType,id]=key.split(":"), type=rawType.toUpperCase(); await requestJson(`/api/admin/catalog/entities/${type}/${id}`,{method:"DELETE"}); setGlobalStatus("已停用","实体历史数据已保留，公开投影已移除。"); resetCatalogDirectoryForm(); await loadResources(); }
+
+async function uploadCatalogDirectoryMediaFiles(entityType, entityId, files) { for (const file of files) { const headers={ Accept:"application/json" }; const token=readCookie("XSRF-TOKEN"); if(token)headers["X-CSRF-TOKEN"]=token; const body=new FormData();body.append("file",file);const response=await fetch(`/api/admin/catalog/entities/${entityType.toUpperCase()}/${entityId}/media`,{method:"POST",credentials:"include",headers,body});const payload=await response.json();if(!response.ok||payload.code!==200)throw new ApiError(payload.message||"图片上传失败",response.status); } }
+
+function appendCatalogSource(source={}) { const root=document.querySelector("#catalogResourceWorkspace"), list=root.querySelector("#catalogDirectorySourceList"), row=document.createElement("div");row.className="compact-row catalog-source-row";row.innerHTML=`<input class="line-input source-url" type="url" placeholder="来源 URL" value="${escapeHtml(source.sourceUrl||"")}"><input class="line-input source-excerpt" placeholder="来源摘录" value="${escapeHtml(source.sourceExcerpt||"")}"><input class="line-input source-score" type="number" min="1" max="5" placeholder="可信度" value="${escapeHtml(source.credibilityScore||"")}"><button class="action-button" type="button">移除</button>`;row.querySelector("button").addEventListener("click",()=>row.remove());list.appendChild(row); }
+function renderCatalogDirectorySources() { const list=document.querySelector("#catalogDirectorySourceList");list.innerHTML="";(catalogDirectoryState.selected?.sources||[]).forEach(appendCatalogSource);if(!list.children.length)appendCatalogSource(); }
+function catalogDirectorySources() { return Array.from(document.querySelectorAll("#catalogDirectorySourceList .catalog-source-row")).map(row=>({sourceUrl:optionalText(row.querySelector(".source-url").value),sourceExcerpt:optionalText(row.querySelector(".source-excerpt").value),credibilityScore:parseNullableNumber(row.querySelector(".source-score").value)})).filter(source=>source.sourceUrl||source.sourceExcerpt); }
+async function saveCatalogDirectorySources() { const item=catalogDirectoryState.selected;if(!item)return;const updated=await requestJson(`/api/admin/catalog/entities/${item.entityType.toUpperCase()}/${item.entityId}`,{method:"PUT",body:catalogDirectoryPayload({includeSources:true})});setGlobalStatus("来源已保存",updated.reviewStatus === "pending" ? "实体已回到待审核。" : "来源信息已更新。");await openCatalogDirectoryEntity(item.entityType,item.entityId);await loadResources(); }
+
+async function loadCatalogRelationOptions() { catalogDirectoryState.relationOptions=await requestJson("/api/admin/catalog/relation-options"); const root=document.querySelector("#catalogResourceWorkspace"); ["catalogDirectoryRelationSourceType","catalogDirectoryRelationTargetType"].forEach(id=>{root.querySelector(`#${id}`).innerHTML=Object.entries(catalogEntityLabels).map(([key,label])=>`<option value="${key}">${label}</option>`).join("");}); renderCatalogRelationTypes(); await Promise.all([searchCatalogRelationEntities("source"),searchCatalogRelationEntities("target")]); }
+function relationPickerIds(side) { const title=side === "source" ? "Source" : "Target"; return { type:`catalogDirectoryRelation${title}Type`, name:`catalogDirectoryRelation${title}Name`, id:`catalogDirectoryRelation${title}Id`, options:`catalogDirectoryRelation${title}Options`, toggle:`catalogDirectoryRelation${title}Toggle` }; }
+function catalogRelationEntityLabel(item) { return item.name || "未命名实体"; }
+function resetCatalogRelationEntityPicker(side) { const root=document.querySelector("#catalogResourceWorkspace"), ids=relationPickerIds(side);root.querySelector(`#${ids.name}`).value="";root.querySelector(`#${ids.id}`).value="";root.querySelector(`#${ids.options}`).innerHTML="";catalogDirectoryState.relationEntityOptions[side].clear();closeCatalogPicker(ids.name,ids.options,ids.toggle); }
+function renderCatalogRelationEntityOptions(side, records) { const root=document.querySelector("#catalogResourceWorkspace"),ids=relationPickerIds(side),input=root.querySelector(`#${ids.name}`),toggle=root.querySelector(`#${ids.toggle}`),options=root.querySelector(`#${ids.options}`),map=catalogDirectoryState.relationEntityOptions[side];map.clear();options.innerHTML=(records||[]).map(item=>{const label=catalogRelationEntityLabel(item);map.set(label,item);return `<button class="catalog-picker-option" data-entity-label="${escapeHtml(label)}" type="button" role="option">${escapeHtml(label)}</button>`;}).join("")||"<p class=\"catalog-picker-empty\">没有匹配的实体</p>";options.querySelectorAll("[data-entity-label]").forEach(button=>button.addEventListener("click",()=>selectCatalogRelationEntity(side,button.dataset.entityLabel)));setCatalogPickerOpen(input,options,toggle,true); }
+function selectCatalogRelationEntity(side,label) { const root=document.querySelector("#catalogResourceWorkspace"),ids=relationPickerIds(side),item=catalogDirectoryState.relationEntityOptions[side].get(label);if(!item)return;root.querySelector(`#${ids.name}`).value=label;root.querySelector(`#${ids.id}`).value=item.entityId||"";closeCatalogPicker(ids.name,ids.options,ids.toggle); }
+async function searchCatalogRelationEntities(side,showAll=false) { const root=document.querySelector("#catalogResourceWorkspace"),ids=relationPickerIds(side),input=root.querySelector(`#${ids.name}`),type=root.querySelector(`#${ids.type}`).value,query=input.value.trim(),selected=catalogDirectoryState.relationEntityOptions[side].get(query),params=new URLSearchParams({entityType:type,pageNum:"1",pageSize:"100"});if(selected&&!showAll){selectCatalogRelationEntity(side,query);return;}if(query&&!showAll)params.set("keyword",query);const result=await requestJson(`/api/admin/catalog/entities?${params}`);if(!showAll&&input.value.trim()!==query)return;renderCatalogRelationEntityOptions(side,result.records||[]);root.querySelector(`#${ids.id}`).value=selected?.entityId||""; }
+function setCatalogRelationEntityPicker(side, item) { const root=document.querySelector("#catalogResourceWorkspace"),ids=relationPickerIds(side),label=catalogRelationEntityLabel(item),input=root.querySelector(`#${ids.name}`),toggle=root.querySelector(`#${ids.toggle}`),options=root.querySelector(`#${ids.options}`);catalogDirectoryState.relationEntityOptions[side].set(label,item);options.innerHTML=`<button class="catalog-picker-option" data-entity-label="${escapeHtml(label)}" type="button" role="option">${escapeHtml(label)}</button>`;options.querySelector("[data-entity-label]").addEventListener("click",()=>selectCatalogRelationEntity(side,label));input.value=label;root.querySelector(`#${ids.id}`).value=item.entityId||"";setCatalogPickerOpen(input,options,toggle,false); }
+function renderCatalogRelationTypes() { const root=document.querySelector("#catalogResourceWorkspace"), source=root.querySelector("#catalogDirectoryRelationSourceType").value.toLowerCase(), target=root.querySelector("#catalogDirectoryRelationTargetType").value.toLowerCase(), select=root.querySelector("#catalogDirectoryRelationType"), options=catalogDirectoryState.relationOptions.filter(item=>item.sourceType===source&&item.targetType===target);select.innerHTML=options.map(item=>`<option value="${item.relationType}">${escapeHtml(item.label)}</option>`).join("")||"<option value=\"\">当前方向无可用关系</option>"; }
+async function createCatalogDirectoryRelation() { const root=document.querySelector("#catalogResourceWorkspace"), item=catalogDirectoryState.selected, body={sourceType:root.querySelector("#catalogDirectoryRelationSourceType").value,sourceId:parseNullableNumber(root.querySelector("#catalogDirectoryRelationSourceId").value),targetType:root.querySelector("#catalogDirectoryRelationTargetType").value,targetId:parseNullableNumber(root.querySelector("#catalogDirectoryRelationTargetId").value),relationType:root.querySelector("#catalogDirectoryRelationType").value,remark:optionalText(root.querySelector("#catalogDirectoryRelationRemark").value)};if(!body.sourceId||!body.targetId||!body.relationType){setGlobalStatus("校验失败","请从候选列表选择两个实体和关系类型。");return;}await requestJson("/api/admin/catalog/relations",{method:"POST",body});setGlobalStatus("关系已创建","关系已保存，并将在两端审核通过后进入图谱投影。");if(item)await loadCatalogDirectoryRelations(); }
+function catalogRelationDisplayName(relation, side) { const type=relation[`${side}Type`]?.toUpperCase(), fallback=`${catalogEntityLabels[type]||"实体"}（已不可用）`;return relation[`${side}Name`]||fallback; }
+async function loadCatalogDirectoryRelations() { const item=catalogDirectoryState.selected;if(!item)return;const relations=await requestJson(`/api/admin/catalog/entities/${item.entityType.toUpperCase()}/${item.entityId}/relations`),root=document.querySelector("#catalogResourceWorkspace"),list=root.querySelector("#catalogDirectoryRelationList"); list.innerHTML=relations.map(relation=>`<div class="compact-row catalog-relation-row"><div class="catalog-relation-summary"><strong>${escapeHtml(catalogRelationDisplayName(relation,"source"))}</strong><span>${escapeHtml(relation.relationLabel||"相关")}</span><strong>${escapeHtml(catalogRelationDisplayName(relation,"target"))}</strong></div>${relation.remark?`<small>${escapeHtml(relation.remark)}</small>`:""}<button class="action-button" data-delete-relation="${relation.relationKind}:${relation.relationId}" type="button">删除</button></div>`).join("")||"<p class=\"status-box\">暂无关联故事或图谱关系。</p>";list.querySelectorAll("[data-delete-relation]").forEach(button=>button.addEventListener("click",()=>void deleteCatalogDirectoryRelation(button.dataset.deleteRelation))); const selectedType=item.entityType.toUpperCase();root.querySelector("#catalogDirectoryRelationTargetType").value=selectedType;root.querySelector("#catalogDirectoryRelationSourceType").value="STORY";renderCatalogRelationTypes();await Promise.all([searchCatalogRelationEntities("source"),searchCatalogRelationEntities("target")]);setCatalogRelationEntityPicker("target",item); }
+async function deleteCatalogDirectoryRelation(key) { if(!window.confirm("确定删除该关联关系？"))return;const [kind,id]=key.split(":");await requestJson(`/api/admin/catalog/relations/${kind}/${id}`,{method:"DELETE"});setGlobalStatus("关系已删除","图谱关系已同步移除。");await loadCatalogDirectoryRelations(); }
+
+function mountCatalogOperations() {
+    const tabs=document.querySelector(".tab-strip"),workspace=document.querySelector(".workspace-stack");if(!tabs||!workspace||document.querySelector('[data-panel="catalog"]'))return;const tab=document.createElement("button");tab.className="tab-chip";tab.type="button";tab.dataset.tab="catalog";tab.textContent="图谱导入";tabs.appendChild(tab);const panel=document.createElement("section");panel.className="workspace-panel";panel.dataset.panel="catalog";panel.innerHTML=`<div class="panel-heading"><div><p class="eyebrow">Module 07</p><h2>图谱导入与投影任务</h2></div><div class="panel-tools"><a class="accent-button" href="/api/admin/catalog/import/template">下载 Excel 模板</a><button id="catalogPreviewImport" class="ghost-button" type="button">上传预检</button></div></div><input id="catalogImportFile" type="file" accept=".xlsx" hidden><div id="catalogImportResult" class="status-box"></div><article class="table-card"><div class="card-topline"><h3>图谱与 RAG 投影任务</h3><button id="catalogLoadTasks" class="ghost-button" type="button">刷新任务</button></div><div class="table-shell"><table><thead><tr><th>类型</th><th>状态</th><th>尝试</th><th>错误</th><th>操作</th></tr></thead><tbody id="catalogTaskTable"></tbody></table></div></article>`;workspace.appendChild(panel);tab.addEventListener("click",()=>{setActiveTab("catalog");void loadCatalogOperations();});panel.querySelector("#catalogPreviewImport").addEventListener("click",()=>panel.querySelector("#catalogImportFile").click());panel.querySelector("#catalogImportFile").addEventListener("change",()=>void previewCatalogImport());panel.querySelector("#catalogLoadTasks").addEventListener("click",()=>void loadCatalogOperations()); }
+async function previewCatalogImport(){
+    const input=document.querySelector("#catalogImportFile"),file=input?.files?.[0],box=document.querySelector("#catalogImportResult");
+    if(!file||!box)return;
+    box.innerHTML=`<p>正在预检：${escapeHtml(file.name)}</p>`;
+    try{
+        const headers={Accept:"application/json"},token=readCookie("XSRF-TOKEN");
+        if(token)headers["X-CSRF-TOKEN"]=token;
+        const body=new FormData();body.append("file",file);
+        const response=await fetch("/api/admin/catalog/import/preview",{method:"POST",credentials:"include",headers,body});
+        const payload=await response.json();
+        if(!response.ok||payload.code!==200)throw new ApiError(payload.message||"导入预检失败",response.status);
+        const batch=payload.data,rows=await requestJson(`/api/admin/catalog/import/${batch.batchId}/rows`);
+        box.innerHTML=renderCatalogImportResult(batch,rows,true);
+        box.querySelector("#catalogImportConfirm").addEventListener("click",async()=>{
+            const confirmButton=box.querySelector("#catalogImportConfirm");confirmButton.disabled=true;
+            try{
+                const confirmed=await requestJson(`/api/admin/catalog/import/${batch.batchId}/confirm`,{method:"POST",body:{}});
+                const confirmedRows=await requestJson(`/api/admin/catalog/import/${batch.batchId}/rows`);
+                box.innerHTML=renderCatalogImportResult(confirmed,confirmedRows,false);
+                await loadResources();
+            }catch(error){confirmButton.disabled=false;box.insertAdjacentHTML("beforeend",`<p class="status-box">${escapeHtml(error.message||"确认导入失败")}</p>`);}
+        });
+    }catch(error){box.innerHTML=`<p class="status-box">预检失败：${escapeHtml(error.message||"导入预检失败")}</p>`;}
+    finally{input.value="";}
+}
+function renderCatalogImportResult(batch,rows,allowConfirm){
+    const action=allowConfirm?`<button id="catalogImportConfirm" class="action-button" type="button">确认导入</button>`:"";
+    return `<div>批次 ${escapeHtml(batch.batchId)}：${batch.validRows||0} 行可导入，${batch.invalidRows||0} 行错误，${batch.duplicateRows||0} 行重复。 ${action} <a class="action-button" href="/api/admin/catalog/import/${batch.batchId}/report">下载报告</a></div>${renderCatalogImportRows(rows)}`;
+}
+function renderCatalogImportRows(rows){
+    if(!rows?.length)return "<p>没有可展示的导入行。</p>";
+    return `<div class="table-shell"><table><thead><tr><th>工作表</th><th>行号</th><th>状态</th><th>校验信息</th></tr></thead><tbody>${rows.map(row=>`<tr><td>${escapeHtml(row.sheetName)}</td><td>${escapeHtml(row.rowNumber)}</td><td>${renderStatus(row.validationStatus)}</td><td>${escapeHtml(row.validationMessage||"-")}</td></tr>`).join("")}</tbody></table></div>`;
+}
+async function loadCatalogOperations(){const body=document.querySelector("#catalogTaskTable");if(!body)return;const tasks=await requestJson("/api/admin/catalog/projection-tasks");body.innerHTML=(tasks||[]).map(task=>`<tr><td>${escapeHtml(task.taskType)} ${escapeHtml(task.entityType)}#${task.entityId}</td><td>${renderStatus(task.status)}</td><td>${task.attemptCount||0}</td><td>${escapeHtml(task.lastError||"-")}</td><td>${task.status==="FAILED"?`<button class="action-button" data-retry-task="${task.taskId}">重试</button>`:"-"}</td></tr>`).join("")||'<tr><td colspan="5">暂无投影任务。</td></tr>';body.querySelectorAll("[data-retry-task]").forEach(button=>button.addEventListener("click",async()=>{await requestJson(`/api/admin/catalog/projection-tasks/${button.dataset.retryTask}/retry`,{method:"POST",body:{}});await loadCatalogOperations();}));}
+async function loadCatalog(){return loadCatalogOperations();}
+
+mountUnifiedCatalogResourceWorkspace();
+mountCatalogWorkspace();

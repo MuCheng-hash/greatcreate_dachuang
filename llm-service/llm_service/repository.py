@@ -221,6 +221,25 @@ class ConversationRepository:
             connection.execute("UPDATE agent_thread SET updated_at = ? WHERE thread_id = ?", (now, thread_id))
             return int(cursor.lastrowid)
 
+    def count_completed_formal_account_chat_turns(self) -> int:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT COUNT(*) AS completed_question_count
+                FROM agent_message m
+                INNER JOIN agent_thread t ON t.thread_id = m.thread_id
+                WHERE t.owner_id LIKE 'account:%'
+                  AND t.scope_type = 'SCHOOL'
+                  AND m.role = 'assistant'
+                  AND json_extract(m.metadata_json, '$.status') = 'completed'
+                  AND (
+                      json_extract(m.metadata_json, '$.taskType') = 'CHAT'
+                      OR json_type(m.metadata_json, '$.taskType') IS NULL
+                  )
+                """
+            ).fetchone()
+        return int(row["completed_question_count"] or 0)
+
     def list_messages(self, thread_id: str) -> list[dict[str, Any]]:
         with self._connect() as connection:
             rows = connection.execute(

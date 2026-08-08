@@ -1,0 +1,48 @@
+## 1. Contracts and Storage
+
+- [x] 1.1 Add dashboard, catalog, relation, import, and projection contracts
+- [x] 1.2 Add MySQL migration and full-schema definitions for import and projection records
+
+## 2. Administrative Services
+
+- [x] 2.1 Implement dashboard aggregation with Agent and RAG degradation handling
+- [x] 2.2 Implement graph entity CRUD, approval, logical deactivation, media/source, and relation validation
+- [x] 2.3 Implement durable graph/RAG projection and manual retry
+
+## 3. Excel Import
+
+- [x] 3.1 Add XLSX template generation and preview validation
+- [x] 3.2 Add confirmation, duplicate handling, and import report download
+
+## 4. Static Admin Console
+
+- [x] 4.1 Extend dashboard cards and catalog entity switching
+- [x] 4.2 Add relations, media/source, import preview, confirmation, and projection retry controls
+
+## 5. Verification
+
+- [x] 5.1 Add focused service and controller tests
+- [x] 5.2 Run JDK 21 tests, static JavaScript syntax check, and browser acceptance
+
+## 6. Dashboard Question Metrics
+
+- [x] 6.1 Count successful formal-account chat turns from Agent conversation records
+- [x] 6.2 Verify the optional Agent metric contract and dashboard rendering
+
+## 7. Unified Resource Catalog Completion
+
+- [x] 7.1 Consolidate the legacy resource page and graph catalog into one resource-directory workflow
+- [x] 7.2 Add resource-specific catalog fields, server-local image upload, and media lifecycle APIs
+- [x] 7.3 Add filtered catalog paging and relation listing/deletion with server-owned relation options
+- [x] 7.4 Complete source, media, and related-story editing in the static admin console
+- [x] 7.5 Add focused regression tests and browser acceptance for the unified resource workflow
+- [x] 7.6 Allow images to be selected during entity creation and automatically upload them after the draft is saved
+
+## 8. Resource Import Hardening
+
+- [x] 8.1 Extend the multi-sheet template with resource core fields and support new/legacy header aliases with reordered columns
+- [x] 8.2 Implement required-field, resource-type, administrative-region, coordinate-range, and source/grade validation
+- [x] 8.3 Add workbook/database duplicate detection with confirmation-time recheck and row-level import messages
+- [x] 8.4 Validate relation endpoints and whitelist types, persist valid pending relations, and gate graph/RAG projection on both endpoints being approved and active
+- [x] 8.5 Render row-level preview results in the static admin console while preserving confirmation and report downloads
+- [x] 8.6 Add focused controller/service/projection tests and run JDK 21, JavaScript, and browser verification

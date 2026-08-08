@@ -105,6 +105,42 @@ class LlmObservabilityTest(unittest.TestCase):
             self.assertNotIn("account:9", metrics)
             self.assertNotIn("private-session", metrics)
 
+    def test_summary_optionally_includes_completed_formal_account_chat_turns(self) -> None:
+        settings = Settings(
+            database_path=self.database_path,
+            observability_admin_token="observe-secret",
+        )
+        app = create_app(settings, self.store)
+        repository = app.state.container.repository
+
+        def append_turn(owner_id: str, task_type: str | None, status: str) -> None:
+            thread = repository.create_thread(owner_id, "SCHOOL", 1)
+            user_metadata = {} if task_type is None else {"taskType": task_type}
+            assistant_metadata = {"status": status}
+            if task_type is not None:
+                assistant_metadata["taskType"] = task_type
+            repository.append_message(thread.thread_id, "user", "测试问题", user_metadata)
+            repository.append_message(thread.thread_id, "assistant", "测试回答", assistant_metadata)
+
+        append_turn("account:1", "CHAT", "completed")
+        append_turn("account:2", None, "completed")
+        append_turn("account:3", "CHAT", "degraded")
+        append_turn("account:4", "TEACHING_PLAN", "completed")
+        append_turn("account:5", "RESOURCE_DISCOVERY", "completed")
+        append_turn("startup-check", "CHAT", "completed")
+
+        with TestClient(app) as client:
+            headers = {"X-Observability-Admin-Token": "observe-secret"}
+            default_response = client.get("/admin/observability/summary", headers=headers)
+            metric_response = client.get(
+                "/admin/observability/summary?includeQuestionMetrics=true", headers=headers
+            )
+
+        self.assertEqual(200, default_response.status_code)
+        self.assertNotIn("completedQuestionCount", default_response.json())
+        self.assertEqual(200, metric_response.status_code)
+        self.assertEqual(2, metric_response.json()["completedQuestionCount"])
+
     def test_summary_counts_fallback_levels_and_tool_trace_endpoint_is_protected(self) -> None:
         context = LlmTraceContext(
             feature="agent-runtime",

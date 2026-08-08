@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>后台管理台 | 乡村学校思政资源地图</title>
     <meta name="description" content="乡村学校周边思政教育资源数字地图平台后台管理台。">
-    <link rel="stylesheet" href="/admin.css?v=20260807-ui">
+    <link rel="stylesheet" href="/admin.css?v=20260808-merge-admin-style">
 </head>
 <body>
 <div class="admin-shell">
@@ -70,7 +70,68 @@
                 </article>
             </section>
 
-            <main class="workspace-stack">
+    <section class="tab-strip" aria-label="后台模块">
+        <button class="tab-chip is-active" data-tab="dashboard" type="button">平台驾驶舱</button>
+        <button class="tab-chip" data-tab="registrations" type="button">注册审核</button>
+        <button class="tab-chip" data-tab="schools" type="button">学校管理</button>
+        <button class="tab-chip" data-tab="resources" type="button">资源管理</button>
+        <button class="tab-chip" data-tab="school-map" type="button">学校地图</button>
+        <button class="tab-chip" data-tab="plans" type="button">活动方案</button>
+        <button class="tab-chip" data-tab="agent-ops" type="button">Agent 运维</button>
+    </section>
+
+    <main class="workspace-stack">
+        <section class="workspace-panel is-active dashboard-panel" data-panel="dashboard">
+            <div class="panel-heading">
+                <div>
+                    <p class="eyebrow">Platform Overview</p>
+                    <h2>平台运行概览</h2>
+                </div>
+                <div class="panel-tools">
+                    <span class="status-box" id="dashboardUpdatedAt">等待首次同步</span>
+                    <button class="accent-button" id="dashboardRefreshButton" type="button">刷新概览</button>
+                </div>
+            </div>
+
+            <div class="dashboard-metric-grid">
+                <article class="dashboard-metric-card"><span>资源数量</span><strong id="dashboardResourceMetric">-</strong><small>平台资源主数据</small></article>
+                <article class="dashboard-metric-card"><span>学校数量</span><strong id="dashboardSchoolMetric">-</strong><small>已录入学校主数据</small></article>
+                <article class="dashboard-metric-card"><span>教师数量</span><strong id="dashboardTeacherMetric">-</strong><small>教师档案总量</small></article>
+                <article class="dashboard-metric-card"><span>学生数量</span><strong id="dashboardStudentMetric">-</strong><small>学生档案总量</small></article>
+                <article class="dashboard-metric-card"><span>教学方案</span><strong id="dashboardPlanMetric">-</strong><small>已生成或录入方案</small></article>
+                <article class="dashboard-metric-card"><span>问答次数</span><strong id="dashboardQuestionMetric">-</strong><small id="dashboardQuestionHint">等待 Agent 服务响应</small></article>
+            </div>
+
+            <div class="dashboard-status-grid">
+                <article class="dashboard-status-card">
+                    <div class="card-topline"><h3>知识库索引</h3><span id="dashboardRagStatus" class="status-pill">加载中</span></div>
+                    <div class="dashboard-status-values">
+                        <div><span>已索引</span><strong id="dashboardRagDone">-</strong></div>
+                        <div><span>待索引</span><strong id="dashboardRagPending">-</strong></div>
+                        <div><span>失败</span><strong id="dashboardRagFailed">-</strong></div>
+                    </div>
+                    <p id="dashboardRagHint" class="status-box">正在读取 RAG 状态。</p>
+                </article>
+                <article class="dashboard-status-card">
+                    <div class="card-topline"><h3>Qdrant 向量库</h3><span id="dashboardQdrantStatus" class="status-pill">加载中</span></div>
+                    <dl class="dashboard-definition-list">
+                        <div><dt>Collection</dt><dd id="dashboardQdrantCollection">-</dd></div>
+                        <div><dt>Alias</dt><dd id="dashboardQdrantAlias">-</dd></div>
+                        <div><dt>向量数量</dt><dd id="dashboardQdrantPoints">-</dd></div>
+                    </dl>
+                </article>
+                <article class="dashboard-status-card">
+                    <div class="card-topline"><h3>图谱与 RAG 投影</h3><button class="ghost-button" id="dashboardProjectionButton" type="button">查看任务</button></div>
+                    <div class="dashboard-status-values">
+                        <div><span>待处理</span><strong id="dashboardProjectionPending">-</strong></div>
+                        <div><span>失败</span><strong id="dashboardProjectionFailed">-</strong></div>
+                        <div><span>待办合计</span><strong id="dashboardProjectionTotal">-</strong></div>
+                    </div>
+                    <p class="status-box">审核发布后的图谱和知识库投影任务。</p>
+                </article>
+            </div>
+        </section>
+
         <section class="workspace-panel" data-panel="registrations">
             <div class="panel-heading">
                 <div>
@@ -151,7 +212,7 @@
             </div>
         </section>
 
-        <section class="workspace-panel is-active" data-panel="schools">
+        <section class="workspace-panel" data-panel="schools">
             <div class="panel-heading">
                 <div>
                     <p class="eyebrow">Module 01</p>
@@ -254,6 +315,8 @@
         </section>
 
         <section class="workspace-panel" data-panel="resources">
+            <div id="catalogResourceWorkspace"></div>
+            <div id="legacyResourceWorkspace" hidden>
             <div class="panel-heading">
                 <div>
                     <p class="eyebrow">Module 02</p>
@@ -391,6 +454,7 @@
                         </table>
                     </div>
                 </article>
+            </div>
             </div>
         </section>
 
@@ -809,6 +873,6 @@
     </div>
 </div>
 
-<script src="/admin.js?v=20260807-ui"></script>
+<script src="/admin.js?v=20260808-catalog-custom-pickers"></script>
 </body>
 </html>
