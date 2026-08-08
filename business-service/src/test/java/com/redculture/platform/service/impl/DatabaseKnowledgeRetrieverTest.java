@@ -15,6 +15,7 @@ import com.redculture.platform.service.rag.ChunkVectorStore;
 import com.redculture.platform.service.rag.EmbeddingClient;
 import com.redculture.platform.service.rag.RagEntityMetadata;
 import com.redculture.platform.service.rag.RagEntityMetadataService;
+import com.redculture.platform.service.rag.RagRerankerClient;
 import com.redculture.platform.service.rag.VectorSearchCandidate;
 import com.redculture.platform.vo.LocalEduResourceSummaryVO;
 import com.redculture.platform.vo.SchoolMapDetailVO;
@@ -23,9 +24,11 @@ import com.redculture.platform.vo.ai.KnowledgeRetrieveRequest;
 import com.redculture.platform.vo.ai.KnowledgeRetrieveResult;
 import com.redculture.platform.vo.ai.KnowledgeRetrievalStatus;
 import com.redculture.platform.vo.ai.KnowledgeScopeType;
+import com.redculture.platform.vo.ai.WebEvidenceVO;
 import org.junit.jupiter.api.Test;
 import org.springframework.context.annotation.AnnotationConfigApplicationContext;
 import org.springframework.data.neo4j.core.Neo4jClient;
+import org.springframework.test.util.ReflectionTestUtils;
 
 import java.util.Collection;
 import java.util.LinkedHashMap;
@@ -252,6 +255,72 @@ class DatabaseKnowledgeRetrieverTest {
         assertEquals(KnowledgeRetrievalStatus.EMPTY, result.getRetrievalStatus());
         assertTrue(result.getChunks().isEmpty());
         assertTrue(result.getRetrievalMethods().containsAll(List.of("dense", "lexical")));
+    }
+
+    @Test
+    void mergesHydeDenseAndApprovedWebEvidenceWithoutTreatingWebAsLocalChunk() {
+        ContentChunkMapper contentChunkMapper = mock(ContentChunkMapper.class);
+        ContentChunk hydeChunk = chunk(59L, EntityType.RESOURCE, 7L,
+                "乡村红色研学", "可将地方革命旧址设计为四年级研学活动。", null);
+        when(contentChunkMapper.searchByFullText(anyMap(), anyString(), anyInt())).thenReturn(List.of());
+        when(contentChunkMapper.selectBatchIds(anyCollection())).thenReturn(List.of(hydeChunk));
+
+        RagProperties properties = new RagProperties();
+        properties.setEnabled(true);
+        EmbeddingClient embeddingClient = mock(EmbeddingClient.class);
+        when(embeddingClient.embed(anyString())).thenReturn(new float[]{0.1F});
+        ChunkVectorStore vectorStore = mock(ChunkVectorStore.class);
+        when(vectorStore.search(any(float[].class), anySet(), anyInt())).thenReturn(
+                List.of(), List.of(new VectorSearchCandidate(59L, 0.92D)));
+        DatabaseKnowledgeRetriever retriever = retriever(
+                contentChunkMapper, mock(EntitySourceRelMapper.class), mock(DataSourceMapper.class),
+                mock(SchoolMapService.class), mock(TownMapService.class), properties, embeddingClient, vectorStore);
+
+        WebEvidenceVO web = new WebEvidenceVO();
+        web.setTitle("权威研学指导");
+        web.setDomain("www.gov.cn");
+        web.setUrl("https://www.gov.cn/example/red-study");
+        web.setExcerpt("面向中小学生开展红色研学实践活动的指导信息。");
+        web.setRank(1);
+        KnowledgeRetrieveRequest request = request("如何开展红色研学活动？", KnowledgeScopeType.RESOURCE, 7L, 3);
+        request.setHydeQuery("围绕乡村红色研学的教学活动安排。");
+        request.setWebEvidence(List.of(web));
+
+        KnowledgeRetrieveResult result = retriever.retrieve(request);
+
+        assertEquals(KnowledgeRetrievalStatus.OK, result.getRetrievalStatus());
+        assertEquals(1, result.getChunks().size());
+        assertTrue(result.getRetrievalMethods().contains("hyde"));
+        assertTrue(result.getRetrievalMethods().contains("web"));
+        assertTrue(result.getCitationCandidates().stream()
+                .anyMatch(candidate -> "web".equals(candidate.getEvidenceType())
+                        && candidate.getCitationId().startsWith("web:")
+                        && "https://www.gov.cn/example/red-study".equals(candidate.getUrl())));
+    }
+
+    @Test
+    void degradesToHeuristicRerankWhenCrossEncoderFails() {
+        ContentChunkMapper contentChunkMapper = mock(ContentChunkMapper.class);
+        ContentChunk chunk = chunk(60L, EntityType.RESOURCE, 7L,
+                "红色教育资源", "用于四年级的红色教育活动。", null);
+        when(contentChunkMapper.searchByFullText(anyMap(), anyString(), anyInt())).thenReturn(List.of(chunk));
+        when(contentChunkMapper.selectBatchIds(anyCollection())).thenReturn(List.of(chunk));
+        DatabaseKnowledgeRetriever retriever = retriever(
+                contentChunkMapper, mock(EntitySourceRelMapper.class), mock(DataSourceMapper.class),
+                mock(SchoolMapService.class), mock(TownMapService.class), new RagProperties(),
+                mock(EmbeddingClient.class), mock(ChunkVectorStore.class));
+        RagRerankerClient rerankerClient = mock(RagRerankerClient.class);
+        when(rerankerClient.rerank(anyString(), any(), anyInt()))
+                .thenReturn(RagRerankerClient.RerankResult.failed("timeout"));
+        ReflectionTestUtils.setField(retriever, "ragRerankerClient", rerankerClient);
+
+        KnowledgeRetrieveResult result = retriever.retrieve(request(
+                "适合四年级的红色教育资源", KnowledgeScopeType.RESOURCE, 7L, 3));
+
+        assertEquals(KnowledgeRetrievalStatus.DEGRADED, result.getRetrievalStatus());
+        assertEquals("timeout", result.getRetrievalTrace().getCrossEncoderStatus());
+        assertTrue(result.getRetrievalMethods().contains("heuristic-rerank"));
+        assertFalse(result.getRetrievalMethods().contains("cross-encoder-rerank"));
     }
 
     @Test

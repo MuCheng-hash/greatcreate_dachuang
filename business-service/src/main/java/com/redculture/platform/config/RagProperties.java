@@ -23,6 +23,10 @@ public class RagProperties {
     private int rrfK = 60;
     private double denseRrfWeight = 1.0D;
     private double lexicalRrfWeight = 1.0D;
+    private double hydeRrfWeight = 0.8D;
+    private double webRrfWeight = 0.7D;
+    private int augmentationMinimumCandidates = 3;
+    private double augmentationMinimumRrfScore = 0.020D;
     private double baseRetrievalWeight = 0.60D;
     private double entityMatchWeight = 0.15D;
     private double gradeMatchWeight = 0.10D;
@@ -38,4 +42,9 @@ public class RagProperties {
     private double minimumVectorScore = 0.2D;
     private int connectTimeoutMs = 3000;
     private int readTimeoutMs = 15000;
+    private boolean rerankerEnabled = false;
+    private String rerankerBaseUrl = "https://dashscope.aliyuncs.com/compatible-mode/v1";
+    private String rerankerApiKey;
+    private String rerankerModel = "qwen3-rerank";
+    private int rerankerTimeoutMs = 6000;
 }

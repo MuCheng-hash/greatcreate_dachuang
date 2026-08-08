@@ -16,6 +16,7 @@ import com.redculture.platform.service.rag.ChunkVectorStore;
 import com.redculture.platform.service.rag.EmbeddingClient;
 import com.redculture.platform.service.rag.RagEntityMetadata;
 import com.redculture.platform.service.rag.RagEntityMetadataService;
+import com.redculture.platform.service.rag.RagRerankerClient;
 import com.redculture.platform.service.rag.VectorSearchCandidate;
 import com.redculture.platform.vo.AgentIntent;
 import com.redculture.platform.vo.EventSummaryVO;
@@ -38,6 +39,7 @@ import com.redculture.platform.vo.ai.KnowledgeRetrieveRequest;
 import com.redculture.platform.vo.ai.KnowledgeRetrieveResult;
 import com.redculture.platform.vo.ai.KnowledgeRetrievalStatus;
 import com.redculture.platform.vo.ai.KnowledgeScopeType;
+import com.redculture.platform.vo.ai.WebEvidenceVO;
 import org.springframework.context.annotation.Profile;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.neo4j.core.Neo4jClient;
@@ -57,6 +59,9 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.function.Function;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
@@ -97,6 +102,7 @@ public class DatabaseKnowledgeRetriever implements KnowledgeRetriever {
     private static final String METHOD_HEURISTIC_RERANK = "heuristic-rerank";
     private static final String EVIDENCE_TYPE_CHUNK = "chunk";
     private static final String EVIDENCE_TYPE_GRAPH = "graph_fact";
+    private static final String EVIDENCE_TYPE_WEB = "web";
     private static final String GRAPH_STATUS_SKIPPED = "skipped";
     private static final String GRAPH_STATUS_OK = "ok";
     private static final String GRAPH_STATUS_EMPTY = "empty";
@@ -125,6 +131,9 @@ public class DatabaseKnowledgeRetriever implements KnowledgeRetriever {
     private final EmbeddingClient embeddingClient;
     private final ChunkVectorStore vectorStore;
     private final RagEntityMetadataService entityMetadataService;
+
+    @Autowired(required = false)
+    private RagRerankerClient ragRerankerClient;
 
     @Autowired
     public DatabaseKnowledgeRetriever(ContentChunkMapper contentChunkMapper,
@@ -171,7 +180,7 @@ public class DatabaseKnowledgeRetriever implements KnowledgeRetriever {
         try {
             RetrievalContext context = loadContext(request);
             RetrievalPlan plan = buildPlan(request, context);
-            ChunkLoad chunkLoad = loadChunks(plan);
+            ChunkLoad chunkLoad = loadChunks(plan, request);
             SourceContext sourceContext = loadSourceContext(plan, context, chunkLoad.chunks());
             RerankLoad rerankLoad = rerank(plan, context, chunkLoad, sourceContext);
             List<KnowledgeCitationCandidateVO> candidates = new ArrayList<>(rerankLoad.jointCandidates());
@@ -179,7 +188,8 @@ public class DatabaseKnowledgeRetriever implements KnowledgeRetriever {
             candidates = limitList(deduplicateCandidates(candidates), MAX_CITATIONS);
             List<String> retrievalMethods = new ArrayList<>(chunkLoad.retrievalMethods());
             if (!rerankLoad.evidences().isEmpty()) {
-                retrievalMethods.add(METHOD_HEURISTIC_RERANK);
+                retrievalMethods.add("ok".equals(rerankLoad.crossEncoderStatus())
+                        ? "cross-encoder-rerank" : METHOD_HEURISTIC_RERANK);
             }
             if (!rerankLoad.graphFacts().isEmpty()) {
                 retrievalMethods.add("knowledge-graph");
@@ -192,7 +202,7 @@ public class DatabaseKnowledgeRetriever implements KnowledgeRetriever {
             result.setRetrievalMethods(retrievalMethods);
             result.setRetrievalStatus(resolveStatus(
                     !rerankLoad.evidences().isEmpty() || !candidates.isEmpty(),
-                    GRAPH_STATUS_FAILED.equals(context.graphStatus()) || chunkLoad.degraded()
+                    GRAPH_STATUS_FAILED.equals(context.graphStatus()) || chunkLoad.degraded() || rerankLoad.degraded()
             ));
             result.refreshRetrievalMethods();
             result.setRetrievalTrace(buildRetrievalTrace(plan, context, chunkLoad, rerankLoad,
@@ -723,9 +733,10 @@ public class DatabaseKnowledgeRetriever implements KnowledgeRetriever {
         return Collections.unmodifiableMap(frozen);
     }
 
-    private ChunkLoad loadChunks(RetrievalPlan plan) {
+    private ChunkLoad loadChunks(RetrievalPlan plan, KnowledgeRetrieveRequest request) {
         if (plan.entityIds().isEmpty() || plan.entityKeys().isEmpty()) {
-            return new ChunkLoad(Collections.emptyList(), false, Collections.emptyList(), 0, 0, 0);
+            return new ChunkLoad(Collections.emptyList(), Collections.emptyList(), false, Collections.emptyList(),
+                    0, 0, 0, 0, 0, false, "no_scoped_entities");
         }
 
         ChannelLoad dense = plan.needDense()
@@ -734,16 +745,29 @@ public class DatabaseKnowledgeRetriever implements KnowledgeRetriever {
         ChannelLoad lexical = plan.needLexical()
                 ? loadLexicalCandidates(plan)
                 : ChannelLoad.notRequested();
+        ChannelLoad hyde = StringUtils.hasText(request.getHydeQuery()) && plan.needDense()
+                ? loadDenseCandidates(plan, request.getHydeQuery())
+                : ChannelLoad.notRequested();
 
         Map<Long, Integer> denseRanks = ranksByChunkId(dense.candidates());
         Map<Long, Integer> lexicalRanks = ranksByChunkId(lexical.candidates());
+        Map<Long, Integer> hydeRanks = ranksByChunkId(hyde.candidates());
         Set<Long> candidateIds = new LinkedHashSet<>();
         candidateIds.addAll(denseRanks.keySet());
         candidateIds.addAll(lexicalRanks.keySet());
+        candidateIds.addAll(hydeRanks.keySet());
+        List<ScoredWebEvidence> webEvidences = rankWebEvidence(request.getWebEvidence());
         if (candidateIds.isEmpty()) {
             List<String> methods = successfulMethods(plan, dense, lexical);
-            return new ChunkLoad(Collections.emptyList(), !dense.successful() || !lexical.successful(), methods,
-                    dense.candidates().size(), lexical.candidates().size(), 0);
+            if (!hyde.candidates().isEmpty()) {
+                methods.add("hyde");
+            }
+            if (!webEvidences.isEmpty()) {
+                methods.add("web");
+            }
+            return new ChunkLoad(Collections.emptyList(), webEvidences, !dense.successful() || !lexical.successful()
+                    || !hyde.successful(), methods, dense.candidates().size(), lexical.candidates().size(),
+                    hyde.candidates().size(), webEvidences.size(), 0, true, "no_local_candidates");
         }
 
         Map<Long, Double> rrfScores = new LinkedHashMap<>();
@@ -755,6 +779,11 @@ public class DatabaseKnowledgeRetriever implements KnowledgeRetriever {
         lexicalRanks.forEach((chunkId, rank) -> rrfScores.merge(
                 chunkId,
                 ragProperties.getLexicalRrfWeight() / (Math.max(1, ragProperties.getRrfK()) + rank),
+                Double::sum
+        ));
+        hydeRanks.forEach((chunkId, rank) -> rrfScores.merge(
+                chunkId,
+                ragProperties.getHydeRrfWeight() / (Math.max(1, ragProperties.getRrfK()) + rank),
                 Double::sum
         ));
 
@@ -786,9 +815,13 @@ public class DatabaseKnowledgeRetriever implements KnowledgeRetriever {
                     }
                     boolean fromDense = denseRanks.containsKey(chunkId);
                     boolean fromLexical = lexicalRanks.containsKey(chunkId);
+                    boolean fromHyde = hydeRanks.containsKey(chunkId);
                     String method = fromDense && fromLexical
                             ? RETRIEVAL_METHOD_HYBRID_RRF
-                            : fromDense ? RETRIEVAL_METHOD_DENSE : RETRIEVAL_METHOD_LEXICAL;
+                            : fromDense ? RETRIEVAL_METHOD_DENSE : fromLexical ? RETRIEVAL_METHOD_LEXICAL : "hyde";
+                    if (fromHyde && !"hyde".equals(method)) {
+                        method = method + "+hyde";
+                    }
                     double normalizedScore = maxScore <= 0D ? 0D : score / maxScore;
                     return new ScoredChunk(toChunk(chunk, normalizedScore, method), normalizedScore);
                 })
@@ -796,9 +829,24 @@ public class DatabaseKnowledgeRetriever implements KnowledgeRetriever {
                 .limit(Math.min(MAX_CANDIDATES, Math.max(1, ragProperties.getRerankCandidateLimit())))
                 .collect(Collectors.toCollection(ArrayList::new));
 
-        boolean degraded = !dense.successful() || !lexical.successful();
-        return new ChunkLoad(chunks, degraded, successfulMethods(plan, dense, lexical),
-                dense.candidates().size(), lexical.candidates().size(), candidateIds.size());
+        boolean augmentationRequired = chunks.size() < Math.min(Math.max(1, plan.topK()),
+                Math.max(1, ragProperties.getAugmentationMinimumCandidates()))
+                || maxScore < ragProperties.getAugmentationMinimumRrfScore();
+        String augmentationReason = chunks.size() < Math.min(Math.max(1, plan.topK()),
+                Math.max(1, ragProperties.getAugmentationMinimumCandidates()))
+                ? "candidate_count" : maxScore < ragProperties.getAugmentationMinimumRrfScore()
+                ? "rrf_score" : "sufficient";
+        List<String> methods = successfulMethods(plan, dense, lexical);
+        if (!hyde.candidates().isEmpty()) {
+            methods.add("hyde");
+        }
+        if (!webEvidences.isEmpty()) {
+            methods.add("web");
+        }
+        boolean degraded = !dense.successful() || !lexical.successful() || !hyde.successful();
+        return new ChunkLoad(chunks, webEvidences, degraded, methods, dense.candidates().size(),
+                lexical.candidates().size(), hyde.candidates().size(), webEvidences.size(), candidateIds.size(),
+                augmentationRequired, augmentationReason);
     }
 
     private SourceContext loadSourceContext(RetrievalPlan plan,
@@ -866,8 +914,18 @@ public class DatabaseKnowledgeRetriever implements KnowledgeRetriever {
             String retrievalMethod = rerankedMethod(chunk.getRetrievalMethod());
             chunk.setScore(featureScore.score());
             chunk.setRetrievalMethod(retrievalMethod);
-            evidences.add(new RankedEvidence(EVIDENCE_TYPE_CHUNK, chunk.getCitationId(), chunk, null,
+            evidences.add(new RankedEvidence(EVIDENCE_TYPE_CHUNK, chunk.getCitationId(), chunk, null, null,
                     featureScore.score(), scoredChunk.score(), retrievalMethod, featureScore.contributions(), 0));
+        }
+
+        for (ScoredWebEvidence scoredWebEvidence : chunkLoad.webEvidences()) {
+            WebEvidenceVO web = scoredWebEvidence.evidence();
+            FeatureScore featureScore = scoreFeatures(plan, null,
+                    joinNonBlank(web.getTitle(), web.getExcerpt()), scoredWebEvidence.score(),
+                    0.6D, 0D, requestedTheme, false);
+            evidences.add(new RankedEvidence(EVIDENCE_TYPE_WEB, webCitationId(web), null, null, web,
+                    featureScore.score(), scoredWebEvidence.score(), "web-rrf",
+                    featureScore.contributions(), 0));
         }
 
         int graphSize = context.graphFacts().size();
@@ -880,7 +938,7 @@ public class DatabaseKnowledgeRetriever implements KnowledgeRetriever {
             FeatureScore featureScore = scoreFeatures(plan, metadata, fact.getText(), base,
                     sourceCredibility(type, fact.getObjectId(), fact.getSourceId(), metadata, sourceContext),
                     graphRelevance, requestedTheme, true);
-            evidences.add(new RankedEvidence(EVIDENCE_TYPE_GRAPH, fact.getCitationId(), null, fact,
+            evidences.add(new RankedEvidence(EVIDENCE_TYPE_GRAPH, fact.getCitationId(), null, fact, null,
                     featureScore.score(), base, RETRIEVAL_METHOD_GRAPH_RERANK,
                     featureScore.contributions(), 0));
         }
@@ -892,6 +950,8 @@ public class DatabaseKnowledgeRetriever implements KnowledgeRetriever {
                 .limit(Math.max(1, ragProperties.getRerankCandidateLimit())
                         + Math.max(1, ragProperties.getGraphCandidateLimit()))
                 .collect(Collectors.toCollection(ArrayList::new));
+        RerankResultLoad crossEncoder = applyCrossEncoder(plan, ranked);
+        ranked = new ArrayList<>(crossEncoder.evidences());
         for (int index = 0; index < ranked.size(); index++) {
             ranked.set(index, ranked.get(index).withRank(index + 1));
         }
@@ -903,7 +963,8 @@ public class DatabaseKnowledgeRetriever implements KnowledgeRetriever {
                 .limit(Math.min(MAX_GRAPH_FACTS, Math.max(1, ragProperties.getGraphEvidenceLimit())))
                 .collect(Collectors.toCollection(ArrayList::new));
         List<KnowledgeCitationCandidateVO> jointCandidates = buildJointCandidates(ranked, sourceContext);
-        return new RerankLoad(List.copyOf(ranked), chunks, graphFacts, jointCandidates);
+        return new RerankLoad(List.copyOf(ranked), chunks, graphFacts, jointCandidates,
+                crossEncoder.degraded(), crossEncoder.status());
     }
 
     private List<KnowledgeChunkVO> selectRankedChunks(List<RankedEvidence> ranked, RetrievalPlan plan) {
@@ -981,6 +1042,12 @@ public class DatabaseKnowledgeRetriever implements KnowledgeRetriever {
             candidate.setExcerpt(truncate(chunk.getText(), MAX_EXCERPT_LENGTH));
             DataSource source = sources.get(chunk.getSourceId());
             candidate.setUrl(source == null ? null : source.getBaseUrl());
+        } else if (EVIDENCE_TYPE_WEB.equals(evidence.evidenceType())) {
+            WebEvidenceVO web = evidence.webEvidence();
+            candidate.setTitle(web.getTitle());
+            candidate.setSourceType("web");
+            candidate.setExcerpt(truncate(web.getExcerpt(), MAX_EXCERPT_LENGTH));
+            candidate.setUrl(web.getUrl());
         } else {
             KnowledgeGraphFactVO fact = evidence.graphFact();
             candidate.setTitle("图谱关系：" + cleanOrDefault(fact.getPredicate(), "GRAPH_PATH"));
@@ -992,6 +1059,73 @@ public class DatabaseKnowledgeRetriever implements KnowledgeRetriever {
             candidate.setUrl(source == null ? null : source.getBaseUrl());
         }
         return candidate;
+    }
+
+    private RerankResultLoad applyCrossEncoder(RetrievalPlan plan, List<RankedEvidence> ranked) {
+        if (ragRerankerClient == null) {
+            return new RerankResultLoad(ranked, false, "skipped");
+        }
+        List<RagRerankerClient.RerankDocument> documents = ranked.stream()
+                .filter(item -> EVIDENCE_TYPE_CHUNK.equals(item.evidenceType())
+                        || EVIDENCE_TYPE_WEB.equals(item.evidenceType()))
+                .limit(Math.max(1, ragProperties.getRerankCandidateLimit()))
+                .map(item -> new RagRerankerClient.RerankDocument(item.citationId(), evidenceText(item)))
+                .filter(item -> StringUtils.hasText(item.text()))
+                .toList();
+        RagRerankerClient.RerankResult result = ragRerankerClient.rerank(plan.searchQuery(), documents,
+                Math.min(plan.topK(), documents.size()));
+        if (!result.attempted()) {
+            return new RerankResultLoad(ranked, false, "skipped");
+        }
+        if (!result.successful()) {
+            return new RerankResultLoad(ranked, true, result.reason());
+        }
+        Map<String, Double> scores = result.scores().stream().collect(Collectors.toMap(
+                RagRerankerClient.RerankScore::citationId, RagRerankerClient.RerankScore::score,
+                Math::max, LinkedHashMap::new));
+        double max = scores.values().stream().mapToDouble(Double::doubleValue).max().orElse(1D);
+        List<RankedEvidence> adjusted = ranked.stream().map(item -> {
+            Double raw = scores.get(item.citationId());
+            if (raw == null) {
+                return item;
+            }
+            double cross = max <= 0D ? 0D : clamp01(raw / max);
+            double score = clamp01(item.score() * 0.25D + cross * 0.75D);
+            Map<String, Double> contributions = new LinkedHashMap<>(item.contributions());
+            contributions.put("crossEncoder", cross * 0.75D);
+            if (item.chunk() != null) {
+                item.chunk().setScore(score);
+                item.chunk().setRetrievalMethod("cross-encoder-rerank");
+            }
+            return item.withCrossEncoder(score, "cross-encoder-rerank", contributions);
+        }).sorted(Comparator.comparingDouble(RankedEvidence::score).reversed()
+                .thenComparing(Comparator.comparingDouble(RankedEvidence::baseScore).reversed())
+                .thenComparing(RankedEvidence::citationId)).collect(Collectors.toCollection(ArrayList::new));
+        return new RerankResultLoad(adjusted, false, "ok");
+    }
+
+    private String evidenceText(RankedEvidence evidence) {
+        if (evidence.chunk() != null) {
+            return joinNonBlank(evidence.chunk().getTitle(), evidence.chunk().getText());
+        }
+        if (evidence.webEvidence() != null) {
+            return joinNonBlank(evidence.webEvidence().getTitle(), evidence.webEvidence().getExcerpt());
+        }
+        return "";
+    }
+
+    private String webCitationId(WebEvidenceVO evidence) {
+        String source = cleanOrDefault(evidence.getUrl(), evidence.getDomain());
+        try {
+            byte[] hash = MessageDigest.getInstance("SHA-256").digest(source.getBytes(StandardCharsets.UTF_8));
+            StringBuilder builder = new StringBuilder("web:");
+            for (int index = 0; index < 8; index++) {
+                builder.append(String.format("%02x", hash[index]));
+            }
+            return builder.toString();
+        } catch (NoSuchAlgorithmException exception) {
+            return "web:" + Integer.toUnsignedString(source.hashCode(), 16);
+        }
     }
 
     private FeatureScore scoreFeatures(RetrievalPlan plan,
@@ -1200,6 +1334,9 @@ public class DatabaseKnowledgeRetriever implements KnowledgeRetriever {
         if (RETRIEVAL_METHOD_DENSE.equals(method)) {
             return RETRIEVAL_METHOD_DENSE_RERANK;
         }
+        if (method != null && method.contains("hyde")) {
+            return "hyde+heuristic-rerank";
+        }
         return RETRIEVAL_METHOD_LEXICAL_RERANK;
     }
 
@@ -1224,8 +1361,12 @@ public class DatabaseKnowledgeRetriever implements KnowledgeRetriever {
     }
 
     private ChannelLoad loadDenseCandidates(RetrievalPlan plan) {
+        return loadDenseCandidates(plan, plan.searchQuery());
+    }
+
+    private ChannelLoad loadDenseCandidates(RetrievalPlan plan, String query) {
         try {
-            float[] queryVector = embeddingClient.embed(plan.searchQuery());
+            float[] queryVector = embeddingClient.embed(query);
             List<VectorSearchCandidate> candidates = vectorStore.search(
                     queryVector,
                     plan.entityKeys(),
@@ -1236,6 +1377,31 @@ public class DatabaseKnowledgeRetriever implements KnowledgeRetriever {
             log.warn("Dense retrieval failed", exception);
             return new ChannelLoad(Collections.emptyList(), false);
         }
+    }
+
+    private List<ScoredWebEvidence> rankWebEvidence(List<WebEvidenceVO> values) {
+        if (values == null || values.isEmpty()) {
+            return Collections.emptyList();
+        }
+        List<WebEvidenceVO> accepted = values.stream().filter(Objects::nonNull)
+                .filter(item -> StringUtils.hasText(item.getUrl()) && item.getUrl().startsWith("https://"))
+                .filter(item -> StringUtils.hasText(item.getDomain()))
+                .filter(item -> StringUtils.hasText(item.getExcerpt()))
+                .limit(5)
+                .collect(Collectors.toCollection(ArrayList::new));
+        if (accepted.isEmpty()) {
+            return Collections.emptyList();
+        }
+        List<ScoredWebEvidence> result = new ArrayList<>();
+        for (int index = 0; index < accepted.size(); index++) {
+            WebEvidenceVO item = accepted.get(index);
+            // Tavily's provider score is not comparable to local vector/FTS scores.
+            // Treat its response order as a ranked route and put it into the same RRF scale.
+            double rrfScore = ragProperties.getWebRrfWeight()
+                    / (ragProperties.getRrfK() + Math.max(1, index + 1));
+            result.add(new ScoredWebEvidence(item, rrfScore));
+        }
+        return result;
     }
 
     private ChannelLoad loadLexicalCandidates(RetrievalPlan plan) {
@@ -1402,15 +1568,27 @@ public class DatabaseKnowledgeRetriever implements KnowledgeRetriever {
                                                           List<String> retrievalMethods) {
         KnowledgeRetrievalTraceVO trace = new KnowledgeRetrievalTraceVO();
         trace.setRetrievalStatus(resolveStatus(!rerankLoad.evidences().isEmpty(),
-                GRAPH_STATUS_FAILED.equals(context.graphStatus()) || chunkLoad.degraded()).name().toLowerCase(Locale.ROOT));
+                GRAPH_STATUS_FAILED.equals(context.graphStatus()) || chunkLoad.degraded() || rerankLoad.degraded())
+                .name().toLowerCase(Locale.ROOT));
         trace.setIntent(plan.intent().name());
         trace.setNeedGraph(plan.needGraph());
         trace.setGraphStatus(context.graphStatus());
         trace.setDenseCandidateCount(chunkLoad.denseCandidateCount());
         trace.setLexicalCandidateCount(chunkLoad.lexicalCandidateCount());
+        trace.setHydeCandidateCount(chunkLoad.hydeCandidateCount());
+        trace.setWebCandidateCount(chunkLoad.webCandidateCount());
+        trace.setWebDomains(chunkLoad.webEvidences().stream()
+                .map(ScoredWebEvidence::evidence)
+                .map(WebEvidenceVO::getDomain)
+                .filter(StringUtils::hasText)
+                .distinct()
+                .collect(Collectors.toCollection(ArrayList::new)));
         trace.setRrfCandidateCount(chunkLoad.rrfCandidateCount());
         trace.setGraphCandidateCount(context.graphFacts().size());
         trace.setRerankedCandidateCount(rerankLoad.evidences().size());
+        trace.setAugmentationRequired(chunkLoad.augmentationRequired());
+        trace.setAugmentationReason(chunkLoad.augmentationReason());
+        trace.setCrossEncoderStatus(rerankLoad.crossEncoderStatus());
         trace.setRetrievalMethods(new ArrayList<>(retrievalMethods));
         trace.setTopCandidates(rerankLoad.evidences().stream().limit(8).map(evidence -> {
             KnowledgeRetrievalCandidateTraceVO candidate = new KnowledgeRetrievalCandidateTraceVO();
@@ -1958,12 +2136,20 @@ public class DatabaseKnowledgeRetriever implements KnowledgeRetriever {
     private record ScoredChunk(KnowledgeChunkVO chunk, double score) {
     }
 
+    private record ScoredWebEvidence(WebEvidenceVO evidence, double score) {
+    }
+
     private record ChunkLoad(List<ScoredChunk> chunks,
+                             List<ScoredWebEvidence> webEvidences,
                              boolean degraded,
                              List<String> retrievalMethods,
                              int denseCandidateCount,
                              int lexicalCandidateCount,
-                             int rrfCandidateCount) {
+                             int hydeCandidateCount,
+                             int webCandidateCount,
+                             int rrfCandidateCount,
+                             boolean augmentationRequired,
+                             String augmentationReason) {
     }
 
     private record GraphLoad(List<KnowledgeGraphFactVO> facts, boolean unavailable) {
@@ -1988,6 +2174,7 @@ public class DatabaseKnowledgeRetriever implements KnowledgeRetriever {
                                   String citationId,
                                   KnowledgeChunkVO chunk,
                                   KnowledgeGraphFactVO graphFact,
+                                  WebEvidenceVO webEvidence,
                                   double score,
                                   double baseScore,
                                   String retrievalMethod,
@@ -1995,15 +2182,25 @@ public class DatabaseKnowledgeRetriever implements KnowledgeRetriever {
                                   int rank) {
 
         private RankedEvidence withRank(int value) {
-            return new RankedEvidence(evidenceType, citationId, chunk, graphFact, score, baseScore,
+            return new RankedEvidence(evidenceType, citationId, chunk, graphFact, webEvidence, score, baseScore,
                     retrievalMethod, contributions, value);
+        }
+
+        private RankedEvidence withCrossEncoder(double value, String method, Map<String, Double> values) {
+            return new RankedEvidence(evidenceType, citationId, chunk, graphFact, webEvidence, value, baseScore,
+                    method, Collections.unmodifiableMap(new LinkedHashMap<>(values)), rank);
         }
     }
 
     private record RerankLoad(List<RankedEvidence> evidences,
                               List<KnowledgeChunkVO> chunks,
                               List<KnowledgeGraphFactVO> graphFacts,
-                              List<KnowledgeCitationCandidateVO> jointCandidates) {
+                              List<KnowledgeCitationCandidateVO> jointCandidates,
+                              boolean degraded,
+                              String crossEncoderStatus) {
+    }
+
+    private record RerankResultLoad(List<RankedEvidence> evidences, boolean degraded, String status) {
     }
 
     private record GradeProfile(Integer exactGrade, GradeStage stage, boolean genericStage) {
