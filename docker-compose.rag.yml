@@ -1,4 +1,23 @@
 services:
+  redis:
+    image: redis:7.4-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+  minio:
+    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+    restart: unless-stopped
   qdrant:
     image: qdrant/qdrant:v1.14.1
     container_name: red-culture-qdrant
@@ -8,6 +27,34 @@ services:
     volumes:
       - qdrant_data:/qdrant/storage
     restart: unless-stopped
+  ingestion-worker:
+    build: ./ingestion-worker
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+      MINIO_KNOWLEDGE_BUCKET: knowledge
+      QDRANT_URL: http://qdrant:6333
+      MYSQL_HOST: host.docker.internal
+      MYSQL_PORT: 3306
+      MYSQL_USER: root
+      MYSQL_PASSWORD: root
+      MYSQL_DATABASE: red_culture_platform
+      EMBEDDING_URL: ${EMBEDDING_URL:-http://host.docker.internal:5050}
+      EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-text-embedding-v3}
+      EMBEDDING_DIMENSIONS: ${EMBEDDING_DIMENSIONS:-1024}
+      VISION_URL: ${VISION_URL:-http://host.docker.internal:5050}
+      VISION_API_KEY: ${VISION_API_KEY:-}
+      VISION_MODEL: ${VISION_MODEL:-}
+    depends_on:
+      - redis
+      - minio
+      - qdrant
+    restart: unless-stopped
 
 volumes:
   qdrant_data:
+  redis_data:
+  minio_data:

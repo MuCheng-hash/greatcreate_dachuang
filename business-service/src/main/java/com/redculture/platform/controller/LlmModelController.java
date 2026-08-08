@@ -13,6 +13,7 @@ import java.util.List;
 
 @RestController
 @RequestMapping("/api/ai/models")
+//返回当前用户可选择的 AI 模型列表。
 public class LlmModelController {
     private final AgentRuntimeClient agentRuntimeClient;
 

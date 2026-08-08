@@ -34,6 +34,7 @@ import java.util.Set;
 
 @RestController
 @RequestMapping("/api/ai")
+//当前用户的 AI 长期记忆管理：开启/关闭记忆、查询、新增、修改、确认冲突、软删除、恢复和永久删除。
 public class AgentMemoryController {
 
     private static final String SCHOOL_SCOPE = "SCHOOL";
@@ -46,6 +47,7 @@ public class AgentMemoryController {
         this.agentRuntimeClient = agentRuntimeClient;
     }
 
+    //获取当前账号的“AI 是否使用长期记忆”开关状态。
     @GetMapping("/memory-settings")
     public ApiResponse<AgentMemorySetting> settings(HttpServletRequest request) {
         AuthCurrentUserVO user = requireSchoolUser(request);
@@ -53,6 +55,7 @@ public class AgentMemoryController {
                 ownerId(user), SCHOOL_SCOPE, user.getSchoolId()));
     }
 
+    //开启或关闭长期记忆。请求体需要包含 enabled，例如 {"enabled": true}。
     @PutMapping("/memory-settings")
     public ApiResponse<AgentMemorySetting> updateSettings(
             @RequestBody AgentMemorySettingUpdateRequest request,
@@ -65,6 +68,7 @@ public class AgentMemoryController {
                 ownerId(user), SCHOOL_SCOPE, user.getSchoolId(), request.getEnabled()));
     }
 
+    //查询记忆列表。默认查询已生效的记忆，即 status=active。
     @GetMapping("/memories")
     public ApiResponse<List<AgentMemoryItem>> list(
             @RequestParam(name = "status", defaultValue = "active") String status,
@@ -79,6 +83,7 @@ public class AgentMemoryController {
                 normalizeMemoryType(memoryType, false)));
     }
 
+    //手动新增一条记忆。
     @PostMapping("/memories")
     public ApiResponse<AgentMemoryItem> create(
             @RequestBody AgentMemoryCreateRequest request,
@@ -96,6 +101,7 @@ public class AgentMemoryController {
                 ownerId(user), SCHOOL_SCOPE, user.getSchoolId(), normalized));
     }
 
+    //局部修改某条记忆，例如只改内容或分类。
     @PatchMapping("/memories/{id}")
     public ApiResponse<AgentMemoryItem> update(
             @PathVariable String id,
@@ -121,6 +127,7 @@ public class AgentMemoryController {
                 id.trim(), ownerId(user), SCHOOL_SCOPE, user.getSchoolId(), normalized));
     }
 
+    //查看某条待确认记忆与已有记忆的冲突预览。
     @GetMapping("/memories/{id}/confirmation-preview")
     public ApiResponse<AgentMemoryConflictPreview> confirmationPreview(
             @PathVariable String id, HttpServletRequest request) {
@@ -129,6 +136,7 @@ public class AgentMemoryController {
                 requireMemoryId(id), ownerId(user), SCHOOL_SCOPE, user.getSchoolId()));
     }
 
+    //确认一条待处理的记忆，使它生效；也可选择覆盖冲突记忆。
     @PostMapping("/memories/{id}/confirm")
     public ApiResponse<AgentMemoryItem> confirm(
             @PathVariable String id,
@@ -143,6 +151,7 @@ public class AgentMemoryController {
                 resolution != null && Boolean.TRUE.equals(resolution.getReplaceConflicts())));
     }
 
+    //软删除记忆。数据仍保留，可恢复。
     @DeleteMapping("/memories/{id}")
     public ApiResponse<AgentMemoryItem> delete(
             @PathVariable String id, HttpServletRequest request) {
@@ -151,6 +160,7 @@ public class AgentMemoryController {
                 requireMemoryId(id), ownerId(user), SCHOOL_SCOPE, user.getSchoolId()));
     }
 
+    //恢复已软删除的记忆；如恢复后发生冲突，也可选择替换冲突项。
     @PostMapping("/memories/{id}/restore")
     public ApiResponse<AgentMemoryItem> restore(
             @PathVariable String id,
@@ -165,6 +175,7 @@ public class AgentMemoryController {
                 resolution != null && Boolean.TRUE.equals(resolution.getReplaceConflicts())));
     }
 
+    //永久删除记忆，无法恢复。
     @DeleteMapping("/memories/{id}/permanent")
     public ApiResponse<Void> permanentDelete(
             @PathVariable String id, HttpServletRequest request) {
@@ -184,10 +195,18 @@ public class AgentMemoryController {
         return user;
     }
 
+    //根据当前登录用户生成 Agent 服务识别的“记忆所属者 ID”。
     private String ownerId(AuthCurrentUserVO user) {
         return agentRuntimeClient.ownerIdFor(user);
     }
 
+    //校验并标准化记忆类型。
+    /*
+    required=true：必须传入 memoryType，否则报错。
+    required=false：不传时允许，返回 null。
+    会去除前后空格，并转成大写。
+    只接受 PROFILE 和 TASK。
+     */
     private String normalizeMemoryType(String memoryType, boolean required) {
         if (!StringUtils.hasText(memoryType)) {
             if (required) {
@@ -202,6 +221,14 @@ public class AgentMemoryController {
         return normalized;
     }
 
+
+    //校验并标准化记忆状态。
+     /*
+     三种状态分别表示：
+    pending：待用户确认的记忆
+    active：已生效、AI 可以使用的记忆
+    deleted：已软删除、可恢复的记忆
+      */
     private String normalizeStatus(String status) {
         String normalized = StringUtils.hasText(status)
                 ? status.trim().toLowerCase(Locale.ROOT) : "active";
@@ -211,6 +238,11 @@ public class AgentMemoryController {
         return normalized;
     }
 
+    //确保记忆内容不能为空、不能只有空格。
+    /*
+    "  希望回答简洁  " -> "希望回答简洁"
+       null 或 "   "       -> 报错
+     */
     private String requireContent(String content) {
         if (!StringUtils.hasText(content)) {
             throw new IllegalArgumentException("content is required");
@@ -218,15 +250,28 @@ public class AgentMemoryController {
         return content.trim();
     }
 
+    /*
+    用于处理可选文本字段：
+    有内容：去除首尾空格后返回。
+    未传、空字符串或全为空格：返回 null。
+    它常用于 fieldKey 一类允许为空的字段。
+     */
     private String normalizeOptionalText(String value) {
         return StringUtils.hasText(value) ? value.trim() : null;
     }
 
+    //规范化记忆字段名，并兼容历史字段名称。
+    //也就是说，旧客户端即使还传 response_format，后端也会把它映射为当前统一使用的 answer_format，保证旧数据和旧前端仍可工作。
     private String normalizeFieldKey(String value) {
         String normalized = normalizeOptionalText(value);
         return "response_format".equals(normalized) ? "answer_format" : normalized;
     }
 
+    //确保 URL 中的记忆 ID 不为空，并去掉首尾空格。
+    /*
+    " mem_001 " -> "mem_001"
+null 或 "   " -> 报错
+     */
     private String requireMemoryId(String id) {
         if (!StringUtils.hasText(id)) {
             throw new IllegalArgumentException("memory id is required");
@@ -234,6 +279,15 @@ public class AgentMemoryController {
         return id.trim();
     }
 
+    //这是异常处理器。
+    /*
+    当新增、修改、确认或恢复记忆时，若发现记忆冲突，例如：
+    旧记忆：回答应简洁
+新记忆：回答应详细展开
+Agent 服务会抛出 AgentMemoryConflictException。该方法会把异常转换为标准 HTTP 响应：
+HTTP 409 Conflict
+并将冲突说明和 exception.getPreview() 中的冲突预览数据返回给前端。前端据此弹出确认窗口，让用户选择是否覆盖冲突的旧记忆。
+     */
     @ExceptionHandler(AgentMemoryConflictException.class)
     public ResponseEntity<ApiResponse<AgentMemoryConflictPreview>> handleMemoryConflict(
             AgentMemoryConflictException exception) {

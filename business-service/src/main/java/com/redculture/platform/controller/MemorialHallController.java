@@ -15,6 +15,7 @@ import java.util.List;
 
 @RestController
 @RequestMapping("/api/memorials")
+//纪念馆信息查询和列表筛选。
 public class MemorialHallController {
 
     private final MemorialHallService memorialHallService;
@@ -23,11 +24,13 @@ public class MemorialHallController {
         this.memorialHallService = memorialHallService;
     }
 
+    //根据id查询纪念馆
     @GetMapping("/{id}")
     public ApiResponse<MemorialHall> getById(@PathVariable Long id) {
         return ApiResponse.success(memorialHallService.getById(id));
     }
 
+    //查询纪念馆列表
     @GetMapping
     public ApiResponse<List<MemorialHall>> list(@RequestParam(required = false) Long regionId,
                                                 @RequestParam(required = false) String memorialName,
