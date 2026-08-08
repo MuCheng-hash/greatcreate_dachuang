@@ -37,3 +37,12 @@
 - [x] 7.4 Complete source, media, and related-story editing in the static admin console
 - [x] 7.5 Add focused regression tests and browser acceptance for the unified resource workflow
 - [x] 7.6 Allow images to be selected during entity creation and automatically upload them after the draft is saved
+
+## 8. Resource Import Hardening
+
+- [x] 8.1 Extend the multi-sheet template with resource core fields and support new/legacy header aliases with reordered columns
+- [x] 8.2 Implement required-field, resource-type, administrative-region, coordinate-range, and source/grade validation
+- [x] 8.3 Add workbook/database duplicate detection with confirmation-time recheck and row-level import messages
+- [x] 8.4 Validate relation endpoints and whitelist types, persist valid pending relations, and gate graph/RAG projection on both endpoints being approved and active
+- [x] 8.5 Render row-level preview results in the static admin console while preserving confirmation and report downloads
+- [x] 8.6 Add focused controller/service/projection tests and run JDK 21, JavaScript, and browser verification
