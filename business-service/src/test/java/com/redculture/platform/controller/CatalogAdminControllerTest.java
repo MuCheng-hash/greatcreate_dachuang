@@ -8,6 +8,7 @@ import com.redculture.platform.service.admin.CatalogAdminService;
 import com.redculture.platform.service.admin.CatalogProjectionService;
 import com.redculture.platform.vo.admin.CatalogMediaRequest;
 import com.redculture.platform.vo.admin.CatalogEntityVO;
+import com.redculture.platform.vo.admin.CatalogRelationVO;
 import org.junit.jupiter.api.Test;
 import org.springframework.mock.web.MockMultipartFile;
 
@@ -50,5 +51,24 @@ class CatalogAdminControllerTest {
         assertEquals(200, response.getCode());
         assertEquals(7L, response.getData().getMediaId());
         verify(catalogService).uploadMedia(org.mockito.ArgumentMatchers.eq(EntityType.RESOURCE), org.mockito.ArgumentMatchers.eq(4L), org.mockito.ArgumentMatchers.any());
+    }
+
+    @Test
+    void returnsReadableCatalogRelationFields() {
+        CatalogAdminService catalogService = mock(CatalogAdminService.class);
+        CatalogProjectionService projectionService = mock(CatalogProjectionService.class);
+        CatalogRelationVO relation = new CatalogRelationVO();
+        relation.setSourceName("西柏坡纪念馆");
+        relation.setRelationLabel("纪念");
+        relation.setTargetName("革命英烈");
+        when(catalogService.relations(EntityType.MEMORIAL, 1L)).thenReturn(List.of(relation));
+
+        var response = new CatalogAdminController(catalogService, projectionService).relations(EntityType.MEMORIAL, 1L);
+
+        assertEquals(200, response.getCode());
+        assertEquals("西柏坡纪念馆", response.getData().getFirst().getSourceName());
+        assertEquals("纪念", response.getData().getFirst().getRelationLabel());
+        assertEquals("革命英烈", response.getData().getFirst().getTargetName());
+        verify(catalogService).relations(EntityType.MEMORIAL, 1L);
     }
 }

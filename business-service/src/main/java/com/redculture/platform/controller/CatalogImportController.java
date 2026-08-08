@@ -38,6 +38,8 @@ public class CatalogImportController {
                 var header = sheet.createRow(0);
                 String[] columns = "关系".equals(name)
                         ? new String[]{"源实体类型", "源实体编码", "关系类型", "目标实体类型", "目标实体编码", "备注"}
+                        : "资源".equals(name)
+                        ? new String[]{"编码", "资源名称", "资源类型", "行政区域", "地址", "经度", "纬度", "简介", "教育价值", "数据来源", "适合学段", "别名", "资源子类", "所属机构", "联系电话", "开放时间", "需要预约", "建议时长", "活动建议", "安全提示", "图片URL", "来源可信度"}
                         : new String[]{"编码", "名称", "别名", "区域ID", "地址", "经度", "纬度", "简介", "详情", "图片URL", "来源URL", "可信度"};
                 for (int index = 0; index < columns.length; index++) { header.createCell(index).setCellValue(columns[index]); sheet.setColumnWidth(index, 18 * 256); }
                 sheet.createFreezePane(0, 1);

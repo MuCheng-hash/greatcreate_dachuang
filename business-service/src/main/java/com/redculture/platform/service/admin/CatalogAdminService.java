@@ -169,13 +169,90 @@ public class CatalogAdminService {
 
     @Transactional
     public CatalogRelationVO createRelation(CatalogRelationRequest request) {
-        if (request == null || request.getSourceType() == null || request.getTargetType() == null
-                || request.getSourceId() == null || request.getTargetId() == null || !StringUtils.hasText(request.getRelationType())) {
-            throw new IllegalArgumentException("relation source, target and type are required");
-        }
+        validateRelationRequest(request);
         requirePublished(request.getSourceType(), request.getSourceId());
         requirePublished(request.getTargetType(), request.getTargetId());
-        String relation = request.getRelationType().trim().toUpperCase(Locale.ROOT);
+        return insertRelation(request);
+    }
+
+    @Transactional
+    public CatalogRelationVO createImportedRelation(CatalogRelationRequest request) {
+        validateRelationRequest(request);
+        require(request.getSourceType(), request.getSourceId());
+        require(request.getTargetType(), request.getTargetId());
+        return insertRelation(request);
+    }
+
+    public CatalogEntityVO findByCode(EntityType type, String code) {
+        if (type == null || !StringUtils.hasText(code)) return null;
+        String normalized = code.trim();
+        Object entity = switch (type) {
+            case RESOURCE -> resourceMapper.selectOne(new LambdaQueryWrapper<LocalEduResource>().eq(LocalEduResource::getResourceCode, normalized).last("LIMIT 1"));
+            case SITE -> siteMapper.selectOne(new LambdaQueryWrapper<RedSite>().eq(RedSite::getSiteCode, normalized).last("LIMIT 1"));
+            case MEMORIAL -> memorialMapper.selectOne(new LambdaQueryWrapper<MemorialHall>().eq(MemorialHall::getMemorialCode, normalized).last("LIMIT 1"));
+            case HERO -> heroMapper.selectOne(new LambdaQueryWrapper<HeroPerson>().eq(HeroPerson::getHeroCode, normalized).last("LIMIT 1"));
+            case EVENT -> eventMapper.selectOne(new LambdaQueryWrapper<HistoricalEvent>().eq(HistoricalEvent::getEventCode, normalized).last("LIMIT 1"));
+            case STORY -> storyMapper.selectOne(new LambdaQueryWrapper<RedStory>().eq(RedStory::getStoryCode, normalized).last("LIMIT 1"));
+            default -> null;
+        };
+        return toVO(type, entity);
+    }
+
+    public boolean isPublished(EntityType type, Long id) {
+        Object entity = find(type, id);
+        return entity != null && reviewStatus(entity) == ReviewStatus.APPROVED && Boolean.TRUE.equals(active(entity));
+    }
+
+    public void validateRelationType(EntityType sourceType, EntityType targetType, String relationType) {
+        if (sourceType == null || targetType == null || !StringUtils.hasText(relationType)) {
+            throw new IllegalArgumentException("relation source, target and type are required");
+        }
+        String normalized = normalizeRelation(relationType);
+        try {
+            if (sourceType == EntityType.SITE && targetType == EntityType.EVENT) SiteEventRelationType.valueOf(normalized);
+            else if (sourceType == EntityType.SITE && targetType == EntityType.HERO) SiteHeroRelationType.valueOf(normalized);
+            else if (sourceType == EntityType.EVENT && targetType == EntityType.HERO) EventHeroRelationType.valueOf(normalized);
+            else if (sourceType == EntityType.MEMORIAL && targetType == EntityType.SITE) MemorialRelationType.valueOf(normalized);
+            else if (sourceType == EntityType.MEMORIAL && targetType == EntityType.HERO) MemorialRelationType.valueOf(normalized);
+            else if (sourceType == EntityType.MEMORIAL && targetType == EntityType.EVENT) MemorialRelationType.valueOf(normalized);
+            else if (sourceType == EntityType.STORY && List.of(EntityType.RESOURCE, EntityType.SITE, EntityType.MEMORIAL, EntityType.HERO, EntityType.EVENT).contains(targetType)) StoryEntityRelationType.valueOf(normalized);
+            else throw new IllegalArgumentException("unsupported relation direction or type");
+        } catch (IllegalArgumentException exception) {
+            throw new IllegalArgumentException("unsupported relation direction or type: " + relationType, exception);
+        }
+    }
+
+    public boolean relationExists(CatalogRelationRequest request) {
+        validateRelationRequest(request);
+        validateRelationType(request.getSourceType(), request.getTargetType(), request.getRelationType());
+        String relation = normalizeRelation(request.getRelationType());
+        if (request.getSourceType() == EntityType.SITE && request.getTargetType() == EntityType.EVENT) {
+            return siteEventRelMapper.selectCount(new LambdaQueryWrapper<SiteEventRel>().eq(SiteEventRel::getSiteId, request.getSourceId()).eq(SiteEventRel::getEventId, request.getTargetId()).eq(SiteEventRel::getRelationType, SiteEventRelationType.valueOf(relation))) > 0;
+        }
+        if (request.getSourceType() == EntityType.SITE && request.getTargetType() == EntityType.HERO) {
+            return siteHeroRelMapper.selectCount(new LambdaQueryWrapper<SiteHeroRel>().eq(SiteHeroRel::getSiteId, request.getSourceId()).eq(SiteHeroRel::getHeroId, request.getTargetId()).eq(SiteHeroRel::getRelationType, SiteHeroRelationType.valueOf(relation))) > 0;
+        }
+        if (request.getSourceType() == EntityType.EVENT && request.getTargetType() == EntityType.HERO) {
+            return eventHeroRelMapper.selectCount(new LambdaQueryWrapper<EventHeroRel>().eq(EventHeroRel::getEventId, request.getSourceId()).eq(EventHeroRel::getHeroId, request.getTargetId()).eq(EventHeroRel::getRelationType, EventHeroRelationType.valueOf(relation))) > 0;
+        }
+        if (request.getSourceType() == EntityType.MEMORIAL && request.getTargetType() == EntityType.SITE) {
+            return memorialSiteRelMapper.selectCount(new LambdaQueryWrapper<MemorialSiteRel>().eq(MemorialSiteRel::getMemorialId, request.getSourceId()).eq(MemorialSiteRel::getSiteId, request.getTargetId()).eq(MemorialSiteRel::getRelationType, MemorialRelationType.valueOf(relation))) > 0;
+        }
+        if (request.getSourceType() == EntityType.MEMORIAL && request.getTargetType() == EntityType.HERO) {
+            return memorialHeroRelMapper.selectCount(new LambdaQueryWrapper<MemorialHeroRel>().eq(MemorialHeroRel::getMemorialId, request.getSourceId()).eq(MemorialHeroRel::getHeroId, request.getTargetId()).eq(MemorialHeroRel::getRelationType, MemorialRelationType.valueOf(relation))) > 0;
+        }
+        if (request.getSourceType() == EntityType.MEMORIAL && request.getTargetType() == EntityType.EVENT) {
+            return memorialEventRelMapper.selectCount(new LambdaQueryWrapper<MemorialEventRel>().eq(MemorialEventRel::getMemorialId, request.getSourceId()).eq(MemorialEventRel::getEventId, request.getTargetId()).eq(MemorialEventRel::getRelationType, MemorialRelationType.valueOf(relation))) > 0;
+        }
+        if (request.getSourceType() == EntityType.STORY && List.of(EntityType.RESOURCE, EntityType.SITE, EntityType.MEMORIAL, EntityType.HERO, EntityType.EVENT).contains(request.getTargetType())) {
+            return storyEntityRelMapper.selectCount(new LambdaQueryWrapper<StoryEntityRel>().eq(StoryEntityRel::getStoryId, request.getSourceId()).eq(StoryEntityRel::getEntityType, request.getTargetType()).eq(StoryEntityRel::getEntityId, request.getTargetId()).eq(StoryEntityRel::getRelationType, StoryEntityRelationType.valueOf(relation))) > 0;
+        }
+        return false;
+    }
+
+    private CatalogRelationVO insertRelation(CatalogRelationRequest request) {
+        String relation = normalizeRelation(request.getRelationType());
+        request.setRelationType(relation);
         CatalogRelationVO result = relationVO(request);
         if (request.getSourceType() == EntityType.SITE && request.getTargetType() == EntityType.EVENT) {
             SiteEventRel item = new SiteEventRel(); item.setSiteId(request.getSourceId()); item.setEventId(request.getTargetId());
@@ -349,10 +426,15 @@ public class CatalogAdminService {
     private void replaceSources(EntityType type, Long id, List<CatalogSourceRequest> sources) { sourceRelMapper.delete(new LambdaQueryWrapper<EntitySourceRel>().eq(EntitySourceRel::getEntityType,type).eq(EntitySourceRel::getEntityId,id)); for(CatalogSourceRequest value:sources){ if(value.getSourceId()==null && !StringUtils.hasText(value.getSourceUrl())) continue; EntitySourceRel item=new EntitySourceRel();item.setEntityType(type);item.setEntityId(id);item.setSourceId(value.getSourceId());item.setSourceUrl(clean(value.getSourceUrl()));item.setSourceExcerpt(clean(value.getSourceExcerpt()));item.setCredibilityScore(value.getCredibilityScore());item.setCapturedAt(LocalDateTime.now());sourceRelMapper.insert(item); } }
     private CatalogMediaRequest toMedia(ResourceMedia value){CatalogMediaRequest item=new CatalogMediaRequest();item.setMediaId(value.getMediaId());item.setMediaUrl(value.getMediaUrl());item.setCoverUrl(value.getCoverUrl());item.setMediaTitle(value.getMediaTitle());item.setMediaType(enumValue(value.getMediaType()));item.setDescription(value.getDescription());item.setCopyrightNote(value.getCopyrightNote());item.setPrimary(value.getPrimary());return item;}
     private CatalogSourceRequest toSource(EntitySourceRel value){CatalogSourceRequest item=new CatalogSourceRequest();item.setSourceId(value.getSourceId());item.setSourceUrl(value.getSourceUrl());item.setSourceExcerpt(value.getSourceExcerpt());item.setCredibilityScore(value.getCredibilityScore());return item;}
-    private void addOptions(List<CatalogRelationOptionVO> options, EntityType source, EntityType target, Enum<?>[] relationTypes) { for (Enum<?> relationType : relationTypes) options.add(new CatalogRelationOptionVO(source.getValue(), target.getValue(), relationType.name(), relationType.name().replace('_', ' '))); }
-    private CatalogRelationVO relationVO(CatalogRelationRequest request){CatalogRelationVO vo=new CatalogRelationVO();vo.setSourceType(request.getSourceType().getValue());vo.setSourceId(request.getSourceId());vo.setTargetType(request.getTargetType().getValue());vo.setTargetId(request.getTargetId());vo.setRelationType(request.getRelationType());vo.setRemark(request.getRemark());return vo;}
-    private CatalogRelationVO relationVO(EntityType sourceType,Long sourceId,EntityType targetType,Long targetId,String relationType,String remark,String kind,Long relationId){CatalogRelationVO vo=new CatalogRelationVO();vo.setSourceType(sourceType.getValue());vo.setSourceId(sourceId);vo.setTargetType(targetType.getValue());vo.setTargetId(targetId);vo.setRelationType(relationType);vo.setRemark(remark);vo.setRelationKind(kind);vo.setRelationId(relationId);return vo;}
+    private void addOptions(List<CatalogRelationOptionVO> options, EntityType source, EntityType target, Enum<?>[] relationTypes) { for (Enum<?> relationType : relationTypes) options.add(new CatalogRelationOptionVO(source.getValue(), target.getValue(), relationType.name(), relationDisplayLabel(relationType.name()))); }
+    private CatalogRelationVO relationVO(CatalogRelationRequest request){return relationVO(request.getSourceType(),request.getSourceId(),request.getTargetType(),request.getTargetId(),request.getRelationType(),request.getRemark(),null,null);}
+    private CatalogRelationVO relationVO(EntityType sourceType,Long sourceId,EntityType targetType,Long targetId,String relationType,String remark,String kind,Long relationId){CatalogRelationVO vo=new CatalogRelationVO();vo.setSourceType(sourceType.getValue());vo.setSourceId(sourceId);vo.setSourceName(entityName(sourceType,sourceId));vo.setTargetType(targetType.getValue());vo.setTargetId(targetId);vo.setTargetName(entityName(targetType,targetId));vo.setRelationType(relationType);vo.setRelationLabel(relationLabel(sourceType,targetType,relationType));vo.setRemark(remark);vo.setRelationKind(kind);vo.setRelationId(relationId);return vo;}
+    private String entityName(EntityType type, Long id){CatalogEntityVO entity=toVO(type,find(type,id));return entity==null?null:entity.getName();}
+    private String relationLabel(EntityType sourceType, EntityType targetType, String relationType){String normalized=normalizeRelation(relationType);return relationOptions().stream().filter(option->sourceType.getValue().equals(option.getSourceType())&&targetType.getValue().equals(option.getTargetType())&&normalized.equals(option.getRelationType())).map(CatalogRelationOptionVO::getLabel).findFirst().orElse(normalized);}
+    private String relationDisplayLabel(String relationType){return switch(normalizeRelation(relationType)){case "OCCURRED_AT"->"发生于";case "MEMORIALIZED_AT"->"被纪念于";case "PARTICIPANT"->"参与";case "LEADER"->"领导";case "WITNESS"->"见证";case "MARTYR"->"烈士";case "COMMEMORATES"->"纪念";case "EXHIBITS"->"展出";case "LOCATED_AT"->"位于";case "DISPLAYS"->"展示";case "BORN_IN"->"出生于";case "FOUGHT_IN"->"战斗于";case "MEMORIALIZED"->"被纪念";case "VISITED"->"到访";case "ABOUT"->"讲述";case "MENTIONS"->"提及";case "TEACHES"->"教育启示";case "RELATED_TO"->"相关";default->normalizeRelation(relationType);};}
     private MediaType parseMedia(String value){if(!StringUtils.hasText(value))return MediaType.IMAGE;try{return MediaType.valueOf(value.trim().toUpperCase(Locale.ROOT));}catch(IllegalArgumentException ex){throw new IllegalArgumentException("unsupported mediaType");}}
+    private void validateRelationRequest(CatalogRelationRequest request){if(request==null||request.getSourceType()==null||request.getTargetType()==null||request.getSourceId()==null||request.getTargetId()==null||!StringUtils.hasText(request.getRelationType()))throw new IllegalArgumentException("relation source, target and type are required");validateRelationType(request.getSourceType(),request.getTargetType(),request.getRelationType());}
+    private String normalizeRelation(String value){return value==null?"":value.trim().toUpperCase(Locale.ROOT).replace('-', '_').replace(' ', '_');}
     private void validateRequest(CatalogEntityRequest request){if(request==null||request.getEntityType()==null||!StringUtils.hasText(request.getCode())||!StringUtils.hasText(request.getName()))throw new IllegalArgumentException("entityType, code and name are required");if(request.getEntityType()==EntityType.SCHOOL||request.getEntityType()==EntityType.ACTIVITY_PLAN)throw new IllegalArgumentException("unsupported catalog entity type");}
     private EntityType entityType(String value){for(EntityType type:EntityType.values())if(type.getValue().equals(value))return type;throw new IllegalArgumentException("unsupported catalog entity type");}
     private boolean contains(CatalogEntityVO item,String keyword){String lower=keyword.toLowerCase(Locale.ROOT);return containsText(item.getCode(),lower)||containsText(item.getName(),lower)||containsText(item.getAlias(),lower)||containsText(item.getSummary(),lower)||containsText(item.getAddress(),lower);}

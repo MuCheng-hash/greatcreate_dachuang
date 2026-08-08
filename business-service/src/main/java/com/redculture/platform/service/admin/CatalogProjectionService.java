@@ -14,6 +14,7 @@ import com.redculture.platform.vo.admin.CatalogRelationVO;
 import org.springframework.data.neo4j.core.Neo4jClient;
 import org.springframework.stereotype.Service;
 
+import java.math.BigDecimal;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
@@ -50,8 +51,8 @@ public class CatalogProjectionService {
                 properties.put("alias", text(entity.getAlias()));
                 properties.put("summary", text(entity.getSummary()));
                 properties.put("address", text(entity.getAddress()));
-                properties.put("longitude", entity.getLongitude());
-                properties.put("latitude", entity.getLatitude());
+                properties.put("longitude", neo4jNumber(entity.getLongitude()));
+                properties.put("latitude", neo4jNumber(entity.getLatitude()));
                 neo4jClient.query("MERGE (node:" + label + " {id:$id}) SET node.code=$code, node.name=$name, "
                                 + "node.alias=$alias, node.summary=$summary, node.address=$address, node.longitude=$longitude, "
                                 + "node.latitude=$latitude, node.active=true, node.published=true")
@@ -68,10 +69,16 @@ public class CatalogProjectionService {
 
     public CatalogProjectionTask projectRelation(CatalogRelationVO relation) {
         if (relation == null || relation.getRelationId() == null) return null;
+        EntityType sourceType = entityType(relation.getSourceType());
+        EntityType targetType = entityType(relation.getTargetType());
+        if (!catalogService.isPublished(sourceType, relation.getSourceId())
+                || !catalogService.isPublished(targetType, relation.getTargetId())) {
+            return null;
+        }
         CatalogProjectionTask task = newTask(relation.getRelationKind(), relation.getRelationId(), "RELATION");
         try {
-            String sourceLabel = label(entityType(relation.getSourceType()));
-            String targetLabel = label(entityType(relation.getTargetType()));
+            String sourceLabel = label(sourceType);
+            String targetLabel = label(targetType);
             String relationship = relationship(relation.getRelationType());
             neo4jClient.query("MATCH (source:" + sourceLabel + " {id:$sourceId, published:true}), "
                             + "(target:" + targetLabel + " {id:$targetId, published:true}) "
@@ -141,5 +148,6 @@ public class CatalogProjectionService {
             default -> normalized;
         };
     }
+    static Double neo4jNumber(BigDecimal value) { return value == null ? null : value.doubleValue(); }
     private String text(String value) { return value == null ? "" : value; }
 }

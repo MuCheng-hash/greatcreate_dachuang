@@ -25,6 +25,12 @@ class CatalogImportControllerTest {
             assertEquals(List.of("资源", "遗址", "纪念馆", "人物", "事件", "故事", "关系"),
                     IntStream.range(0, workbook.getNumberOfSheets()).mapToObj(workbook::getSheetName).toList());
             assertEquals("编码", workbook.getSheet("资源").getRow(0).getCell(0).getStringCellValue());
+            assertEquals("资源名称", workbook.getSheet("资源").getRow(0).getCell(1).getStringCellValue());
+            assertEquals("资源类型", workbook.getSheet("资源").getRow(0).getCell(2).getStringCellValue());
+            assertEquals("行政区域", workbook.getSheet("资源").getRow(0).getCell(3).getStringCellValue());
+            assertEquals("教育价值", workbook.getSheet("资源").getRow(0).getCell(8).getStringCellValue());
+            assertEquals("数据来源", workbook.getSheet("资源").getRow(0).getCell(9).getStringCellValue());
+            assertEquals("适合学段", workbook.getSheet("资源").getRow(0).getCell(10).getStringCellValue());
             assertEquals("源实体类型", workbook.getSheet("关系").getRow(0).getCell(0).getStringCellValue());
         }
     }
