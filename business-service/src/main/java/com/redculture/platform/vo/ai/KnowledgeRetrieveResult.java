@@ -70,6 +70,10 @@ public class KnowledgeRetrieveResult {
                     methods.add("dense");
                 } else if (method.startsWith("lexical")) {
                     methods.add("lexical");
+                } else if (method.startsWith("hyde")) {
+                    methods.add("hyde");
+                } else if (method.startsWith("cross-encoder")) {
+                    methods.add("cross-encoder-rerank");
                 } else {
                     methods.add(method);
                 }

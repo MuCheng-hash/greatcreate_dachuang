@@ -108,12 +108,14 @@ public class AgentToolServiceImpl implements AgentToolService {
                                              AgentIntent intent) {
         KnowledgeRetrieveRequest retrieveRequest = new KnowledgeRetrieveRequest();
         retrieveRequest.setQuery(query);
-        retrieveRequest.setIntent(intent == null ? null : intent.name());
+        retrieveRequest.setIntent(intent == null ? request.getIntent() : intent.name());
         retrieveRequest.setScopeType(scopeType(request));
         retrieveRequest.setScopeId(request.getScope().getScopeId());
         retrieveRequest.setGrade(request.getGrade());
         retrieveRequest.setTheme(request.getTheme());
         retrieveRequest.setTopK(normalizeTopK(request.getTopK()));
+        retrieveRequest.setHydeQuery(request.getHydeQuery());
+        retrieveRequest.setWebEvidence(request.getWebEvidence());
         try {
             return normalize(knowledgeRetriever.retrieve(retrieveRequest));
         } catch (RuntimeException exception) {

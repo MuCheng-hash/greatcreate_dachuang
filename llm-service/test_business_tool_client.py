@@ -83,6 +83,25 @@ def test_business_tool_client_sends_authenticated_knowledge_query() -> None:
     assert result["chunks"][0]["citationId"] == "chunk:1"
 
 
+def test_business_tool_client_reads_internal_web_source_domains() -> None:
+    received = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        received["url"] = str(request.url)
+        received["token"] = request.headers.get("X-Agent-Service-Token")
+        return httpx.Response(200, json={"code": 200, "data": {"domains": ["www.gov.cn"]}})
+
+    client = BusinessToolClient(
+        "http://business-service",
+        "secret",
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+    assert client.web_source_domains() == ["www.gov.cn"]
+    assert received["url"].endswith("/internal/agent/tools/web-source-domains")
+    assert received["token"] == "secret"
+
+
 def test_graph_tool_keeps_explicit_degraded_fallback_and_audit(tmp_path: Path) -> None:
     repository = ConversationRepository(tmp_path / "agent.sqlite3")
     thread = repository.create_thread("account:1", "SCHOOL", 1)

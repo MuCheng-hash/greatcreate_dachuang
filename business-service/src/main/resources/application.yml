@@ -79,6 +79,10 @@ app:
     rrf-k: ${RAG_RRF_K:60}
     dense-rrf-weight: ${RAG_DENSE_RRF_WEIGHT:1.0}
     lexical-rrf-weight: ${RAG_LEXICAL_RRF_WEIGHT:1.0}
+    hyde-rrf-weight: ${RAG_HYDE_RRF_WEIGHT:0.8}
+    web-rrf-weight: ${RAG_WEB_RRF_WEIGHT:0.7}
+    augmentation-minimum-candidates: ${RAG_AUGMENTATION_MINIMUM_CANDIDATES:3}
+    augmentation-minimum-rrf-score: ${RAG_AUGMENTATION_MINIMUM_RRF_SCORE:0.020}
     base-retrieval-weight: ${RAG_BASE_RETRIEVAL_WEIGHT:0.60}
     entity-match-weight: ${RAG_ENTITY_MATCH_WEIGHT:0.15}
     grade-match-weight: ${RAG_GRADE_MATCH_WEIGHT:0.10}
@@ -94,6 +98,11 @@ app:
     minimum-vector-score: ${RAG_MINIMUM_VECTOR_SCORE:0.2}
     connect-timeout-ms: ${RAG_CONNECT_TIMEOUT_MS:3000}
     read-timeout-ms: ${RAG_READ_TIMEOUT_MS:15000}
+    reranker-enabled: ${RAG_RERANKER_ENABLED:false}
+    reranker-base-url: ${RAG_RERANKER_BASE_URL:https://dashscope.aliyuncs.com/compatible-mode/v1}
+    reranker-api-key: ${RAG_RERANKER_API_KEY:}
+    reranker-model: ${RAG_RERANKER_MODEL:qwen3-rerank}
+    reranker-timeout-ms: ${RAG_RERANKER_TIMEOUT_MS:6000}
   knowledge-storage:
     endpoint: ${MINIO_ENDPOINT:http://127.0.0.1:9000}
     access-key: ${MINIO_ACCESS_KEY:minioadmin}

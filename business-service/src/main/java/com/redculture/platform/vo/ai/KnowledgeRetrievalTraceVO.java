@@ -26,6 +26,20 @@ public class KnowledgeRetrievalTraceVO {
 
     private Integer rerankedCandidateCount;
 
+    private Integer hydeCandidateCount;
+
+    private Integer webCandidateCount;
+
+    private List<String> webDomains = new ArrayList<>();
+
+    private Boolean augmentationRequired;
+
+    private String augmentationReason;
+
+    private String crossEncoderStatus;
+
+    private String queryRewriteStatus;
+
     private List<String> retrievalMethods = new ArrayList<>();
 
     private List<KnowledgeRetrievalCandidateTraceVO> topCandidates = new ArrayList<>();

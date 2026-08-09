@@ -4,9 +4,13 @@ import asyncio
 import json
 import logging
 import re
+import time
 import uuid
 from collections.abc import AsyncIterator, Callable
 from typing import Any
+from urllib.parse import urlparse
+
+import httpx
 
 from fastapi.encoders import jsonable_encoder
 from langchain.agents import create_agent
@@ -57,6 +61,7 @@ from .tools import (
     query_graph_relations,
     reset_tool_runtime,
     retrieve_knowledge,
+    _merge_retrieval,
 )
 
 
@@ -103,6 +108,7 @@ class AgentRuntime:
         # requests build an agent from each configured model in model_chain().
         self._agent: Any | None = None
         self._agents: dict[tuple[str, int], Any] = {}
+        self._web_domain_cache: tuple[float, list[str]] = (0.0, [])
 
     async def handle(self, request: AgentMessageRequest) -> AgentMessageResponse:
         thread, window, plan, memory_context = self._prepare_turn(request)
@@ -626,12 +632,157 @@ class AgentRuntime:
         token = bind_tool_runtime(runtime)
         try:
             if "retrieve_knowledge" in plan.recommended_tools:
-                retrieve_knowledge.invoke({"query": request.message, "limit": 5})
+                result = await self._retrieve_with_augmentation(request, thread)
+                _merge_retrieval(runtime, result)
+                runtime.run("retrieve_knowledge", {"query": request.message, "limit": 5}, lambda: result)
             if "query_graph_relations" in plan.recommended_tools:
                 query_graph_relations.invoke({"query": request.message, "limit": 5})
         finally:
             reset_tool_runtime(token)
         return list(runtime.executions), list(runtime.degraded_reasons)
+
+    async def _retrieve_with_augmentation(
+        self, request: AgentMessageRequest, thread: ThreadRecord
+    ) -> dict[str, Any]:
+        if self.business_tool_client is None:
+            return {"retrievalStatus": "degraded", "degradedReason": "business_tool_unconfigured"}
+        rewrite = await self._controlled_query_rewrite(request, thread)
+        payload = self._retrieval_payload(request, rewrite)
+        try:
+            first = await asyncio.to_thread(self.business_tool_client.query_knowledge, payload)
+        except Exception as exc:
+            return {"retrievalStatus": "degraded", "degradedReason": type(exc).__name__.lower()}
+        trace = first.setdefault("retrievalTrace", {}) if isinstance(first, dict) else {}
+        trace["queryRewriteStatus"] = rewrite["status"]
+        if not isinstance(first, dict) or not trace.get("augmentationRequired"):
+            return first
+        domains = await self._authoritative_domains()
+        hyde_task = self._generate_hyde(rewrite["searchQuery"])
+        web_task = self._search_authoritative_web(rewrite["searchQuery"], domains)
+        hyde, web = await asyncio.gather(hyde_task, web_task)
+        if not hyde and not web:
+            trace["augmentationReason"] = f"{trace.get('augmentationReason') or 'low_recall'}:no_augmentation_available"
+            return first
+        augmented = dict(payload)
+        augmented["hydeQuery"] = hyde or None
+        augmented["webEvidence"] = web
+        try:
+            final = await asyncio.to_thread(self.business_tool_client.query_knowledge, augmented)
+        except Exception:
+            trace["augmentationReason"] = f"{trace.get('augmentationReason') or 'low_recall'}:augmentation_failed"
+            return first
+        final_trace = final.setdefault("retrievalTrace", {}) if isinstance(final, dict) else {}
+        final_trace["queryRewriteStatus"] = rewrite["status"]
+        final_trace["hydeStatus"] = "ok" if hyde else "skipped"
+        final_trace["webStatus"] = "ok" if web else "skipped"
+        return final
+
+    def _retrieval_payload(self, request: AgentMessageRequest, rewrite: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "actor": request.context.actor,
+            "scope": request.context.scope,
+            "query": rewrite["searchQuery"],
+            "intent": rewrite.get("intent") or request.intent,
+            "grade": rewrite.get("grade") or request.grade,
+            "theme": rewrite.get("theme") or request.theme,
+            "topK": 5,
+        }
+
+    async def _controlled_query_rewrite(self, request: AgentMessageRequest, thread: ThreadRecord) -> dict[str, Any]:
+        original = request.message.strip()
+        trigger = bool(re.search(r"(?:这个|那个|这所|那所|这里|那里|它|该)(?:学校|资源|地方|场馆|遗址)?", original))
+        if not trigger:
+            return {"status": "skipped", "searchQuery": original}
+        context = {
+            "school": request.context.school,
+            "region": request.context.region,
+            "resource": request.context.resource,
+            "summary": thread.summary[-1200:],
+            "grade": request.grade,
+            "theme": request.theme,
+        }
+        prompt = (
+            "你是检索条件改写器。只补全指代，不得生成任何新事实。"
+            "输出 JSON：searchQuery、intent、grade、theme、confidence。"
+            "如果上下文不足，searchQuery 必须保持原问题，confidence 低于 0.70。\n"
+            f"原问题：{original}\n可信上下文：{json.dumps(context, ensure_ascii=False)}"
+        )
+        def valid(payload: dict[str, Any]) -> bool:
+            return isinstance(payload.get("searchQuery"), str) and isinstance(payload.get("confidence"), (int, float))
+        result = await self.model.generate_json(prompt, validator=valid, model_id=request.model_id)
+        if not result:
+            return {"status": "failed", "searchQuery": original}
+        query = str(result.get("searchQuery") or "").strip()
+        confidence = float(result.get("confidence") or 0.0)
+        if not query or len(query) > 600 or confidence < self.settings.retrieval_rewrite_confidence:
+            return {"status": "fallback", "searchQuery": original}
+        return {
+            "status": "applied", "searchQuery": query,
+            "intent": str(result.get("intent") or "").strip() or None,
+            "grade": str(result.get("grade") or "").strip() or None,
+            "theme": str(result.get("theme") or "").strip() or None,
+        }
+
+    async def _generate_hyde(self, query: str) -> str | None:
+        prompt = (
+            "生成用于向量检索的假设性资料摘要，不是最终答案，不得捏造具体人名、日期或来源。"
+            "只输出 JSON：{\"hypothesis\":\"...\"}，限 420 个中文字符。\n问题：" + query
+        )
+        result = await self.model.generate_json(
+            prompt, validator=lambda value: isinstance(value.get("hypothesis"), str)
+        )
+        hypothesis = str((result or {}).get("hypothesis") or "").strip()
+        return hypothesis[: self.settings.retrieval_hyde_max_characters] or None
+
+    async def _authoritative_domains(self) -> list[str]:
+        now = time.monotonic()
+        cached_at, cached = self._web_domain_cache
+        if cached and now - cached_at < self.settings.retrieval_web_cache_seconds:
+            return cached
+        if self.business_tool_client is None:
+            return []
+        try:
+            domains = await asyncio.to_thread(self.business_tool_client.web_source_domains)
+        except Exception:
+            return []
+        self._web_domain_cache = (now, domains)
+        return domains
+
+    async def _search_authoritative_web(self, query: str, domains: list[str]) -> list[dict[str, Any]]:
+        if not self.settings.tavily_api_key or not domains:
+            return []
+        body = {"api_key": self.settings.tavily_api_key, "query": query, "search_depth": "basic",
+                "max_results": 5, "include_domains": domains, "include_raw_content": False,
+                "include_answer": False}
+        try:
+            async with httpx.AsyncClient(timeout=self.settings.tavily_timeout_seconds) as client:
+                response = await client.post(self.settings.tavily_base_url, json=body)
+                response.raise_for_status()
+                values = response.json().get("results") or []
+        except (httpx.HTTPError, ValueError):
+            return []
+        result: list[dict[str, Any]] = []
+        for index, item in enumerate(values):
+            url = str(item.get("url") or "").strip()
+            host = (urlparse(url).hostname or "").lower()
+            if not url.startswith("https://") or not self._allowed_web_host(host, domains):
+                continue
+            excerpt = str(item.get("content") or "").replace("\x00", " ").strip()
+            if not excerpt or re.search(
+                r"ignore (?:all|previous)|system prompt|ignore .*instructions|disregard|"
+                r"忽略.*(?:指令|之前|系统)|系统提示",
+                excerpt,
+                re.I,
+            ):
+                continue
+            result.append({"title": str(item.get("title") or host)[:240], "url": url,
+                           "domain": host, "excerpt": excerpt[:900], "rank": index + 1,
+                           "providerScore": item.get("score")})
+        return result
+
+    @staticmethod
+    def _allowed_web_host(host: str, domains: list[str]) -> bool:
+        return any(host == domain or host.endswith("." + domain) for domain in domains)
 
     async def _run_structured_task(
         self,
@@ -1562,6 +1713,8 @@ class AgentRuntime:
         summary_keys = (
             "retrievalStatus", "intent", "needGraph", "graphStatus",
             "denseCandidateCount", "lexicalCandidateCount", "rrfCandidateCount",
+            "hydeCandidateCount", "webCandidateCount", "augmentationRequired", "augmentationReason",
+            "crossEncoderStatus", "queryRewriteStatus", "hydeStatus", "webStatus",
             "graphCandidateCount", "rerankedCandidateCount", "retrievalMethods",
         )
         summary = {key: trace.get(key) for key in summary_keys if key in trace}

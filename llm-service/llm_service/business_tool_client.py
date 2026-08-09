@@ -18,6 +18,7 @@ class BusinessToolClient:
 
     KNOWLEDGE_RETRIEVE_PATH = "/internal/agent/tools/knowledge-retrieve"
     RELATION_QUERY_PATH = "/internal/agent/tools/relation-query"
+    WEB_SOURCE_DOMAINS_PATH = "/internal/agent/tools/web-source-domains"
 
     def __init__(
         self,
@@ -40,6 +41,24 @@ class BusinessToolClient:
 
     def query_graph_relations(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         return self._post_retrieval(self.RELATION_QUERY_PATH, payload)
+
+    def web_source_domains(self) -> list[str]:
+        if not self.configured:
+            raise BusinessToolError("business_tool_unconfigured")
+        try:
+            response = self._client.get(
+                f"{self.base_url}{self.WEB_SOURCE_DOMAINS_PATH}",
+                headers={"X-Agent-Service-Token": self.service_token},
+            )
+            response.raise_for_status()
+            envelope = response.json()
+            data = envelope.get("data") if isinstance(envelope, dict) else None
+            domains = data.get("domains") if isinstance(data, dict) else None
+            return [str(item).strip().lower() for item in domains or [] if str(item).strip()]
+        except httpx.TimeoutException as exc:
+            raise BusinessToolError("business_tool_timeout") from exc
+        except (httpx.HTTPError, ValueError) as exc:
+            raise BusinessToolError("business_tool_transport_error") from exc
 
     def _post_retrieval(
         self, path: str, payload: Mapping[str, Any]

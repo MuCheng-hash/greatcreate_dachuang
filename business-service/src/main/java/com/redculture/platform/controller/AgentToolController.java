@@ -4,6 +4,7 @@ import com.redculture.platform.common.ApiResponse;
 import com.redculture.platform.config.AgentProperties;
 import com.redculture.platform.entity.LocalEduResource;
 import com.redculture.platform.service.AgentToolService;
+import com.redculture.platform.service.admin.RagWebSourceService;
 import com.redculture.platform.vo.ai.AgentToolRequest;
 import com.redculture.platform.vo.ai.KnowledgeRetrieveResult;
 import org.springframework.util.StringUtils;
@@ -27,10 +28,13 @@ public class AgentToolController {
 
     private final AgentProperties agentProperties;
     private final AgentToolService agentToolService;
+    private final RagWebSourceService ragWebSourceService;
 
-    public AgentToolController(AgentProperties agentProperties, AgentToolService agentToolService) {
+    public AgentToolController(AgentProperties agentProperties, AgentToolService agentToolService,
+                               RagWebSourceService ragWebSourceService) {
         this.agentProperties = agentProperties;
         this.agentToolService = agentToolService;
+        this.ragWebSourceService = ragWebSourceService;
     }
 
     //内部健康检查。FastAPI Agent 可在启动或就绪检查时确认 Java 业务服务是否可用。成功时返回服务状态 up。
@@ -41,6 +45,15 @@ public class AgentToolController {
             return ApiResponse.fail(403, "agent service token is invalid");
         }
         return ApiResponse.success(Map.of("status", "up", "service", "business-service"));
+    }
+
+    @GetMapping("/web-source-domains")
+    public ApiResponse<Map<String, Object>> webSourceDomains(
+            @RequestHeader(value = SERVICE_TOKEN_HEADER, required = false) String token) {
+        if (!authorized(token)) {
+            return ApiResponse.fail(403, "agent service token is invalid");
+        }
+        return ApiResponse.success(Map.of("domains", ragWebSourceService.enabledDomains()));
     }
 
     //获取当前问答所属学校的可信上下文，例如学校名称、位置、所属区域、可用资源等。用于让 AI 知道“这位用户所在的是哪所学校”。
