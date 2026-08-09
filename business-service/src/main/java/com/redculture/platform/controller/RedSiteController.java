@@ -15,6 +15,7 @@ import java.util.List;
 
 @RestController
 @RequestMapping("/api/sites")
+//红色遗址、旧址等地点信息查询。
 public class RedSiteController {
 
     private final RedSiteService redSiteService;
@@ -23,11 +24,13 @@ public class RedSiteController {
         this.redSiteService = redSiteService;
     }
 
+    //按照id查询
     @GetMapping("/{id}")
     public ApiResponse<RedSite> getById(@PathVariable Long id) {
         return ApiResponse.success(redSiteService.getById(id));
     }
 
+    //返回遗址列表
     @GetMapping
     public ApiResponse<List<RedSite>> list(@RequestParam(required = false) Long regionId,
                                            @RequestParam(required = false) String siteName,

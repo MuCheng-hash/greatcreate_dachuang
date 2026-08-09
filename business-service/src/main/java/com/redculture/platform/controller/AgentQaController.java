@@ -20,6 +20,7 @@ import java.util.Map;
 
 @RestController
 @RequestMapping("/api/ai/qa")
+//AI 助手问答：普通问答接口及 SSE 流式输出接口。
 public class AgentQaController {
 
     private final AgentQaService agentQaService;
@@ -28,6 +29,8 @@ public class AgentQaController {
         this.agentQaService = agentQaService;
     }
 
+    //对应普通问答接口
+    //前端传入 AgentQaRequest，例如用户问题、会话 ID、模型选择等；接口等待 AI 生成完成后，一次性返回完整的 AgentQaResponse。
     @PostMapping("/ask")
     public ApiResponse<AgentQaResponse> ask(@RequestBody AgentQaRequest request, HttpServletRequest servletRequest) {
         AuthCurrentUserVO currentUser = AuthContext.currentUser(servletRequest);
@@ -41,6 +44,8 @@ public class AgentQaController {
         }
     }
 
+    //对应流式问答接口：
+    //AI 每生成一小段文字，前端就立刻显示，而无需等整段答案生成完毕
     @PostMapping(value = "/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public SseEmitter stream(@RequestBody AgentQaRequest request,
                              HttpServletRequest servletRequest,
@@ -58,6 +63,13 @@ public class AgentQaController {
         }
     }
 
+    //关闭连接，通知前端本轮请求已结束。
+    /*
+    两类错误会被转成 SSE 事件：
+场景	errorType	含义
+用户未登录	AUTH_REQUIRED	没有可用的学校账号身份，不能发起 AI 问答。
+请求参数不合法	REQUEST_INVALID	请求内容不符合要求，例如问题为空。
+     */
     private SseEmitter errorEmitter(String errorType, String message) {
         SseEmitter emitter = new SseEmitter(1000L);
         try {

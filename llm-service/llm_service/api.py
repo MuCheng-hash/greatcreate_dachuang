@@ -6,6 +6,8 @@ import hmac
 import logging
 import secrets
 import sqlite3
+import base64
+import httpx
 from contextlib import asynccontextmanager, suppress
 from typing import Any, Literal
 
@@ -179,6 +181,43 @@ def create_app(
             raise HTTPException(status_code=503, detail="AGENT_INTERNAL_SERVICE_TOKEN is not configured")
         if not secrets.compare_digest(token or "", expected):
             raise HTTPException(status_code=401, detail="agent service token is invalid")
+
+    async def require_model_gateway_key(
+        token: str | None = Header(default=None, alias="X-Model-Gateway-Key"),
+    ) -> None:
+        expected = settings.internal_service_token.strip()
+        if not expected or not secrets.compare_digest(token or "", expected):
+            raise HTTPException(status_code=401, detail="model gateway key is invalid")
+
+    @app.post("/internal/vision/analyze", dependencies=[Depends(require_model_gateway_key)])
+    async def analyze_image(payload: dict[str, Any]) -> dict[str, Any]:
+        model_name = str(payload.get("model") or settings.vision_model).strip()
+        image = str(payload.get("imageBase64") or "")
+        if not model_name or not image:
+            raise HTTPException(status_code=422, detail="model and imageBase64 are required")
+        vision = next((item for target, item in model.chat_models if target.model == model_name), None)
+        if vision is None:
+            raise HTTPException(status_code=422, detail="vision model is not configured")
+        result = await vision.ainvoke([{"role": "user", "content": [
+            {"type": "text", "text": "请用中文客观描述图片中的场景、文字、人物、地点和结构信息，返回一段可用于知识库检索的描述。"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64," + image}},
+        ]}])
+        return {"description": message_text(result.content), "model": model_name}
+
+    @app.post("/internal/embeddings/hybrid", dependencies=[Depends(require_model_gateway_key)])
+    async def hybrid_embeddings(payload: dict[str, Any]) -> dict[str, Any]:
+        texts = payload.get("texts")
+        if not isinstance(texts, list) or not settings.embedding_api_url:
+            raise HTTPException(status_code=503, detail="embedding gateway is not configured")
+        async with httpx.AsyncClient(timeout=90) as client:
+            response = await client.post(settings.embedding_api_url.rstrip("/") + "/embeddings", headers={"Authorization": "Bearer " + settings.embedding_api_key}, json={"model": payload.get("model") or settings.embedding_model, "input": texts, "dimensions": settings.embedding_dimensions})
+        response.raise_for_status()
+        items = []
+        for item, text in zip(response.json().get("data", []), texts):
+            tokens = {}
+            for token in str(text).lower().split(): tokens[token] = tokens.get(token, 0) + 1
+            items.append({"dense": item["embedding"], "sparse": {"indices": list(range(len(tokens))), "values": list(tokens.values())}})
+        return {"items": items, "model": payload.get("model") or settings.embedding_model}
 
     async def require_prompt_admin(x_prompt_admin_token: str = Header(default="")) -> None:
         if not settings.prompt_admin_token:

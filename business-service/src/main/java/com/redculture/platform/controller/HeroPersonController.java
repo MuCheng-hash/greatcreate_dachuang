@@ -15,6 +15,7 @@ import java.util.List;
 
 @RestController
 @RequestMapping("/api/heroes")
+//红色人物资料查询与检索。
 public class HeroPersonController {
 
     private final HeroPersonService heroPersonService;
@@ -23,11 +24,13 @@ public class HeroPersonController {
         this.heroPersonService = heroPersonService;
     }
 
+    //按 ID 查询
     @GetMapping("/{id}")
     public ApiResponse<HeroPerson> getById(@PathVariable Long id) {
         return ApiResponse.success(heroPersonService.getById(id));
     }
 
+    //列表查询
     @GetMapping
     public ApiResponse<List<HeroPerson>> list(@RequestParam(required = false) String heroName,
                                               @RequestParam(required = false) Long nativePlaceRegionId,

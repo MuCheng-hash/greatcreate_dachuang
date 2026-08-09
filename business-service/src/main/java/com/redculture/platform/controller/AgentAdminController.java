@@ -20,6 +20,7 @@ import java.util.Map;
 
 @RestController
 @RequestMapping("/api/admin/agent")
+//AI Agent 运维后台：查看调用摘要、调用链路、工具执行记录、记忆指标和提示词版本/效果，并可切换提示词版本。
 public class AgentAdminController {
 
     private final AgentAdminClient agentAdminClient;
@@ -28,36 +29,43 @@ public class AgentAdminController {
         this.agentAdminClient = agentAdminClient;
     }
 
+    //获取 Agent 运行概览，例如调用总量、成功/失败数、耗时、模型调用等汇总指标。filters 会接收 URL 中所有查询参数，用于按时间、任务类型、模型等筛选。
     @GetMapping("/observability/summary")
     public ApiResponse<Map<String, Object>> summary(@RequestParam Map<String, String> filters) {
         return ApiResponse.success(agentAdminClient.observabilitySummary(filters));
     }
 
+    //获取一次次完整的 Agent 执行记录。例如用户提问后，模型是否调用、调用了哪些工具、最终是否成功、耗时多久。
     @GetMapping("/observability/traces")
     public ApiResponse<List<Map<String, Object>>> traces(@RequestParam Map<String, String> filters) {
         return ApiResponse.success(agentAdminClient.observabilityTraces(filters));
     }
 
+    //获取 Agent 的“工具调用”记录，重点观察它调用了哪些内部能力，例如知识检索、查询学校上下文、查询资源详情，以及调用结果和耗时。
     @GetMapping("/observability/tool-traces")
     public ApiResponse<List<Map<String, Object>>> toolTraces(@RequestParam Map<String, String> filters) {
         return ApiResponse.success(agentAdminClient.toolTraces(filters));
     }
 
+    //获取用户记忆功能的统计数据，例如记忆数量、冲突数量、待确认项等，用于后台监控记忆系统。
     @GetMapping("/memory-metrics")
     public ApiResponse<Map<String, Object>> memoryMetrics() {
         return ApiResponse.success(agentAdminClient.memoryMetrics());
     }
 
+    //查询某类提示词的所有版本。promptKey 可能是 teaching-plan 或 resource-discovery，用于查看历史版本、当前激活版本等。
     @GetMapping("/prompts/{promptKey}/versions")
     public ApiResponse<List<Map<String, Object>>> promptVersions(@PathVariable String promptKey) {
         return ApiResponse.success(agentAdminClient.promptVersions(promptKey));
     }
 
+    //查询指定提示词各版本的运行效果指标，例如使用次数、成功率、失败率、耗时等，帮助比较版本效果。
     @GetMapping("/prompts/{promptKey}/metrics")
     public ApiResponse<List<Map<String, Object>>> promptMetrics(@PathVariable String promptKey) {
         return ApiResponse.success(agentAdminClient.promptMetrics(promptKey));
     }
 
+    //激活某个提示词版本，使后续对应类型的 AI 请求使用该版本。例如激活 teaching-plan 的 v2。
     @PostMapping("/prompts/{promptKey}/versions/{version}/activate")
     public ApiResponse<Map<String, Object>> activatePrompt(@PathVariable String promptKey,
                                                             @PathVariable String version) {

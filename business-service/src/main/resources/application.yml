@@ -103,3 +103,9 @@ app:
     reranker-api-key: ${RAG_RERANKER_API_KEY:}
     reranker-model: ${RAG_RERANKER_MODEL:qwen3-rerank}
     reranker-timeout-ms: ${RAG_RERANKER_TIMEOUT_MS:6000}
+  knowledge-storage:
+    endpoint: ${MINIO_ENDPOINT:http://127.0.0.1:9000}
+    access-key: ${MINIO_ACCESS_KEY:minioadmin}
+    secret-key: ${MINIO_SECRET_KEY:minioadmin}
+    bucket: ${MINIO_KNOWLEDGE_BUCKET:knowledge}
+    max-file-size-bytes: ${KNOWLEDGE_MAX_FILE_SIZE_BYTES:52428800}

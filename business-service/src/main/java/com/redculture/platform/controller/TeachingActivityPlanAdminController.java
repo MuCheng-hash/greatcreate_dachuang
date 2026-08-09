@@ -18,6 +18,7 @@ import org.springframework.web.bind.annotation.RestController;
 
 @RestController
 @RequestMapping("/api/admin")
+//管理员维护教学活动方案：新增、修改、详情、分页查询、按学校查询。
 public class TeachingActivityPlanAdminController {
 
     private final TeachingActivityPlanService teachingActivityPlanService;
@@ -26,6 +27,7 @@ public class TeachingActivityPlanAdminController {
         this.teachingActivityPlanService = teachingActivityPlanService;
     }
 
+    //新增教学活动方案
     @PostMapping("/activity-plans")
     public ApiResponse<TeachingActivityPlanAdminVO> create(@RequestBody TeachingActivityPlanCreateRequest request) {
         try {
@@ -35,6 +37,7 @@ public class TeachingActivityPlanAdminController {
         }
     }
 
+    //修改教学活动方案
     @PutMapping("/activity-plans/{planId}")
     public ApiResponse<TeachingActivityPlanAdminVO> update(@PathVariable Long planId,
                                                            @RequestBody TeachingActivityPlanUpdateRequest request) {
@@ -45,6 +48,7 @@ public class TeachingActivityPlanAdminController {
         }
     }
 
+    //查看方案详情
     @GetMapping("/activity-plans/{planId}")
     public ApiResponse<TeachingActivityPlanAdminVO> detail(@PathVariable Long planId) {
         TeachingActivityPlanAdminVO data = teachingActivityPlanService.getPlanAdminDetail(planId);
@@ -54,6 +58,7 @@ public class TeachingActivityPlanAdminController {
         return ApiResponse.success(data);
     }
 
+    //分页查询教学方案
     @GetMapping("/activity-plans")
     public ApiResponse<PageResult<TeachingActivityPlanAdminVO>> page(@RequestParam(required = false) Long schoolId,
                                                                      @RequestParam(required = false) Long resourceId,
@@ -67,6 +72,7 @@ public class TeachingActivityPlanAdminController {
         ));
     }
 
+    //按学校查询方案
     @GetMapping("/schools/{schoolId}/activity-plans")
     public ApiResponse<PageResult<TeachingActivityPlanAdminVO>> listBySchool(@PathVariable Long schoolId,
                                                                               @RequestParam(required = false) Long pageNum,

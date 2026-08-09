@@ -15,6 +15,7 @@ import java.util.List;
 
 @RestController
 @RequestMapping("/api/events")
+//历史事件资料查询，可按地区等条件过滤。
 public class HistoricalEventController {
 
     private final HistoricalEventService historicalEventService;
@@ -23,11 +24,13 @@ public class HistoricalEventController {
         this.historicalEventService = historicalEventService;
     }
 
+    //根据事件 ID 查询某个历史事件的完整资料。
     @GetMapping("/{id}")
     public ApiResponse<HistoricalEvent> getById(@PathVariable Long id) {
         return ApiResponse.success(historicalEventService.getById(id));
     }
 
+    //根据地区、名称、审核状态、启用状态筛选历史事件列表。
     @GetMapping
     public ApiResponse<List<HistoricalEvent>> list(@RequestParam(required = false) Long primaryRegionId,
                                                    @RequestParam(required = false) String eventName,

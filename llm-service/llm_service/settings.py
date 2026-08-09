@@ -100,6 +100,11 @@ class Settings(BaseSettings):
     business_health_required: bool = True
     health_check_timeout_seconds: float = 2.0
     require_llm_model: bool = False
+    embedding_api_url: str = ""
+    embedding_api_key: str = ""
+    embedding_model: str = "text-embedding-v3"
+    embedding_dimensions: int = 1024
+    vision_model: str = ""
 
     agent_primary_provider: str = ""
     agent_primary_model: str = ""
