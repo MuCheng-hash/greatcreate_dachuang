@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -10,7 +9,6 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 import pytest
 
 from llm_service.api import create_app
-from llm_service.repository import ConversationRepository
 from llm_service.runtime import AgentRuntime
 from llm_service.schemas import AgentMessageRequest
 from llm_service.settings import Settings
@@ -18,9 +16,14 @@ from llm_service.user_memory import (
     MemoryContentPolicy,
     MemoryConflictError,
     MemoryNotFoundError,
-    MemoryRepository,
     MemoryStateError,
     MemoryValidationError,
+)
+from postgres_test_support import (
+    conversation_repository,
+    memory_repository,
+    run_async,
+    settings_for_database,
 )
 
 
@@ -40,17 +43,16 @@ class MutableClock:
         self.value += timedelta(**kwargs)
 
 
-def repository_for(tmp_path: Path, clock: MutableClock | None = None) -> MemoryRepository:
-    return MemoryRepository(
-        tmp_path / "agent.sqlite3",
+def repository_for(tmp_path: Path, clock: MutableClock | None = None):
+    return memory_repository(
+        settings_for_database(tmp_path),
         now_provider=clock.now if clock else None,
     )
 
 
 def api_settings(tmp_path: Path, *, memory_available: bool = True) -> Settings:
-    return Settings(
-        _env_file=None,
-        database_path=tmp_path / "api-agent.sqlite3",
+    return settings_for_database(
+        tmp_path,
         internal_service_token="memory-internal-token",
         observability_admin_token="memory-admin-token",
         internal_business_base_url="",
@@ -59,6 +61,17 @@ def api_settings(tmp_path: Path, *, memory_available: bool = True) -> Settings:
         llm_api_key="",
         agent_memory_enabled=memory_available,
     )
+
+
+def runtime_for(settings: Settings):
+    conversations = conversation_repository(settings)
+    memories = memory_repository(settings)
+    runtime = AgentRuntime(
+        settings,
+        conversations.async_target,
+        memory_repository=memories.async_target,
+    )
+    return runtime, memories
 
 
 def memory_client(settings: Settings, *, authenticated: bool = True) -> TestClient:
@@ -233,13 +246,15 @@ def test_core_profile_conflict_requires_explicit_replacement_and_normalizes_alia
         content="28岁女教师",
         source="profile_ui",
     )
-    # 模拟升级前已经写入 SQLite 的历史别名，读取和比对时仍须等价于 answer_format。
-    with sqlite3.connect(tmp_path / "agent.sqlite3") as connection:
-        connection.execute(
-            "UPDATE agent_memory SET field_key = 'response_format' WHERE id = ?",
-            (original.id,),
-        )
-        connection.commit()
+    # 模拟从旧库导入的历史别名，读取和比对时仍须等价于 answer_format。
+    async def write_legacy_alias() -> None:
+        async with repository.database.transaction() as connection:
+            await connection.execute(
+                "UPDATE agent_memory SET field_key = 'response_format' WHERE id = %s",
+                (original.id,),
+            )
+
+    run_async(write_legacy_alias())
 
     candidate = repository.create_memory(
         OWNER,
@@ -441,8 +456,7 @@ def test_cleanup_applies_pending_task_and_recycle_bin_lifetimes(tmp_path: Path) 
 
 
 def test_audit_table_has_no_content_column_or_memory_body(tmp_path: Path) -> None:
-    database_path = tmp_path / "agent.sqlite3"
-    repository = MemoryRepository(database_path)
+    repository = repository_for(tmp_path)
     memory = repository.create_memory(
         OWNER,
         SCOPE_TYPE,
@@ -459,17 +473,37 @@ def test_audit_table_has_no_content_column_or_memory_body(tmp_path: Path) -> Non
         content="回答末尾不需要延伸问题",
     )
 
-    with sqlite3.connect(database_path) as connection:
-        columns = {
-            row[1] for row in connection.execute("PRAGMA table_info(agent_memory_audit)").fetchall()
-        }
-        audit_rows = connection.execute(
-            "SELECT event_type, metadata_json FROM agent_memory_audit ORDER BY id"
-        ).fetchall()
+    async def inspect_audit_table():
+        async with repository.database.connection() as connection:
+            column_rows = await (
+                await connection.execute(
+                    """
+                    SELECT column_name
+                    FROM information_schema.columns
+                    WHERE table_schema = current_schema()
+                      AND table_name = 'agent_memory_audit'
+                    """
+                )
+            ).fetchall()
+            audit_rows = await (
+                await connection.execute(
+                    """
+                    SELECT event_type, metadata_json
+                    FROM agent_memory_audit
+                    ORDER BY id
+                    """
+                )
+            ).fetchall()
+        return {row["column_name"] for row in column_rows}, audit_rows
+
+    columns, audit_rows = run_async(inspect_audit_table())
 
     assert "content" not in columns
-    assert [row[0] for row in audit_rows] == ["created", "updated"]
-    assert all("延伸问题" not in row[1] for row in audit_rows)
+    assert [row["event_type"] for row in audit_rows] == ["created", "updated"]
+    assert all(
+        "延伸问题" not in json.dumps(row["metadata_json"], ensure_ascii=False)
+        for row in audit_rows
+    )
 
 
 def test_memory_api_requires_internal_token_and_reports_global_availability(
@@ -627,7 +661,7 @@ def test_memory_api_preview_blocks_conflicts_until_explicit_replacement(
     assert resolved.status_code == 200
     assert resolved.json()["status"] == "active"
 
-    repository = MemoryRepository(settings.database_path)
+    repository = repository_for(tmp_path)
     assert repository.get_memory(OWNER, SCOPE_TYPE, SCOPE_ID, original.json()["id"]).status == "deleted"
     assert repository.get_memory(OWNER, SCOPE_TYPE, SCOPE_ID, candidate_id).status == "active"
 
@@ -704,8 +738,7 @@ def test_fastapi_lifespan_cleans_expired_memory_and_runs_daily_worker(
     tmp_path: Path,
 ) -> None:
     settings = api_settings(tmp_path)
-    application = create_app(settings)
-    repository = application.state.memory_repository
+    repository = repository_for(tmp_path)
     expired = repository.create_memory(
         OWNER,
         SCOPE_TYPE,
@@ -715,12 +748,15 @@ def test_fastapi_lifespan_cleans_expired_memory_and_runs_daily_worker(
         status="pending",
         source="inferred_chat",
     )
-    with sqlite3.connect(settings.database_path) as connection:
-        connection.execute(
-            "UPDATE agent_memory SET expires_at = ? WHERE id = ?",
-            ("2000-01-01T00:00:00+00:00", expired.id),
-        )
-        connection.commit()
+    async def expire_memory() -> None:
+        async with repository.database.transaction() as connection:
+            await connection.execute(
+                "UPDATE agent_memory SET expires_at = %s WHERE id = %s",
+                (datetime(2000, 1, 1, tzinfo=timezone.utc), expired.id),
+            )
+
+    run_async(expire_memory())
+    application = create_app(settings)
 
     with TestClient(
         application,
@@ -735,15 +771,10 @@ def test_fastapi_lifespan_cleans_expired_memory_and_runs_daily_worker(
 
 def test_explicit_remember_is_saved_even_when_model_is_degraded(tmp_path: Path) -> None:
     settings = api_settings(tmp_path)
-    memories = MemoryRepository(settings.database_path)
+    runtime, memories = runtime_for(settings)
     memories.update_setting(OWNER, SCOPE_TYPE, SCOPE_ID, True)
-    runtime = AgentRuntime(
-        settings,
-        ConversationRepository(settings.database_path),
-        memory_repository=memories,
-    )
 
-    response = asyncio_run(runtime.handle(agent_request("请记住我通常教四年级")))
+    response = run_async(runtime.handle(agent_request("请记住我通常教四年级")))
 
     assert response.generation_status == "degraded"
     active = memories.list_memories(OWNER, SCOPE_TYPE, SCOPE_ID, status="active")
@@ -758,7 +789,7 @@ def test_inferred_candidates_are_filtered_capped_and_pending_until_confirmation(
     tmp_path: Path,
 ) -> None:
     settings = api_settings(tmp_path)
-    memories = MemoryRepository(settings.database_path)
+    runtime, memories = runtime_for(settings)
     memories.update_setting(OWNER, SCOPE_TYPE, SCOPE_ID, True)
     agent = CapturingAgent(
         {
@@ -795,14 +826,9 @@ def test_inferred_candidates_are_filtered_capped_and_pending_until_confirmation(
             ],
         }
     )
-    runtime = AgentRuntime(
-        settings,
-        ConversationRepository(settings.database_path),
-        memory_repository=memories,
-    )
     runtime._agent = agent
 
-    response = asyncio_run(runtime.handle(agent_request("我想多做一些探究活动")))
+    response = run_async(runtime.handle(agent_request("我想多做一些探究活动")))
 
     assert response.status == "completed"
     assert len(agent.calls) == 1
@@ -814,7 +840,7 @@ def test_inferred_candidates_are_filtered_capped_and_pending_until_confirmation(
     assert response.memory_applied is None
 
     agent.payload = {"answer": "这是下一次回答。", "citationIds": []}
-    asyncio_run(runtime.handle(agent_request("新会话里继续回答")))
+    run_async(runtime.handle(agent_request("新会话里继续回答")))
     second_messages = agent.calls[-1]
     system_text = "\n".join(
         str(message.content)
@@ -826,13 +852,8 @@ def test_inferred_candidates_are_filtered_capped_and_pending_until_confirmation(
 
 def test_stream_final_serializes_memory_candidate_datetimes(tmp_path: Path) -> None:
     settings = api_settings(tmp_path)
-    memories = MemoryRepository(settings.database_path)
+    runtime, memories = runtime_for(settings)
     memories.update_setting(OWNER, SCOPE_TYPE, SCOPE_ID, True)
-    runtime = AgentRuntime(
-        settings,
-        ConversationRepository(settings.database_path),
-        memory_repository=memories,
-    )
     runtime._agent = CapturingAgent(
         {
             "answer": "以后按分点方式回答。",
@@ -856,7 +877,7 @@ def test_stream_final_serializes_memory_candidate_datetimes(tmp_path: Path) -> N
             )
         ]
 
-    events = asyncio_run(collect_events())
+    events = run_async(collect_events())
     final_block = next(event for event in events if event.startswith("event: final"))
     final_data = json.loads(final_block.split("data: ", 1)[1])
     candidate = final_data["response"]["memoryCandidates"][0]
@@ -877,7 +898,7 @@ def test_recall_is_bounded_and_states_current_input_priority(tmp_path: Path) -> 
             "agent_memory_task_limit": 5,
         }
     )
-    memories = MemoryRepository(settings.database_path)
+    runtime, memories = runtime_for(settings)
     memories.update_setting(OWNER, SCOPE_TYPE, SCOPE_ID, True)
     memories.create_memory(
         OWNER,
@@ -898,14 +919,9 @@ def test_recall_is_bounded_and_states_current_input_priority(tmp_path: Path) -> 
             source="profile_ui",
         )
     agent = CapturingAgent({"answer": "本次按 25 分钟设计。", "citationIds": []})
-    runtime = AgentRuntime(
-        settings,
-        ConversationRepository(settings.database_path),
-        memory_repository=memories,
-    )
     runtime._agent = agent
 
-    response = asyncio_run(
+    response = run_async(
         runtime.handle(agent_request("这次请设计 25 分钟的红色文化项目实践课"))
     )
 
@@ -929,7 +945,7 @@ def test_recall_is_bounded_and_states_current_input_priority(tmp_path: Path) -> 
 
 def test_teaching_plan_can_recall_but_resource_discovery_is_excluded(tmp_path: Path) -> None:
     settings = api_settings(tmp_path)
-    memories = MemoryRepository(settings.database_path)
+    runtime, memories = runtime_for(settings)
     memories.update_setting(OWNER, SCOPE_TYPE, SCOPE_ID, True)
     memories.create_memory(
         OWNER,
@@ -940,26 +956,20 @@ def test_teaching_plan_can_recall_but_resource_discovery_is_excluded(tmp_path: P
         content="偏好项目式教学",
         source="profile_ui",
     )
-    runtime = AgentRuntime(
-        settings,
-        ConversationRepository(settings.database_path),
-        memory_repository=memories,
-    )
-
-    teaching_context = runtime._memory_context_for(
+    teaching_context = run_async(runtime._memory_context_for(
         agent_request(
             "生成教学方案",
             taskType="TEACHING_PLAN",
             taskPayload={"grade": "四年级", "durationMinutes": 40},
         )
-    )
-    discovery_context = runtime._memory_context_for(
+    ))
+    discovery_context = run_async(runtime._memory_context_for(
         agent_request(
             "发现周边资源",
             taskType="RESOURCE_DISCOVERY",
             taskPayload={"candidates": []},
         )
-    )
+    ))
 
     assert teaching_context.items
     assert "偏好项目式教学" in teaching_context.prompt
@@ -969,22 +979,11 @@ def test_teaching_plan_can_recall_but_resource_discovery_is_excluded(tmp_path: P
 
 def test_disabled_user_setting_stops_extraction_and_recall(tmp_path: Path) -> None:
     settings = api_settings(tmp_path)
-    memories = MemoryRepository(settings.database_path)
-    runtime = AgentRuntime(
-        settings,
-        ConversationRepository(settings.database_path),
-        memory_repository=memories,
-    )
+    runtime, memories = runtime_for(settings)
 
-    asyncio_run(runtime.handle(agent_request("记住我偏好表格回答")))
+    run_async(runtime.handle(agent_request("记住我偏好表格回答")))
 
     assert memories.list_memories(OWNER, SCOPE_TYPE, SCOPE_ID) == []
-    context = runtime._memory_context_for(agent_request("继续回答"))
+    context = run_async(runtime._memory_context_for(agent_request("继续回答")))
     assert context.items == ()
     assert context.prompt == ""
-
-
-def asyncio_run(awaitable):
-    import asyncio
-
-    return asyncio.run(awaitable)

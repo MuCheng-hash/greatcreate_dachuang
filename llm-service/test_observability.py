@@ -8,64 +8,96 @@ import unittest
 from fastapi.testclient import TestClient
 
 from llm_service.api import create_app
-from llm_service.observability import LlmObservability, LlmTraceContext
+from llm_service.observability import LlmTraceContext
 from llm_service.settings import Settings
+from postgres_test_support import (
+    conversation_repository,
+    observability_store,
+    run_async,
+    settings_for_database,
+)
 
 
 class LlmObservabilityTest(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = TemporaryDirectory()
-        self.database_path = Path(self.temporary.name) / "state.sqlite3"
-        self.store = LlmObservability(
-            self.database_path,
+        self.temporary_path = Path(self.temporary.name)
+        self.settings = settings_for_database(self.temporary_path)
+        self.store = observability_store(
+            self.settings,
             {"qwen-plus": {"input": 1.0, "output": 2.0}},
         )
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
+    def api_settings(self, **overrides) -> Settings:
+        return Settings(
+            _env_file=None,
+            database_url=self.settings.database_dsn,
+            **overrides,
+        )
+
     def test_summary_tracks_tokens_cost_percentiles_and_errors(self) -> None:
-        context = LlmTraceContext(feature="teaching-plan", user_id="account:7", session_id="s-1")
+        context = LlmTraceContext(
+            feature="teaching-plan", user_id="account:7", session_id="s-1"
+        )
         first = self.store.start_call(context, "bailian", "qwen-plus")
         self.store.finish_call(first, 100, 1000, 500, True)
         second = self.store.start_call(context, "bailian", "qwen-plus")
-        self.store.finish_call(second, 900, 2000, 1000, False, "invalid_response", "json_parse")
+        self.store.finish_call(
+            second, 900, 2000, 1000, False, "invalid_response", "json_parse"
+        )
         third = self.store.start_call(context, "bailian", "qwen-plus")
-        self.store.finish_call(third, 500, None, None, False, "failed", "timeout", "timed out")
+        self.store.finish_call(
+            third, 500, None, None, False, "failed", "timeout", "timed out"
+        )
 
         summary = self.store.summary({"user_id": "account:7"})
 
         self.assertEqual(3, summary["calls"])
         self.assertEqual(round(1 / 3, 4), summary["successRate"])
         self.assertEqual(round(1 / 3, 4), summary["validJsonRate"])
-        self.assertEqual({"average": 500.0, "p50": 500, "p95": 900, "p99": 900}, summary["latencyMs"])
+        self.assertEqual(
+            {"average": 500.0, "p50": 500, "p95": 900, "p99": 900},
+            summary["latencyMs"],
+        )
         self.assertEqual(3000, summary["tokens"]["input"])
         self.assertEqual(1500, summary["tokens"]["output"])
         self.assertEqual(0.006, summary["costUsd"])
         self.assertEqual(1, summary["unpricedCalls"])
         self.assertEqual({"json_parse": 1, "timeout": 1}, summary["errors"])
         self.assertEqual(0, summary["fallbackCalls"])
-        self.assertEqual("account:7", summary["breakdown"]["byUser"][0]["userId"])
-        self.assertEqual("s-1", summary["breakdown"]["bySession"][0]["sessionId"])
-        self.assertEqual("teaching-plan", summary["breakdown"]["byFeature"][0]["feature"])
+        self.assertEqual(
+            "account:7", summary["breakdown"]["byUser"][0]["userId"]
+        )
+        self.assertEqual(
+            "s-1", summary["breakdown"]["bySession"][0]["sessionId"]
+        )
+        self.assertEqual(
+            "teaching-plan",
+            summary["breakdown"]["byFeature"][0]["feature"],
+        )
         self.assertEqual("account:7", summary["groups"][0]["userId"])
         self.assertEqual("s-1", summary["groups"][0]["sessionId"])
 
     def test_callback_records_provider_usage_and_json_validity(self) -> None:
         handler = self.store.callback(
-            LlmTraceContext(feature="resource-discovery", user_id="school:3"),
+            LlmTraceContext(
+                feature="resource-discovery", user_id="school:3"
+            ),
             "bailian",
             "qwen-plus",
         )
-        handler.on_chat_model_start({}, [[]], run_id="run-1")
+        run_async(handler.on_chat_model_start({}, [[]], run_id="run-1"))
         message = SimpleNamespace(
             content='{"results":[]}',
             usage_metadata={"input_tokens": 12, "output_tokens": 4},
         )
         generation = SimpleNamespace(message=message, text="")
         response = SimpleNamespace(generations=[[generation]], llm_output={})
-        handler.on_llm_new_token("{", run_id="run-1")
-        handler.on_llm_end(response, run_id="run-1")
+        run_async(handler.on_llm_new_token("{", run_id="run-1"))
+        run_async(handler.on_llm_end(response, run_id="run-1"))
 
         traces = self.store.traces({"feature": "resource-discovery"})
 
@@ -78,21 +110,25 @@ class LlmObservabilityTest(unittest.TestCase):
         self.assertIsNotNone(traces[0]["firstTokenLatencyMs"])
 
     def test_admin_api_is_protected_and_metrics_have_no_user_labels(self) -> None:
-        settings = Settings(
-            database_path=self.database_path,
+        settings = self.api_settings(
             observability_admin_token="observe-secret",
             llm_model_pricing={"qwen-plus": {"input": 1, "output": 2}},
         )
-        app = create_app(settings, self.store)
         call_id = self.store.start_call(
-            LlmTraceContext(feature="teaching-plan", user_id="account:9", session_id="private-session"),
+            LlmTraceContext(
+                feature="teaching-plan",
+                user_id="account:9",
+                session_id="private-session",
+            ),
             "bailian",
             "qwen-plus",
         )
         self.store.finish_call(call_id, 42, 10, 5, True)
 
-        with TestClient(app) as client:
-            self.assertEqual(401, client.get("/admin/observability/summary").status_code)
+        with TestClient(create_app(settings)) as client:
+            self.assertEqual(
+                401, client.get("/admin/observability/summary").status_code
+            )
             response = client.get(
                 "/admin/observability/summary?userId=account%3A9",
                 headers={"X-Observability-Admin-Token": "observe-secret"},
@@ -101,26 +137,39 @@ class LlmObservabilityTest(unittest.TestCase):
             self.assertEqual(1, response.json()["calls"])
 
             metrics = client.get("/metrics").text
-            self.assertIn('llm_calls_total{feature="teaching-plan"', metrics)
+            self.assertIn(
+                'llm_calls_total{feature="teaching-plan"', metrics
+            )
             self.assertNotIn("account:9", metrics)
             self.assertNotIn("private-session", metrics)
 
-    def test_summary_optionally_includes_completed_formal_account_chat_turns(self) -> None:
-        settings = Settings(
-            database_path=self.database_path,
-            observability_admin_token="observe-secret",
+    def test_summary_optionally_includes_completed_formal_account_chat_turns(
+        self,
+    ) -> None:
+        settings = self.api_settings(
+            observability_admin_token="observe-secret"
         )
-        app = create_app(settings, self.store)
-        repository = app.state.container.repository
+        repository = conversation_repository(settings)
 
-        def append_turn(owner_id: str, task_type: str | None, status: str) -> None:
+        def append_turn(
+            owner_id: str, task_type: str | None, status: str
+        ) -> None:
             thread = repository.create_thread(owner_id, "SCHOOL", 1)
-            user_metadata = {} if task_type is None else {"taskType": task_type}
+            user_metadata = (
+                {} if task_type is None else {"taskType": task_type}
+            )
             assistant_metadata = {"status": status}
             if task_type is not None:
                 assistant_metadata["taskType"] = task_type
-            repository.append_message(thread.thread_id, "user", "测试问题", user_metadata)
-            repository.append_message(thread.thread_id, "assistant", "测试回答", assistant_metadata)
+            repository.append_message(
+                thread.thread_id, "user", "测试问题", user_metadata
+            )
+            repository.append_message(
+                thread.thread_id,
+                "assistant",
+                "测试回答",
+                assistant_metadata,
+            )
 
         append_turn("account:1", "CHAT", "completed")
         append_turn("account:2", None, "completed")
@@ -129,64 +178,102 @@ class LlmObservabilityTest(unittest.TestCase):
         append_turn("account:5", "RESOURCE_DISCOVERY", "completed")
         append_turn("startup-check", "CHAT", "completed")
 
-        with TestClient(app) as client:
-            headers = {"X-Observability-Admin-Token": "observe-secret"}
-            default_response = client.get("/admin/observability/summary", headers=headers)
+        with TestClient(create_app(settings)) as client:
+            headers = {
+                "X-Observability-Admin-Token": "observe-secret"
+            }
+            default_response = client.get(
+                "/admin/observability/summary", headers=headers
+            )
             metric_response = client.get(
-                "/admin/observability/summary?includeQuestionMetrics=true", headers=headers
+                "/admin/observability/summary?includeQuestionMetrics=true",
+                headers=headers,
             )
 
         self.assertEqual(200, default_response.status_code)
-        self.assertNotIn("completedQuestionCount", default_response.json())
+        self.assertNotIn(
+            "completedQuestionCount", default_response.json()
+        )
         self.assertEqual(200, metric_response.status_code)
-        self.assertEqual(2, metric_response.json()["completedQuestionCount"])
+        self.assertEqual(
+            2, metric_response.json()["completedQuestionCount"]
+        )
 
-    def test_summary_counts_fallback_levels_and_tool_trace_endpoint_is_protected(self) -> None:
+    def test_summary_counts_fallback_levels_and_tool_trace_endpoint_is_protected(
+        self,
+    ) -> None:
         context = LlmTraceContext(
             feature="agent-runtime",
             metadata={"fallbackLevel": 1},
         )
-        call_id = self.store.start_call(context, "ollama", "local-model")
+        call_id = self.store.start_call(
+            context, "ollama", "local-model"
+        )
         self.store.finish_call(call_id, 20, 2, 3, True)
         summary = self.store.summary({"feature": "agent-runtime"})
         self.assertEqual(1, summary["fallbackCalls"])
         self.assertEqual(1, summary["fallbackByLevel"]["1"])
 
-        settings = Settings(
-            database_path=self.database_path,
-            observability_admin_token="observe-secret",
+        settings = self.api_settings(
+            observability_admin_token="observe-secret"
         )
-        app = create_app(settings, self.store)
-        repository = app.state.container.repository
+        repository = conversation_repository(settings)
         thread = repository.create_thread("account:1", "SCHOOL", 1)
-        repository.add_tool_audit(thread.thread_id, "query_graph_relations", {}, "degraded", 12, "degraded")
-        with TestClient(app) as client:
-            self.assertEqual(401, client.get("/admin/observability/tool-traces").status_code)
+        repository.add_tool_audit(
+            thread.thread_id,
+            "query_graph_relations",
+            {},
+            "degraded",
+            12,
+            "degraded",
+        )
+        with TestClient(create_app(settings)) as client:
+            self.assertEqual(
+                401,
+                client.get(
+                    "/admin/observability/tool-traces"
+                ).status_code,
+            )
             response = client.get(
-                "/admin/observability/tool-traces?toolName=query_graph_relations",
-                headers={"X-Observability-Admin-Token": "observe-secret"},
+                "/admin/observability/tool-traces"
+                "?toolName=query_graph_relations",
+                headers={
+                    "X-Observability-Admin-Token": "observe-secret"
+                },
             )
             self.assertEqual(200, response.status_code)
-            self.assertEqual("degraded", response.json()[0]["status"])
+            self.assertEqual(
+                "degraded", response.json()[0]["status"]
+            )
 
     def test_agent_tool_call_is_successful_without_json_validation(self) -> None:
         handler = self.store.callback(
-            LlmTraceContext(feature="agent-runtime", expected_json=True),
+            LlmTraceContext(
+                feature="agent-runtime", expected_json=True
+            ),
             "bailian",
             "qwen-plus",
         )
-        handler.on_chat_model_start({}, [[]], run_id="tool-run")
+        run_async(
+            handler.on_chat_model_start({}, [[]], run_id="tool-run")
+        )
         message = SimpleNamespace(
-            content="", tool_calls=[{"name": "search", "args": {}}],
+            content="",
+            tool_calls=[{"name": "search", "args": {}}],
             usage_metadata={"input_tokens": 8, "output_tokens": 2},
         )
         response = SimpleNamespace(
-            generations=[[SimpleNamespace(message=message, text="")]], llm_output={}
+            generations=[[
+                SimpleNamespace(message=message, text="")
+            ]],
+            llm_output={},
         )
 
-        handler.on_llm_end(response, run_id="tool-run")
+        run_async(handler.on_llm_end(response, run_id="tool-run"))
 
-        trace = self.store.traces({"feature": "agent-runtime"})[0]
+        trace = self.store.traces(
+            {"feature": "agent-runtime"}
+        )[0]
         self.assertEqual("completed", trace["status"])
         self.assertIsNone(trace["validJson"])
 

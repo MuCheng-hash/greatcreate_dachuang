@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import json
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
@@ -9,12 +8,8 @@ from fastapi.testclient import TestClient
 from langchain_core.messages import AIMessage, AIMessageChunk
 import pytest
 
-from llm_service import legacy_api
 from llm_service.api import create_app
 from llm_service.container import build_container
-from llm_service import legacy_api
-from llm_service.repository import ConversationRepository
-from llm_service.prompt_manager import PromptManager
 from llm_service.planner import AgentPlan
 from llm_service.runtime import AgentRuntime
 from llm_service.model_gateway import ModelGateway
@@ -26,6 +21,13 @@ from llm_service.structured_tasks import (
     teaching_plan_stream_text,
 )
 from llm_service.tools import ToolRuntimeContext, bind_tool_runtime, reset_tool_runtime, search_approved_resources
+from postgres_test_support import (
+    conversation_repository,
+    run_async,
+    settings_for_database,
+    started_runtime,
+    database_url_for_test,
+)
 
 
 def test_multimodal_request_builds_image_message(tmp_path: Path):
@@ -39,7 +41,8 @@ def test_multimodal_request_builds_image_message(tmp_path: Path):
         }],
     ))
     settings = settings_for(tmp_path)
-    runtime = AgentRuntime(settings, ConversationRepository(settings.database_path))
+    repository = conversation_repository(settings)
+    runtime = AgentRuntime(settings, repository.async_target)
     messages = runtime._build_messages(
         [{"role": "user", "content": request.message}], "",
         AgentPlan(request.message, tuple(), 1), request,
@@ -52,8 +55,8 @@ def test_multimodal_request_builds_image_message(tmp_path: Path):
 
 def test_controlled_query_rewrite_only_uses_contextual_reference_and_never_generates_facts(tmp_path: Path):
     settings = settings_for(tmp_path)
-    repository = ConversationRepository(settings.database_path)
-    runtime = AgentRuntime(settings, repository)
+    repository = conversation_repository(settings)
+    runtime = AgentRuntime(settings, repository.async_target)
     thread = repository.create_thread("account:1", "SCHOOL", 1)
     calls: list[str] = []
 
@@ -72,8 +75,8 @@ def test_controlled_query_rewrite_only_uses_contextual_reference_and_never_gener
     contextual = AgentMessageRequest.model_validate(message_payload(message="这个学校成立多久？"))
     explicit = AgentMessageRequest.model_validate(message_payload(message="里庄小学成立多久？"))
 
-    rewritten = asyncio.run(runtime._controlled_query_rewrite(contextual, thread))
-    unchanged = asyncio.run(runtime._controlled_query_rewrite(explicit, thread))
+    rewritten = run_async(runtime._controlled_query_rewrite(contextual, thread))
+    unchanged = run_async(runtime._controlled_query_rewrite(explicit, thread))
 
     assert rewritten["status"] == "applied"
     assert rewritten["searchQuery"] == "里庄小学成立多久？"
@@ -92,9 +95,8 @@ def test_authoritative_web_host_allows_only_configured_domain_or_its_subdomain()
 
 
 def settings_for(tmp_path: Path, **overrides) -> Settings:
-    return Settings(
-        _env_file=None,
-        database_path=tmp_path / "agent.sqlite3",
+    return settings_for_database(
+        tmp_path,
         internal_service_token=overrides.pop("internal_service_token", "test-agent-secret"),
         llm_api_url="",
         llm_api_key="",
@@ -162,12 +164,12 @@ def message_payload(**overrides):
     return payload
 
 
-def test_unified_tasks_and_legacy_routes_coexist(tmp_path: Path):
+def test_unified_tasks_keep_compatible_routes_and_remove_old_agent_routes(tmp_path: Path):
     settings = settings_for(tmp_path)
     with build_client(settings) as client:
         health = client.get("/health")
         assert health.status_code == 200
-        assert health.json()["agentRuntime"] == "langchain-langgraph"
+        assert health.json()["agentRuntime"] == "langchain-persistent-history"
 
         plan = client.post(
             "/agent/messages",
@@ -198,10 +200,12 @@ def test_unified_tasks_and_legacy_routes_coexist(tmp_path: Path):
         assert classification.status_code == 200
         assert classification.json()["resourceDiscovery"]["analysisStatus"] == "unavailable"
 
-        legacy_paths = (
+        removed_paths = (
             "/llm/agent/answer",
             "/llm/agent/run",
             "/llm/agent/stream",
+        )
+        compatible_paths = (
             "/llm/town/explain",
             "/llm/town/ask",
             "/llm/school/explain",
@@ -210,7 +214,9 @@ def test_unified_tasks_and_legacy_routes_coexist(tmp_path: Path):
             "/llm/teaching-plan/generate/stream",
         )
         registered_paths = client.get("/openapi.json").json()["paths"]
-        assert all(path in registered_paths for path in legacy_paths)
+        assert all(path not in registered_paths for path in removed_paths)
+        assert all(path in registered_paths for path in compatible_paths)
+        assert all(client.post(path, json={}).status_code == 404 for path in removed_paths)
 
 
 def test_profile_configuration_is_overridden_by_environment(tmp_path: Path, monkeypatch):
@@ -220,7 +226,10 @@ def test_profile_configuration_is_overridden_by_environment(tmp_path: Path, monk
     monkeypatch.setenv("APP_CONFIG_FILE", str(override))
     monkeypatch.setenv("LLM_TIMEOUT_SECONDS", "9.0")
 
-    settings = Settings(_env_file=None)
+    settings = Settings(
+        _env_file=None,
+        database_url=database_url_for_test(tmp_path),
+    )
 
     assert settings.app_env == "dev"
     assert settings.port == 6123
@@ -233,7 +242,10 @@ def test_production_profile_rejects_missing_admin_tokens(monkeypatch):
     monkeypatch.delenv("OBSERVABILITY_ADMIN_TOKEN", raising=False)
 
     with pytest.raises(ValueError, match="admin tokens"):
-        Settings(_env_file=None)
+        Settings(
+            _env_file=None,
+            database_url="postgresql://test:test@127.0.0.1/test",
+        )
 
 
 def test_container_can_be_explicitly_injected_and_required_health_failure_is_503(tmp_path: Path):
@@ -266,7 +278,7 @@ def test_validation_rejects_missing_owner_and_unknown_scope(tmp_path: Path):
 
 def test_conversation_history_is_filtered_restored_isolated_and_archived(tmp_path: Path):
     settings = settings_for(tmp_path)
-    repository = ConversationRepository(settings.database_path)
+    repository = conversation_repository(settings)
     older = repository.create_thread("school-user:1", "SCHOOL", 1)
     repository.append_message(
         older.thread_id, "user", "  第一段   历史问题  ", {"taskType": "CHAT"}
@@ -591,13 +603,8 @@ def test_runtime_emits_plan_patch_before_final_without_token_fragments(tmp_path:
             }
 
     settings = settings_for(tmp_path, llm_model="qwen-test")
-    repository = ConversationRepository(settings.database_path)
-    runtime = AgentRuntime(
-        settings,
-        repository,
-        model=StreamingModel(),
-        prompts=PromptManager(settings.database_path, settings.prompt_root),
-    )
+    runtime = started_runtime(settings)
+    runtime.model = StreamingModel()
     runtime._agent = object()
     request = AgentMessageRequest.model_validate(message_payload(
         taskType="TEACHING_PLAN",
@@ -608,7 +615,7 @@ def test_runtime_emits_plan_patch_before_final_without_token_fragments(tmp_path:
     async def collect_events():
         return [event async for event in runtime.stream_events(request)]
 
-    events = asyncio.run(collect_events())
+    events = run_async(collect_events())
     names = [event.splitlines()[0].split(": ", 1)[1] for event in events]
     patch_index = names.index("plan.patch")
     final_index = names.index("final")
@@ -694,8 +701,7 @@ def test_stateful_runtime_uses_configured_fallback_model(tmp_path: Path):
         fallback_base_url="http://127.0.0.1:11434/v1",
         fallback_api_key="ollama",
     )
-    app = create_app(settings)
-    runtime = app.state.runtime
+    runtime = started_runtime(settings)
 
     class FakeAgent:
         def __init__(self, content: str):
@@ -704,12 +710,17 @@ def test_stateful_runtime_uses_configured_fallback_model(tmp_path: Path):
         async def ainvoke(self, _input, config=None):
             return {"messages": [AIMessage(content=self.content)]}
 
-    runtime._create_agent_for = lambda config: {
+    agent_for = lambda config: {
         "qwen-plus": FakeAgent("阿里云无效响应"),
         "qwen3:8b": FakeAgent('{"answer":"Ollama回答","citationIds":[]}'),
     }[config.model]
 
-    response = asyncio.run(
+    async def create_agent_for(config):
+        return agent_for(config)
+
+    runtime._create_agent_for = create_agent_for
+
+    response = run_async(
         runtime.handle(AgentMessageRequest.model_validate(
             message_payload(message="主模型失败后继续")
         ))
@@ -732,8 +743,7 @@ def test_stateful_stream_reports_primary_failure_and_fallback_success(tmp_path: 
         fallback_model="qwen3:8b",
         fallback_api_key="ollama",
     )
-    app = create_app(settings)
-    runtime = app.state.runtime
+    runtime = started_runtime(settings)
 
     class FakeAgent:
         def __init__(self, content: str):
@@ -742,10 +752,15 @@ def test_stateful_stream_reports_primary_failure_and_fallback_success(tmp_path: 
         async def ainvoke(self, _input, config=None):
             return {"messages": [AIMessage(content=self.content)]}
 
-    runtime._create_agent_for = lambda config: {
+    agent_for = lambda config: {
         "qwen-plus": FakeAgent("阿里云无效响应"),
         "qwen3:8b": FakeAgent('{"answer":"Ollama流式回答","citationIds":[]}'),
     }[config.model]
+
+    async def create_agent_for(config):
+        return agent_for(config)
+
+    runtime._create_agent_for = create_agent_for
 
     async def collect_events():
         return [event async for event in runtime.stream_events(
@@ -754,7 +769,7 @@ def test_stateful_stream_reports_primary_failure_and_fallback_success(tmp_path: 
             )
         )]
 
-    events = asyncio.run(collect_events())
+    events = run_async(collect_events())
     names = [event.split("\n", 1)[0].removeprefix("event: ") for event in events]
     assert names.count("model.started") == 2
     assert "model.failed" in names
@@ -773,8 +788,7 @@ def test_stateful_stream_deduplicates_cumulative_langgraph_messages_before_final
         primary_base_url="http://test.invalid/v1",
         primary_api_key="stream-key",
     )
-    app = create_app(settings)
-    runtime = app.state.runtime
+    runtime = started_runtime(settings)
 
     class StreamingAgent:
         async def astream(self, _input, config=None, stream_mode=None, version=None):
@@ -785,14 +799,17 @@ def test_stateful_stream_deduplicates_cumulative_langgraph_messages_before_final
             ):
                 yield {"data": (AIMessageChunk(content=content), {"langgraph_node": "agent"})}
 
-    runtime._create_agent_for = lambda _config: StreamingAgent()
+    async def create_agent_for(_config):
+        return StreamingAgent()
+
+    runtime._create_agent_for = create_agent_for
 
     async def collect_events():
         return [event async for event in runtime.stream_events(
             AgentMessageRequest.model_validate(message_payload(message="测试累计分片"))
         )]
 
-    events = asyncio.run(collect_events())
+    events = run_async(collect_events())
     token_values = [
         json.loads(event.split("data: ", 1)[1])["delta"]
         for event in events if event.startswith("event: token")
@@ -898,35 +915,46 @@ def test_context_is_compacted_but_raw_messages_remain(tmp_path: Path):
 
 
 def test_tool_registry_is_scoped_bounded_and_audited(tmp_path: Path):
-    repository = ConversationRepository(tmp_path / "tools.sqlite3")
+    repository = conversation_repository(settings_for(tmp_path))
     thread = repository.create_thread("owner", "SCHOOL", 1)
     context = TrustedContext(resources=[
         {"resource": {"resourceName": "甲纪念馆"}},
         {"resource": {"resourceName": "乙文化站"}},
     ])
-    runtime = ToolRuntimeContext(thread.thread_id, context, repository, 2000)
+    runtime = ToolRuntimeContext(
+        thread.thread_id, context, repository.async_target, 2000
+    )
     token = bind_tool_runtime(runtime)
     try:
-        output = search_approved_resources.invoke({"query": "纪念馆", "limit": 8})
+        output = run_async(
+            search_approved_resources.ainvoke({"query": "纪念馆", "limit": 8})
+        )
     finally:
         reset_tool_runtime(token)
     assert "甲纪念馆" in output
     assert "乙文化站" not in output
     assert runtime.executions[0].name == "search_approved_resources"
     assert runtime.event_sink is None
-    with repository._connect() as connection:
-        assert connection.execute("SELECT COUNT(*) FROM agent_tool_audit").fetchone()[0] == 1
+    assert len(repository.list_tool_audits()) == 1
 
 
 def test_tool_runtime_emits_started_and_completed_events(tmp_path: Path):
-    repository = ConversationRepository(tmp_path / "tool-events.sqlite3")
+    repository = conversation_repository(settings_for(tmp_path))
     thread = repository.create_thread("owner", "SCHOOL", 1)
     context = TrustedContext(resources=[{"resource": {"resourceName": "甲纪念馆"}}])
     events = []
-    runtime = ToolRuntimeContext(thread.thread_id, context, repository, 2000, event_sink=lambda name, data: events.append((name, data)))
+    runtime = ToolRuntimeContext(
+        thread.thread_id,
+        context,
+        repository.async_target,
+        2000,
+        event_sink=lambda name, data: events.append((name, data)),
+    )
     token = bind_tool_runtime(runtime)
     try:
-        search_approved_resources.invoke({"query": "纪念馆", "limit": 1})
+        run_async(
+            search_approved_resources.ainvoke({"query": "纪念馆", "limit": 1})
+        )
     finally:
         reset_tool_runtime(token)
 
@@ -936,7 +964,7 @@ def test_tool_runtime_emits_started_and_completed_events(tmp_path: Path):
 
 
 def test_model_output_filters_invented_citations(tmp_path: Path):
-    runtime = create_app(settings_for(tmp_path)).state.runtime
+    runtime = started_runtime(settings_for(tmp_path))
 
     class FakeAgent:
         async def ainvoke(self, _input, config=None):
@@ -946,13 +974,15 @@ def test_model_output_filters_invented_citations(tmp_path: Path):
             ))]}
 
     runtime._agent = FakeAgent()
-    response = asyncio.run(runtime.handle(AgentMessageRequest.model_validate(message_payload())))
+    response = run_async(
+        runtime.handle(AgentMessageRequest.model_validate(message_payload()))
+    )
     assert response.status == "completed"
     assert [item.citation_id for item in response.citations] == ["chunk:1"]
 
 
 def test_prefetched_context_uses_joint_rank_and_caps_graph_facts(tmp_path: Path):
-    runtime = create_app(settings_for(tmp_path)).state.runtime
+    runtime = started_runtime(settings_for(tmp_path))
     chunks = [
         {"citationId": f"chunk:{index}", "text": f"文本证据{index}"}
         for index in range(1, 8)
@@ -996,7 +1026,7 @@ def test_prefetched_context_uses_joint_rank_and_caps_graph_facts(tmp_path: Path)
 
 
 def test_retrieval_trace_summary_is_bounded_and_drops_feature_details(tmp_path: Path):
-    runtime = create_app(settings_for(tmp_path)).state.runtime
+    runtime = started_runtime(settings_for(tmp_path))
     trusted = TrustedContext.model_validate({
         "retrieval": {
             "retrievalTrace": {
@@ -1034,8 +1064,8 @@ def test_retrieval_trace_summary_is_bounded_and_drops_feature_details(tmp_path: 
 
 def test_grounded_response_persists_deterministic_sanitized_snapshot(tmp_path: Path):
     settings = settings_for(tmp_path)
-    repository = ConversationRepository(settings.database_path)
-    runtime = AgentRuntime(settings, repository)
+    repository = conversation_repository(settings)
+    runtime = AgentRuntime(settings, repository.async_target)
     thread = repository.create_thread("school-user:1", "SCHOOL", 1)
     trusted = TrustedContext.model_validate({
         "retrieval": {
@@ -1055,7 +1085,7 @@ def test_grounded_response_persists_deterministic_sanitized_snapshot(tmp_path: P
             "sourceType": "approved_source",
         }],
     })
-    result = runtime._response_from_model_result(
+    result = run_async(runtime._response_from_model_result(
         {"messages": [AIMessage(content=json.dumps({
             "answer": "基于可信证据回答。",
             "citationIds": [],
@@ -1066,13 +1096,13 @@ def test_grounded_response_persists_deterministic_sanitized_snapshot(tmp_path: P
         thread.thread_id,
         True,
         [ToolExecution(name="get_school_context", status="completed", durationMs=7)],
-    )
+    ))
     result.provider = "openai-compatible"
     result.model = "qwen-test"
     result.fallback_level = 0
     result.memory_applied = MemoryApplied(count=2, memoryIds=["profile-1", "task-1"])
 
-    runtime._persist_response(thread, result)
+    run_async(runtime._persist_response(thread, result))
     stored = repository.list_messages(thread.thread_id)[-1]
     snapshot = stored["metadata"]["responseSnapshot"]
 
@@ -1105,7 +1135,7 @@ def test_agent_prompt_allows_markdown_answer_without_changing_json_contract(tmp_
     assert "answer 字段允许使用 Markdown" in prompt
     assert "不要使用 HTML" in prompt
 
-    runtime = create_app(settings_for(tmp_path)).state.runtime
+    runtime = started_runtime(settings_for(tmp_path))
     markdown_answer = "### 资源建议\n\n**重点：** 先确认开放状态。\n\n1. 课堂导入。\n2. 现场观察。"
 
     class FakeAgent:
@@ -1118,14 +1148,16 @@ def test_agent_prompt_allows_markdown_answer_without_changing_json_contract(tmp_
             }, ensure_ascii=False))]}
 
     runtime._agent = FakeAgent()
-    response = asyncio.run(runtime.handle(AgentMessageRequest.model_validate(message_payload())))
+    response = run_async(
+        runtime.handle(AgentMessageRequest.model_validate(message_payload()))
+    )
 
     assert response.status == "completed"
     assert response.answer == markdown_answer
 
 
 def test_degraded_answer_uses_markdown_sections_and_lists(tmp_path: Path):
-    runtime = create_app(settings_for(tmp_path)).state.runtime
+    runtime = started_runtime(settings_for(tmp_path))
     request = AgentMessageRequest.model_validate(message_payload(message="请介绍周边资源"))
     trusted = TrustedContext(
         school={"schoolName": "里庄小学"},
@@ -1144,12 +1176,11 @@ def test_degraded_answer_uses_markdown_sections_and_lists(tmp_path: Path):
 
 def test_stream_prefetches_graph_tool_for_trusted_scope(tmp_path: Path):
     settings = settings_for(tmp_path)
-    application = create_app(settings)
-    runtime = application.state.runtime
+    runtime = started_runtime(settings)
     calls = []
 
     class FakeBusinessToolClient:
-        def query_graph_relations(self, payload):
+        async def query_graph_relations(self, payload):
             calls.append(payload)
             return {
                 "retrievalStatus": "ok",
@@ -1179,7 +1210,7 @@ def test_stream_prefetches_graph_tool_for_trusted_scope(tmp_path: Path):
     async def collect_events():
         return [event async for event in runtime.stream_events(request)]
 
-    events = asyncio.run(collect_events())
+    events = run_async(collect_events())
     names = [event.split("\n", 1)[0].removeprefix("event: ") for event in events]
     assert "tool.started" in names
     assert "tool.completed" in names
@@ -1208,14 +1239,16 @@ def test_stream_prefetches_graph_tool_for_trusted_scope(tmp_path: Path):
 def test_model_output_accepts_wrapped_json_and_plain_text(
     tmp_path: Path, content: str, expected: str
 ):
-    runtime = create_app(settings_for(tmp_path)).state.runtime
+    runtime = started_runtime(settings_for(tmp_path))
 
     class FakeAgent:
         async def ainvoke(self, _input, config=None):
             return {"messages": [AIMessage(content=content)]}
 
     runtime._agent = FakeAgent()
-    response = asyncio.run(runtime.handle(AgentMessageRequest.model_validate(message_payload())))
+    response = run_async(
+        runtime.handle(AgentMessageRequest.model_validate(message_payload()))
+    )
 
     assert response.status == "completed"
     assert response.answer == expected

@@ -28,8 +28,8 @@ async def compatibility_health(
 ) -> JSONResponse:
     is_ready, payload = await container.health.ready()
     payload.update({
-        "agentRuntime": "langchain-langgraph",
-        "llmObservability": "sqlite-traces",
+        "agentRuntime": "langchain-persistent-history",
+        "llmObservability": "postgresql-traces",
         "agentModelConfigured": container.settings.model_configured,
     })
     return JSONResponse(payload, status_code=200 if is_ready else 503)

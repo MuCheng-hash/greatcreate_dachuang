@@ -5,7 +5,6 @@ import json
 import hmac
 import logging
 import secrets
-import sqlite3
 import base64
 import httpx
 from contextlib import asynccontextmanager, suppress
@@ -14,15 +13,18 @@ from typing import Any, Literal
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse, StreamingResponse
+from psycopg import InterfaceError, OperationalError
+from psycopg_pool import PoolTimeout
 
 from .container import AppContainer, build_container
-from .legacy_api import router as legacy_router
 from .legacy import (
     build_map_answer,
     build_structured_teaching_plan,
     stream_structured_teaching_plan,
 )
 from .observability import FallbackAlertManager, LlmObservability
+from .model_gateway import message_text
+from .prompt_manager import PromptVersionExistsError
 from .repository import ThreadNotFoundError, ThreadScopeError
 from .routes import health_router
 from .runtime import AgentRuntime
@@ -55,10 +57,12 @@ from .user_memory import (
 LOGGER = logging.getLogger("llm.stateful_agent.api")
 
 
-def _thread_response(runtime: AgentRuntime, record: Any, include_messages: bool = True) -> ThreadResponse:
+async def _thread_response(
+    runtime: AgentRuntime, record: Any, include_messages: bool = True
+) -> ThreadResponse:
     messages = []
     if include_messages:
-        for item in runtime.repository.list_messages(record.thread_id):
+        for item in await runtime.repository.list_messages(record.thread_id):
             messages.append(StoredMessage(
                 id=item["id"], role=item["role"], content=item["content"],
                 createdAt=item["created_at"], metadata=item["metadata"],
@@ -135,28 +139,46 @@ def create_app(
     prompts = container.prompts
     runtime = container.runtime
     memory_repository = container.memory_repository
-    legacy_runtime = container.legacy_agent_runtime
+    database = container.database
+    migrator = container.migrator
 
     async def memory_cleanup_loop() -> None:
         interval = max(1, settings.agent_memory_cleanup_interval_seconds)
         while True:
             await asyncio.sleep(interval)
             try:
-                memory_repository.cleanup_expired()
+                await memory_repository.cleanup_expired()
             except Exception:
                 LOGGER.exception("agent_memory_cleanup_failed")
 
     @asynccontextmanager
     async def lifespan(application: FastAPI):
-        memory_repository.cleanup_expired()
-        cleanup_task = asyncio.create_task(memory_cleanup_loop())
-        application.state.memory_cleanup_task = cleanup_task
+        cleanup_task: asyncio.Task[None] | None = None
+        database_open = False
         try:
+            await database.open()
+            database_open = True
+            if settings.app_env == "dev":
+                await migrator.migrate()
+            else:
+                await migrator.validate()
+            await prompts.initialize()
+            await alerts.start()
+            await memory_repository.cleanup_expired()
+            cleanup_task = asyncio.create_task(
+                memory_cleanup_loop(), name="agent-memory-cleanup"
+            )
+            application.state.memory_cleanup_task = cleanup_task
             yield
         finally:
-            cleanup_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await cleanup_task
+            if cleanup_task is not None:
+                cleanup_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await cleanup_task
+            await container.business_tool_client.aclose()
+            await alerts.close()
+            if database_open:
+                await database.close()
 
     app = FastAPI(
         title="Red Culture Stateful Agent",
@@ -171,7 +193,23 @@ def create_app(
     app.state.prompts = prompts
     app.state.observability = observability
     app.state.alerts = alerts
-    app.state.legacy_runtime = legacy_runtime
+
+    async def database_unavailable(_request: Any, exc: Exception) -> Response:
+        LOGGER.error(
+            "postgresql_unavailable",
+            extra={"errorType": type(exc).__name__},
+        )
+        return Response(
+            content=json.dumps(
+                {"detail": "database temporarily unavailable"},
+                ensure_ascii=False,
+            ),
+            status_code=503,
+            media_type="application/json",
+        )
+
+    for database_error in (OperationalError, InterfaceError, PoolTimeout):
+        app.add_exception_handler(database_error, database_unavailable)
 
     async def require_internal_agent_token(
         token: str | None = Header(default=None, alias="X-Agent-Service-Token"),
@@ -269,7 +307,9 @@ def create_app(
         scope_id: str = Query(alias="scopeId"),
     ) -> MemorySettingResponse:
         try:
-            record = memory_repository.get_setting(owner_id, scope_type, scope_id)
+            record = await memory_repository.get_setting(
+                owner_id, scope_type, scope_id
+            )
         except MemoryValidationError as exc:
             _raise_memory_http_error(exc)
         return MemorySettingResponse(
@@ -289,7 +329,7 @@ def create_app(
         request: MemorySettingUpdateRequest,
     ) -> MemorySettingResponse:
         try:
-            record = memory_repository.update_setting(
+            record = await memory_repository.update_setting(
                 request.owner_id,
                 request.scope_type,
                 request.scope_id,
@@ -321,8 +361,8 @@ def create_app(
         limit: int = Query(default=200, ge=1, le=500),
     ) -> list[MemoryItem]:
         try:
-            memory_repository.maybe_cleanup()
-            records = memory_repository.list_memories(
+            await memory_repository.maybe_cleanup()
+            records = await memory_repository.list_memories(
                 owner_id,
                 scope_type,
                 scope_id,
@@ -342,7 +382,7 @@ def create_app(
     )
     async def create_memory(request: MemoryCreateRequest) -> MemoryItem:
         try:
-            record = memory_repository.create_memory(
+            record = await memory_repository.create_memory(
                 request.owner_id,
                 request.scope_type,
                 request.scope_id,
@@ -371,7 +411,7 @@ def create_app(
         scope_id: str = Query(alias="scopeId"),
     ) -> MemoryConflictPreviewResponse:
         try:
-            preview = memory_repository.confirmation_preview(
+            preview = await memory_repository.confirmation_preview(
                 owner_id, scope_type, scope_id, memory_id
             )
         except (MemoryNotFoundError, MemoryValidationError) as exc:
@@ -398,7 +438,7 @@ def create_app(
         if "field_key" in request.model_fields_set:
             updates["field_key"] = request.field_key
         try:
-            record = memory_repository.update_memory(
+            record = await memory_repository.update_memory(
                 owner_id,
                 scope_type,
                 scope_id,
@@ -423,7 +463,7 @@ def create_app(
         scope_id: str = Query(alias="scopeId"),
     ) -> MemoryItem:
         try:
-            record = memory_repository.confirm_memory(
+            record = await memory_repository.confirm_memory(
                 owner_id,
                 scope_type,
                 scope_id,
@@ -446,7 +486,7 @@ def create_app(
         scope_id: str = Query(alias="scopeId"),
     ) -> MemoryItem:
         try:
-            record = memory_repository.delete_memory(
+            record = await memory_repository.delete_memory(
                 owner_id, scope_type, scope_id, memory_id
             )
         except (MemoryNotFoundError, MemoryValidationError) as exc:
@@ -466,7 +506,7 @@ def create_app(
         scope_id: str = Query(alias="scopeId"),
     ) -> MemoryItem:
         try:
-            record = memory_repository.restore_memory(
+            record = await memory_repository.restore_memory(
                 owner_id,
                 scope_type,
                 scope_id,
@@ -489,7 +529,7 @@ def create_app(
         scope_id: str = Query(alias="scopeId"),
     ) -> Response:
         try:
-            memory_repository.permanent_delete(
+            await memory_repository.permanent_delete(
                 owner_id, scope_type, scope_id, memory_id
             )
         except (MemoryNotFoundError, MemoryStateError, MemoryValidationError) as exc:
@@ -498,7 +538,7 @@ def create_app(
 
     @app.get("/metrics", response_class=PlainTextResponse)
     async def metrics() -> str:
-        return observability.prometheus_metrics()
+        return await observability.prometheus_metrics()
 
     @app.get("/admin/observability/traces")
     async def llm_traces(
@@ -514,7 +554,7 @@ def create_app(
         offset: int = Query(default=0, ge=0),
         _admin: None = Depends(require_observability_admin),
     ) -> list[dict[str, Any]]:
-        return observability.traces(
+        return await observability.traces(
             {
                 "user_id": user_id, "session_id": session_id, "feature": feature,
                 "model": model_name, "status": status, "trace_id": trace_id,
@@ -537,13 +577,15 @@ def create_app(
         include_question_metrics: bool = Query(default=False, alias="includeQuestionMetrics"),
         _admin: None = Depends(require_observability_admin),
     ) -> dict[str, Any]:
-        summary = observability.summary({
+        summary = await observability.summary({
             "user_id": user_id, "session_id": session_id, "feature": feature,
             "model": model_name, "status": status, "trace_id": trace_id,
             "started_after": started_after, "started_before": started_before,
         })
         if include_question_metrics:
-            summary["completedQuestionCount"] = repository.count_completed_formal_account_chat_turns()
+            summary["completedQuestionCount"] = (
+                await repository.count_completed_formal_account_chat_turns()
+            )
         return summary
 
     @app.get("/admin/observability/tool-traces")
@@ -553,21 +595,23 @@ def create_app(
         limit: int = Query(default=50, ge=1, le=100),
         _admin: None = Depends(require_observability_admin),
     ) -> list[dict[str, Any]]:
-        return repository.list_tool_audits(tool_name, status, limit)
+        return await repository.list_tool_audits(tool_name, status, limit)
 
     @app.get("/admin/memory-metrics")
     async def memory_metrics(
         _admin: None = Depends(require_observability_admin),
     ) -> dict[str, Any]:
-        return memory_repository.aggregate_metrics()
+        return await memory_repository.aggregate_metrics()
 
     @app.post(
         "/agent/threads", response_model=ThreadResponse, status_code=201,
         dependencies=[Depends(require_internal_agent_token)],
     )
     async def create_thread(request: ThreadCreateRequest) -> ThreadResponse:
-        record = runtime.create_thread(request.owner_id, request.scope_type, request.scope_id)
-        return _thread_response(runtime, record, include_messages=False)
+        record = await runtime.create_thread(
+            request.owner_id, request.scope_type, request.scope_id
+        )
+        return await _thread_response(runtime, record, include_messages=False)
 
     @app.get(
         "/agent/threads", response_model=list[ThreadSummaryResponse],
@@ -587,7 +631,7 @@ def create_app(
                 title=item.title, preview=item.preview, messageCount=item.message_count,
                 createdAt=item.created_at, updatedAt=item.updated_at,
             )
-            for item in repository.list_threads(
+            for item in await repository.list_threads(
                 owner_id, task_type, scope_type, scope_id, limit, status
             )
         ]
@@ -602,7 +646,7 @@ def create_app(
         scope_type: str = Query(alias="scopeType"),
         scope_id: str | int = Query(alias="scopeId"),
     ) -> TurnRecoveryResponse:
-        message = repository.find_assistant_message_by_client_turn_id(
+        message = await repository.find_assistant_message_by_client_turn_id(
             client_turn_id, owner_id, scope_type, scope_id
         )
         if message is None:
@@ -630,10 +674,12 @@ def create_app(
         scope_id: str | int | None = Query(default=None, alias="scopeId"),
     ) -> ThreadResponse:
         try:
-            record = repository.get_thread(thread_id, owner_id, scope_type, scope_id)
+            record = await repository.get_thread(
+                thread_id, owner_id, scope_type, scope_id
+            )
         except (ThreadNotFoundError, ThreadScopeError) as exc:
             raise HTTPException(status_code=404, detail="thread not found") from exc
-        return _thread_response(runtime, record)
+        return await _thread_response(runtime, record)
 
     @app.post(
         "/agent/threads/{thread_id}/messages", response_model=AgentMessageResponse,
@@ -672,7 +718,7 @@ def create_app(
         validate_model_selection(request)
         if request.thread_id:
             try:
-                repository.require_thread(
+                await repository.require_thread(
                     request.thread_id, request.owner_id, request.scope_type, request.scope_id
                 )
             except (ThreadNotFoundError, ThreadScopeError) as exc:
@@ -698,13 +744,15 @@ def create_app(
         scope_id: str | int | None = Query(default=None, alias="scopeId"),
     ) -> ThreadResponse:
         try:
-            repository.archive_thread(thread_id, owner_id, scope_type, scope_id)
-            record = repository.get_thread(thread_id, owner_id)
+            await repository.archive_thread(
+                thread_id, owner_id, scope_type, scope_id
+            )
+            record = await repository.get_thread(thread_id, owner_id)
         except ThreadScopeError:
             raise HTTPException(status_code=404, detail="thread not found")
         except ThreadNotFoundError as exc:
             raise HTTPException(status_code=404, detail="thread not found") from exc
-        return _thread_response(runtime, record)
+        return await _thread_response(runtime, record)
 
     @app.post(
         "/agent/threads/{thread_id}/restore", response_model=ThreadResponse,
@@ -717,24 +765,28 @@ def create_app(
         scope_id: str | int | None = Query(default=None, alias="scopeId"),
     ) -> ThreadResponse:
         try:
-            repository.restore_thread(thread_id, owner_id, scope_type, scope_id)
-            record = repository.get_thread(thread_id, owner_id, scope_type, scope_id)
+            await repository.restore_thread(
+                thread_id, owner_id, scope_type, scope_id
+            )
+            record = await repository.get_thread(
+                thread_id, owner_id, scope_type, scope_id
+            )
         except (ThreadNotFoundError, ThreadScopeError) as exc:
             raise HTTPException(status_code=404, detail="thread not found") from exc
-        return _thread_response(runtime, record)
+        return await _thread_response(runtime, record)
 
     @app.get("/admin/prompts/{prompt_key}/versions")
     async def list_prompt_versions(
         prompt_key: str, _admin: None = Depends(require_prompt_admin)
     ) -> list[dict[str, Any]]:
-        return prompts.list_versions(prompt_key)
+        return await prompts.list_versions(prompt_key)
 
     @app.get("/admin/prompts/{prompt_key}/versions/{version}")
     async def get_prompt_version(
         prompt_key: str, version: str, _admin: None = Depends(require_prompt_admin)
     ) -> dict[str, Any]:
         try:
-            return prompts.get_version(prompt_key, version)
+            return await prompts.get_version(prompt_key, version)
         except LookupError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -743,7 +795,7 @@ def create_app(
         prompt_key: str, payload: dict[str, Any], _admin: None = Depends(require_prompt_admin)
     ) -> dict[str, Any]:
         try:
-            return prompts.create_version(
+            return await prompts.create_version(
                 prompt_key,
                 str(payload.get("version") or ""),
                 str(payload.get("content") or ""),
@@ -752,7 +804,7 @@ def create_app(
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        except sqlite3.IntegrityError as exc:
+        except PromptVersionExistsError as exc:
             raise HTTPException(status_code=409, detail="prompt version already exists") from exc
 
     @app.post("/admin/prompts/{prompt_key}/versions/{version}/activate")
@@ -760,7 +812,7 @@ def create_app(
         prompt_key: str, version: str, _admin: None = Depends(require_prompt_admin)
     ) -> dict[str, Any]:
         try:
-            result = prompts.activate_version(prompt_key, version)
+            result = await prompts.activate_version(prompt_key, version)
             runtime.invalidate_prompt(prompt_key)
             return result
         except LookupError as exc:
@@ -770,14 +822,14 @@ def create_app(
     async def get_prompt_experiment(
         prompt_key: str, _admin: None = Depends(require_prompt_admin)
     ) -> dict[str, Any]:
-        return prompts.get_experiment(prompt_key)
+        return await prompts.get_experiment(prompt_key)
 
     @app.put("/admin/prompts/{prompt_key}/experiment")
     async def configure_prompt_experiment(
         prompt_key: str, payload: dict[str, Any], _admin: None = Depends(require_prompt_admin)
     ) -> dict[str, Any]:
         try:
-            return prompts.configure_experiment(
+            return await prompts.configure_experiment(
                 prompt_key,
                 str(payload.get("experimentKey") or ""),
                 payload.get("variants") or [],
@@ -790,14 +842,14 @@ def create_app(
     async def prompt_metrics(
         prompt_key: str, _admin: None = Depends(require_prompt_admin)
     ) -> list[dict[str, Any]]:
-        return prompts.metrics(prompt_key)
+        return await prompts.metrics(prompt_key)
 
     @app.post("/admin/prompt-runs/{run_id}/feedback")
     async def prompt_run_feedback(
         run_id: str, payload: dict[str, Any], _admin: None = Depends(require_prompt_admin)
     ) -> dict[str, Any]:
         try:
-            return prompts.add_feedback(
+            return await prompts.add_feedback(
                 run_id, float(payload.get("qualityScore")), str(payload.get("feedback") or "")
             )
         except (TypeError, ValueError) as exc:
@@ -838,9 +890,5 @@ def create_app(
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
-    app.include_router(
-        legacy_router,
-        dependencies=[Depends(require_internal_agent_token)],
-    )
     app.include_router(health_router)
     return app

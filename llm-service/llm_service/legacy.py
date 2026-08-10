@@ -84,11 +84,18 @@ def teaching_plan_context(payload: dict[str, Any]) -> dict[str, Any]:
     return context
 
 
-def _teaching_prompt(payload: dict[str, Any], prompts: PromptManager) -> tuple[PromptSelection, str]:
+async def _teaching_prompt(
+    payload: dict[str, Any], prompts: PromptManager
+) -> tuple[PromptSelection, str]:
     request = payload.get("request") or {}
     school = payload.get("school") or {}
     subject_key = str(school.get("schoolId") or request.get("schoolId") or "anonymous")
-    return prompts.resolve("teaching-plan", subject_key, teaching_plan_context(payload)), subject_key
+    return (
+        await prompts.resolve(
+            "teaching-plan", subject_key, teaching_plan_context(payload)
+        ),
+        subject_key,
+    )
 
 
 def _trace_identity(payload: dict[str, Any], fallback_session: str = "") -> tuple[str, str]:
@@ -140,8 +147,10 @@ def _attach_prompt_metadata(
 async def build_structured_teaching_plan(
     payload: dict[str, Any], model: ModelGateway, prompts: PromptManager
 ) -> dict[str, Any]:
-    selection, subject_key = _teaching_prompt(payload, prompts)
-    run_id = prompts.start_run(selection, subject_key, model.settings.llm_model, len(selection.content))
+    selection, subject_key = await _teaching_prompt(payload, prompts)
+    run_id = await prompts.start_run(
+        selection, subject_key, model.settings.llm_model, len(selection.content)
+    )
     started = time.perf_counter()
     user_id, session_id = _trace_identity(payload, run_id)
     generated, model_metadata = await model.generate_json_with_metadata(
@@ -165,15 +174,19 @@ async def build_structured_teaching_plan(
         result = build_teaching_plan_fallback(payload)
         status = "degraded"
     elapsed = round((time.perf_counter() - started) * 1000)
-    prompts.finish_run(run_id, status, elapsed, len(json.dumps(result, ensure_ascii=False)))
+    await prompts.finish_run(
+        run_id, status, elapsed, len(json.dumps(result, ensure_ascii=False))
+    )
     return _attach_prompt_metadata(result, selection, run_id)
 
 
 async def stream_structured_teaching_plan(
     payload: dict[str, Any], model: ModelGateway, prompts: PromptManager
 ) -> AsyncIterator[tuple[str, dict[str, Any]]]:
-    selection, subject_key = _teaching_prompt(payload, prompts)
-    run_id = prompts.start_run(selection, subject_key, model.settings.llm_model, len(selection.content))
+    selection, subject_key = await _teaching_prompt(payload, prompts)
+    run_id = await prompts.start_run(
+        selection, subject_key, model.settings.llm_model, len(selection.content)
+    )
     yield "meta", {
         "promptVersion": selection.version,
         "promptRunId": run_id,
@@ -247,7 +260,7 @@ async def stream_structured_teaching_plan(
             for start in range(0, len(fallback_text), 18):
                 yield "token", {"delta": fallback_text[start:start + 18]}
     elapsed = round((time.perf_counter() - started) * 1000)
-    prompts.finish_run(
+    await prompts.finish_run(
         run_id, status, elapsed, len("".join(raw_parts)) or len(json.dumps(result, ensure_ascii=False)), error_message
     )
     yield "result", _attach_prompt_metadata(result, selection, run_id)
