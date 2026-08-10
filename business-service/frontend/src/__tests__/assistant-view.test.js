@@ -834,7 +834,9 @@ describe("assistant view", () => {
 
   it("stops streaming and ignores late token events", async () => {
     let rejectStream;
-    apiMock.stream = vi.fn(async (_path, _body, options) => {
+    let clientTurnId = "";
+    apiMock.stream = vi.fn(async (_path, body, options) => {
+      clientTurnId = body.clientTurnId;
       options.onEvent("token", { delta: "已经显示" });
       await new Promise((_resolve, reject) => {
         rejectStream = reject;
@@ -867,6 +869,9 @@ describe("assistant view", () => {
     expect(wrapper.text()).not.toContain("不应继续显示");
     expect(wrapper.find(".stream-cursor").exists()).toBe(false);
     expect(apiMock.get.mock.calls.some(([path]) => String(path).includes("/history/recovery/"))).toBe(false);
+    expect(apiMock.post).toHaveBeenCalledWith(
+      `/api/ai/qa/turns/${encodeURIComponent(clientTurnId)}/cancel`,
+    );
   });
 
   it("keeps a completed greeting conversation in history after starting a new conversation", async () => {
@@ -912,7 +917,9 @@ describe("assistant view", () => {
     apiMock.get.mockImplementation(async (path) => {
       if (path === "/api/ai/models") return [];
       if (path === "/api/ai/qa/history") return [];
-      if (path.startsWith("/api/ai/qa/history/recovery/")) return { found: false };
+      if (path.startsWith("/api/ai/qa/history/recovery/")) {
+        return { found: false, clientTurnId: path.split("/").at(-1), retryable: false };
+      }
       return [];
     });
     apiMock.stream = vi.fn(async (_path, body, options) => {
@@ -922,6 +929,11 @@ describe("assistant view", () => {
         options.onEvent("token", { delta: "已显示片段" });
         return;
       }
+      options.onEvent("run.started", {
+        clientTurnId: body.clientTurnId, resumed: true, attempt: 2,
+      });
+      options.onEvent("response.reset", { clientTurnId: body.clientTurnId });
+      options.onEvent("token", { delta: "恢复后的片段" });
       options.onEvent("final", {
         response: { answer: "重新生成后的完整回答", citations: [], followUpQuestions: [], generationStatus: "completed" },
       });
@@ -945,14 +957,58 @@ describe("assistant view", () => {
     expect(wrapper.text()).toContain("未找到可恢复的完整回答");
     expect(apiMock.post).not.toHaveBeenCalled();
     expect(apiMock.get.mock.calls.filter(([path]) => String(path).includes("/history/recovery/"))).toHaveLength(3);
-    expect(wrapper.get(".stream-retry-button").text()).toContain("重新生成");
+    expect(wrapper.get(".stream-retry-button").text()).toContain("继续本轮");
 
     await wrapper.get(".stream-retry-button").trigger("click");
     await flushPromises();
 
     expect(apiMock.stream).toHaveBeenCalledTimes(2);
-    expect(turnIds[1]).not.toBe(turnIds[0]);
+    expect(turnIds[1]).toBe(turnIds[0]);
+    expect(wrapper.text()).not.toContain("已显示片段");
     expect(wrapper.text()).toContain("重新生成后的完整回答");
+  });
+
+  it("shows a cancelled partial response without offering automatic recovery", async () => {
+    apiMock.get.mockImplementation(async (path) => {
+      if (path === "/api/ai/models" || path === "/api/ai/qa/history") return [];
+      if (path.startsWith("/api/ai/qa/history/recovery/")) {
+        const clientTurnId = path.split("/").at(-1);
+        return {
+          found: false,
+          clientTurnId,
+          threadId: "cancelled-thread",
+          turnStatus: "cancelled",
+          retryable: false,
+          partialMessage: {
+            id: 9,
+            role: "assistant",
+            content: "已保存的部分回答",
+            createdAt: "2026-08-10T00:00:00Z",
+            metadata: { clientTurnId, incomplete: true, turnStatus: "cancelled" },
+          },
+        };
+      }
+      return [];
+    });
+    apiMock.stream = vi.fn(async (_path, _body, options) => {
+      options.onEvent("token", { delta: "浏览器收到的片段" });
+    });
+    const wrapper = mount(AssistantView, {
+      global: {
+        stubs: {
+          AppShell: { template: "<div><slot /></div>" },
+          InlineNotice: { template: "<div><slot /></div>" },
+        },
+      },
+    });
+    await flushPromises();
+    await wrapper.get("textarea").setValue("需要停止的问题");
+    await wrapper.get("form").trigger("submit.prevent");
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("已保存的部分回答");
+    expect(wrapper.text()).toContain("已停止生成");
+    expect(wrapper.find(".stream-retry-button").exists()).toBe(false);
   });
 
   it.each([

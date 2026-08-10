@@ -24,6 +24,7 @@ import type {
   LlmModelOption,
   AssistantConversationDetail,
   AssistantConversationStoredMessage,
+  AssistantConversationTurnCancellation,
   AssistantConversationTurnRecovery,
   AssistantResponseSnapshot,
   AssistantConversationSummary,
@@ -71,7 +72,11 @@ interface PendingMemoryConflict extends PendingMemoryCandidate {
 interface PendingAssistantRetry {
   userText: string;
   attachments: AgentAttachment[];
+  clientTurnId: string;
+  assistantMessage: AssistantMessage;
 }
+
+type AssistantRecoveryOutcome = "completed" | "retryable" | "cancelled" | "none";
 
 interface StreamRenderState {
   pending: string;
@@ -425,19 +430,34 @@ async function ask(text: string = question.value): Promise<void> {
   await requestAssistant(prompt, attachments);
 }
 
-async function requestAssistant(userText: string, attachments: AgentAttachment[] = []): Promise<void> {
+async function requestAssistant(
+  userText: string,
+  attachments: AgentAttachment[] = [],
+  retry: PendingAssistantRetry | null = null,
+): Promise<void> {
   if (readOnlyConversation.value) return;
   error.value = "";
   interruptedRequest.value = null;
   clearComposerMemoryFeedback();
-  const clientTurnId = makeClientTurnId();
-  messages.value.push({ role: "user", text: userText, attachments });
-  const assistantMessage = reactive<AssistantMessage>({
-    role: "assistant", answer: "", relatedResources: [], citations: [], followUpQuestions: [],
-    toolEvents: [], traceEvents: [], traceExpanded: true, streamStatus: "正在启动 Agent…", isStreaming: true,
-    clientTurnId,
-  });
-  messages.value.push(assistantMessage);
+  const clientTurnId = retry?.clientTurnId || makeClientTurnId();
+  let assistantMessage: AssistantMessage;
+  if (retry) {
+    assistantMessage = retry.assistantMessage;
+    Object.assign(assistantMessage, {
+      clientTurnId,
+      isStreaming: true,
+      streamStatus: "正在恢复本轮 Agent…",
+      traceExpanded: true,
+    });
+  } else {
+    messages.value.push({ role: "user", text: userText, attachments });
+    assistantMessage = reactive<AssistantMessage>({
+      role: "assistant", answer: "", relatedResources: [], citations: [], followUpQuestions: [],
+      toolEvents: [], traceEvents: [], traceExpanded: true, streamStatus: "正在启动 Agent…", isStreaming: true,
+      clientTurnId,
+    });
+    messages.value.push(assistantMessage);
+  }
   const streamState = getStreamRenderState(assistantMessage);
   streamState.cancelled = false;
   chatAutoFollow.value = true;
@@ -473,7 +493,10 @@ async function requestAssistant(userText: string, attachments: AgentAttachment[]
           if (data?.threadId) threadId.value = data.threadId;
           if (eventName === "run.started") {
             assistantMessage.runId = data.runId;
-            assistantMessage.streamStatus = "Agent 已启动";
+            assistantMessage.clientTurnId = data.clientTurnId || clientTurnId;
+            assistantMessage.streamStatus = data.resumed
+              ? `正在恢复第 ${data.attempt || 1} 次执行`
+              : "Agent 已启动";
           } else if (eventName === "phase.started" || eventName === "phase.completed") {
             updateTrace(assistantMessage, `phase:${data.phase || "work"}`, {
               kind: "phase", title: data.label || phaseLabel(data.phase), detail: traceDetail(data),
@@ -510,6 +533,10 @@ async function requestAssistant(userText: string, attachments: AgentAttachment[]
               durationMs: data.durationMs, status: data.status === "ok" ? "completed" : "failed"
             });
             assistantMessage.streamStatus = data.status === "ok" ? "工具结果已返回，正在整理回答" : "部分工具不可用，正在降级处理";
+          } else if (eventName === "response.reset") {
+            resetStreamRendering(assistantMessage);
+            assistantMessage.answer = "";
+            assistantMessage.streamStatus = "正在从持久化检查点恢复回答";
           } else if (eventName === "model.fallback") {
             if (data.reset) {
               resetStreamRendering(assistantMessage);
@@ -545,13 +572,22 @@ async function requestAssistant(userText: string, attachments: AgentAttachment[]
       finishStreamRendering(assistantMessage);
       assistantMessage.isStreaming = false;
       assistantMessage.streamStatus = "已停止生成";
-      if (!assistantMessage.answer) messages.value.pop();
+      assistantMessage.status = "incomplete";
+      assistantMessage.generationStatus = "incomplete";
       return;
     }
     flushStreamDelta(assistantMessage);
     finishStreamRendering(assistantMessage);
-    if (await recoverPersistedAssistantMessage(clientTurnId, assistantMessage, userText)) {
+    const recoveryOutcome = await recoverPersistedAssistantMessage(
+      clientTurnId, assistantMessage, userText,
+    );
+    if (recoveryOutcome === "completed") {
       error.value = "流式连接异常，已从历史记录恢复完整回答。";
+      await loadHistory();
+      return;
+    }
+    if (recoveryOutcome === "cancelled") {
+      error.value = "本轮生成已停止，已保留收到的部分内容。";
       await loadHistory();
       return;
     }
@@ -565,8 +601,15 @@ async function requestAssistant(userText: string, attachments: AgentAttachment[]
       detail: "未找到可恢复的完整回答",
       status: "failed",
     });
-    interruptedRequest.value = { userText, attachments: [...attachments] };
-    error.value = "流式连接已中断，未找到可恢复的完整回答。";
+    interruptedRequest.value = {
+      userText,
+      attachments: [...attachments],
+      clientTurnId,
+      assistantMessage,
+    };
+    error.value = recoveryOutcome === "retryable"
+      ? "流式连接已中断，可使用原轮次继续执行。"
+      : "流式连接已中断，未找到可恢复的完整回答。";
   } finally {
     if (assistantMessage.isStreaming) {
       flushStreamDelta(assistantMessage);
@@ -583,35 +626,52 @@ async function recoverPersistedAssistantMessage(
   clientTurnId: string,
   assistantMessage: AssistantMessage,
   userText: string,
-): Promise<boolean> {
+): Promise<AssistantRecoveryOutcome> {
   for (const delay of [0, 120, 300]) {
     if (delay) await new Promise<void>((resolve) => window.setTimeout(resolve, delay));
     try {
       const recovery = await api.get<AssistantConversationTurnRecovery>(
         `/api/ai/qa/history/recovery/${encodeURIComponent(clientTurnId)}`,
       );
-      if (!recovery.found || !recovery.message || recovery.message.role !== "assistant") continue;
-      if (textValue(recovery.message.metadata?.clientTurnId) !== clientTurnId) continue;
-      Object.assign(assistantMessage, restoreHistoricalAssistantMessage(recovery.message, userText), {
-        clientTurnId,
-        traceExpanded: true,
-        streamStatus: "连接中断，已从历史记录恢复完整回答",
-        isStreaming: false,
-      });
+      if (recovery.clientTurnId && recovery.clientTurnId !== clientTurnId) continue;
       if (recovery.threadId) threadId.value = recovery.threadId;
-      return true;
+      if (recovery.found && recovery.message?.role === "assistant") {
+        const storedTurnId = textValue(recovery.message.metadata?.clientTurnId);
+        if (storedTurnId && storedTurnId !== clientTurnId) continue;
+        Object.assign(assistantMessage, restoreHistoricalAssistantMessage(recovery.message, userText), {
+          clientTurnId,
+          traceExpanded: true,
+          streamStatus: "连接中断，已从历史记录恢复完整回答",
+          isStreaming: false,
+        });
+        return "completed";
+      }
+      if (recovery.partialMessage?.role === "assistant") {
+        const storedTurnId = textValue(recovery.partialMessage.metadata?.clientTurnId);
+        if (storedTurnId && storedTurnId !== clientTurnId) continue;
+        Object.assign(assistantMessage, restoreHistoricalAssistantMessage(recovery.partialMessage, userText), {
+          clientTurnId,
+          traceExpanded: true,
+          streamStatus: recovery.turnStatus === "cancelled" ? "已停止生成" : "未完成，已保留部分回答",
+          isStreaming: false,
+          status: "incomplete",
+          generationStatus: "incomplete",
+        });
+      }
+      if (recovery.turnStatus === "cancelled") return "cancelled";
+      if (recovery.retryable) return "retryable";
     } catch {
       // A transient recovery-read failure is retried before exposing manual retry.
     }
   }
-  return false;
+  return "none";
 }
 
 async function retryInterruptedRequest(): Promise<void> {
   const retry = interruptedRequest.value;
   if (!retry || loading.value || readOnlyConversation.value) return;
   interruptedRequest.value = null;
-  await requestAssistant(retry.userText, [...retry.attachments]);
+  await requestAssistant(retry.userText, [...retry.attachments], retry);
 }
 
 function applyAssistantResult(message: AssistantMessage, result: Partial<AgentQaResponse>, userText = ""): void {
@@ -630,6 +690,7 @@ function applyAssistantResult(message: AssistantMessage, result: Partial<AgentQa
     clarificationOptions: result?.clarificationOptions || [],
     conversationId: result?.conversationId || message.conversationId,
     threadId: result?.threadId || message.threadId,
+    clientTurnId: result?.clientTurnId || message.clientTurnId,
     runId: result?.runId || message.runId,
     fallbackLevel: result?.fallbackLevel ?? null,
     memoryCandidates: Array.isArray(result?.memoryCandidates) ? result.memoryCandidates : [],
@@ -780,6 +841,9 @@ function restoreHistoricalAssistantMessage(
     : normalizeFollowUpQuestions(metadata.followUpQuestions, 4, previousUserText);
   const toolExecutions = snapshot?.toolExecutions || normalizeToolExecutions(metadata.toolExecutions);
   const traceEvents = buildHistoricalTrace(snapshot, toolExecutions);
+  const turnStatus = textValue(metadata.turnStatus);
+  const incomplete = metadata.incomplete === true || turnStatus === "cancelled"
+    || turnStatus === "failed" || turnStatus === "interrupted";
   return {
     role: "assistant",
     answer: normalizeHistoricalAnswer(item.content),
@@ -788,7 +852,8 @@ function restoreHistoricalAssistantMessage(
     relatedResources: snapshot?.relatedResources || normalizeStringList(metadata.relatedResources, 8),
     retrievalStatus: snapshot?.retrievalStatus || textValue(metadata.retrievalStatus),
     retrievalMethods: snapshot?.retrievalMethods || normalizeStringList(metadata.retrievalMethods, 8),
-    generationStatus: snapshot?.generationStatus || textValue(metadata.generationStatus),
+    generationStatus: incomplete
+      ? "incomplete" : snapshot?.generationStatus || textValue(metadata.generationStatus),
     fallbackLevel: snapshot?.fallbackLevel ?? null,
     memoryApplied: snapshot?.memoryApplied || normalizeMemoryApplied(metadata.memoryApplied),
     followUpQuestions: snapshot
@@ -802,7 +867,9 @@ function restoreHistoricalAssistantMessage(
       ? `${snapshot.provider || "LLM"} / ${snapshot.model}` : undefined,
     traceEvents,
     traceExpanded: false,
-    streamStatus: traceEvents.length ? "历史执行摘要" : undefined,
+    streamStatus: turnStatus === "cancelled"
+      ? "已停止生成"
+      : incomplete ? "未完成，已保留部分回答" : traceEvents.length ? "历史执行摘要" : undefined,
     clientTurnId: textValue(metadata.clientTurnId) || undefined,
     isStreaming: false,
   };
@@ -1300,13 +1367,30 @@ function toggleSpeech(message: AssistantMessage, index: number): void {
   window.speechSynthesis.speak(utterance);
 }
 
-function stopGeneration(): void {
+async function stopGeneration(): Promise<void> {
   const streamMessage = [...messages.value].reverse().find(item => item.role === "assistant" && item.isStreaming);
-  if (streamMessage) {
-    finishStreamRendering(streamMessage);
-    streamMessage.isStreaming = false;
-    streamMessage.streamStatus = "已停止生成";
+  if (!streamMessage) return;
+  const clientTurnId = streamMessage.clientTurnId;
+  if (clientTurnId) {
+    try {
+      await api.post<AssistantConversationTurnCancellation>(
+        `/api/ai/qa/turns/${encodeURIComponent(clientTurnId)}/cancel`,
+      );
+    } catch (cancelError) {
+      error.value = cancelError instanceof Error
+        ? `停止请求未确认：${cancelError.message}`
+        : "停止请求未确认，连接将终止";
+    }
   }
+  const streamState = getStreamRenderState(streamMessage);
+  streamState.cancelled = true;
+  flushStreamDelta(streamMessage);
+  finishStreamRendering(streamMessage);
+  streamMessage.isStreaming = false;
+  streamMessage.streamStatus = "已停止生成";
+  streamMessage.status = "incomplete";
+  streamMessage.generationStatus = "incomplete";
+  interruptedRequest.value = null;
   activeAbortController.value?.abort();
 }
 
@@ -1396,7 +1480,7 @@ function clearChat(): void {
               type="button"
               :disabled="loading || readOnlyConversation"
               @click="retryInterruptedRequest"
-            >重新生成</button>
+            >继续本轮</button>
           </InlineNotice>
           <article v-for="(message,index) in messages" :key="index" class="chat-message" :class="message.role">
             <span class="chat-avatar"><UserRound v-if="message.role === 'user'" :size="17" /><Bot v-else :size="17" /></span>
