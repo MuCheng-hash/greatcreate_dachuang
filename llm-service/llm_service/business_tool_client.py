@@ -14,7 +14,7 @@ class BusinessToolError(RuntimeError):
 
 
 class BusinessToolClient:
-    """Calls Java's authenticated, non-Cypher Agent tool endpoints."""
+    """通过一个共享 AsyncClient 调用 Java 的认证工具接口。"""
 
     KNOWLEDGE_RETRIEVE_PATH = "/internal/agent/tools/knowledge-retrieve"
     RELATION_QUERY_PATH = "/internal/agent/tools/relation-query"
@@ -25,58 +25,87 @@ class BusinessToolClient:
         base_url: str,
         service_token: str,
         timeout_seconds: float = 5.0,
-        client: httpx.Client | None = None,
+        client: httpx.AsyncClient | None = None,
     ):
         self.base_url = base_url.strip().rstrip("/")
         self.service_token = service_token.strip()
         self.timeout_seconds = max(0.5, float(timeout_seconds))
-        self._client = client or httpx.Client(timeout=self.timeout_seconds)
+        self._client = client or httpx.AsyncClient(
+            timeout=self.timeout_seconds, trust_env=False
+        )
+        self._owns_client = client is None
 
     @property
     def configured(self) -> bool:
         return bool(self.base_url and self.service_token)
 
-    def query_knowledge(self, payload: Mapping[str, Any]) -> dict[str, Any]:
-        return self._post_retrieval(self.KNOWLEDGE_RETRIEVE_PATH, payload)
+    async def aclose(self) -> None:
+        if self._owns_client:
+            await self._client.aclose()
 
-    def query_graph_relations(self, payload: Mapping[str, Any]) -> dict[str, Any]:
-        return self._post_retrieval(self.RELATION_QUERY_PATH, payload)
+    async def query_knowledge(
+        self, payload: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        return await self._post_retrieval(self.KNOWLEDGE_RETRIEVE_PATH, payload)
 
-    def web_source_domains(self) -> list[str]:
+    async def query_graph_relations(
+        self, payload: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        return await self._post_retrieval(self.RELATION_QUERY_PATH, payload)
+
+    async def web_source_domains(self) -> list[str]:
         if not self.configured:
             raise BusinessToolError("business_tool_unconfigured")
         try:
-            response = self._client.get(
+            response = await self._client.get(
                 f"{self.base_url}{self.WEB_SOURCE_DOMAINS_PATH}",
-                headers={"X-Agent-Service-Token": self.service_token},
+                headers=self._headers(),
             )
             response.raise_for_status()
             envelope = response.json()
             data = envelope.get("data") if isinstance(envelope, dict) else None
             domains = data.get("domains") if isinstance(data, dict) else None
-            return [str(item).strip().lower() for item in domains or [] if str(item).strip()]
+            return [
+                str(item).strip().lower()
+                for item in domains or []
+                if str(item).strip()
+            ]
         except httpx.TimeoutException as exc:
             raise BusinessToolError("business_tool_timeout") from exc
         except (httpx.HTTPError, ValueError) as exc:
             raise BusinessToolError("business_tool_transport_error") from exc
 
-    def _post_retrieval(
+    async def health(self, path: str) -> None:
+        if not self.base_url:
+            raise BusinessToolError("business_tool_unconfigured")
+        try:
+            response = await self._client.get(
+                f"{self.base_url}{path}", headers=self._headers(accept_json=True)
+            )
+            response.raise_for_status()
+            payload = response.json()
+        except httpx.TimeoutException as exc:
+            raise BusinessToolError("business_tool_timeout") from exc
+        except (httpx.HTTPError, ValueError, TypeError) as exc:
+            raise BusinessToolError("business_tool_transport_error") from exc
+        if isinstance(payload, dict) and "code" in payload and payload.get("code") != 200:
+            raise BusinessToolError("business_tool_rejected")
+
+    async def _post_retrieval(
         self, path: str, payload: Mapping[str, Any]
     ) -> dict[str, Any]:
         if not self.configured:
             raise BusinessToolError("business_tool_unconfigured")
-
         try:
-            response = self._client.post(
+            response = await self._client.post(
                 f"{self.base_url}{path}",
-                headers={"X-Agent-Service-Token": self.service_token},
+                headers=self._headers(),
                 json=dict(payload),
             )
         except httpx.TimeoutException as exc:
             raise BusinessToolError("business_tool_timeout") from exc
         except httpx.HTTPError as exc:
             raise BusinessToolError("business_tool_transport_error") from exc
-
         if response.status_code != 200:
             if response.status_code in {401, 403}:
                 reason = "business_tool_unauthorized"
@@ -85,18 +114,21 @@ class BusinessToolClient:
             else:
                 reason = f"business_tool_http_{response.status_code}"
             raise BusinessToolError(reason)
-
         try:
             envelope = response.json()
         except ValueError as exc:
             raise BusinessToolError("business_tool_invalid_json") from exc
-
         if not isinstance(envelope, dict) or envelope.get("code") != 200:
             raise BusinessToolError("business_tool_rejected")
         data = envelope.get("data")
         if not isinstance(data, dict):
             raise BusinessToolError("business_tool_empty_result")
-
         result = dict(data)
         result["source"] = "business-service"
         return result
+
+    def _headers(self, *, accept_json: bool = False) -> dict[str, str]:
+        headers = {"X-Agent-Service-Token": self.service_token}
+        if accept_json:
+            headers["Accept"] = "application/json"
+        return headers

@@ -89,7 +89,7 @@ class AgentRuntime:
         self.prompts = prompts
         self.business_tool_client = business_tool_client
         self.memory_repository = memory_repository or MemoryRepository(
-            settings.database_path,
+            repository.database,
             content_policy=MemoryContentPolicy(
                 settings.agent_memory_content_character_limit
             ),
@@ -111,7 +111,7 @@ class AgentRuntime:
         self._web_domain_cache: tuple[float, list[str]] = (0.0, [])
 
     async def handle(self, request: AgentMessageRequest) -> AgentMessageResponse:
-        thread, window, plan, memory_context = self._prepare_turn(request)
+        thread, window, plan, memory_context = await self._prepare_turn(request)
         result = await self._run_agent_turn(
             request,
             thread,
@@ -121,7 +121,7 @@ class AgentRuntime:
             plan,
             memory_context,
         )
-        self._persist_response(thread, result, request.client_turn_id)
+        await self._persist_response(thread, result, request.client_turn_id)
         return result
 
     async def stream_events(self, request: AgentMessageRequest) -> AsyncIterator[str]:
@@ -137,7 +137,7 @@ class AgentRuntime:
         async def worker() -> None:
             try:
                 publish("phase.started", {"phase": "context", "label": "正在准备会话上下文"})
-                thread, window, plan, memory_context = self._prepare_turn(request)
+                thread, window, plan, memory_context = await self._prepare_turn(request)
                 publish("phase.completed", {
                     "phase": "context",
                     "label": "会话上下文已准备",
@@ -154,7 +154,7 @@ class AgentRuntime:
                     memory_context,
                     publish,
                 )
-                self._persist_response(thread, result, request.client_turn_id)
+                await self._persist_response(thread, result, request.client_turn_id)
                 publish(
                     "final",
                     {
@@ -184,38 +184,42 @@ class AgentRuntime:
             if not task.done():
                 task.cancel()
 
-    def create_thread(self, owner_id: str, scope_type: str, scope_id: str | int) -> ThreadRecord:
-        return self.repository.create_thread(owner_id, scope_type, scope_id)
+    async def create_thread(
+        self, owner_id: str, scope_type: str, scope_id: str | int
+    ) -> ThreadRecord:
+        return await self.repository.create_thread(owner_id, scope_type, scope_id)
 
-    def _prepare_turn(
+    async def _prepare_turn(
         self, request: AgentMessageRequest
     ) -> tuple[ThreadRecord, Any, AgentPlan, MemoryContext]:
-        thread = self._get_or_create_thread(request)
-        self._capture_explicit_memory(request, thread)
-        memory_context = self._memory_context_for(request)
+        thread = await self._get_or_create_thread(request)
+        await self._capture_explicit_memory(request, thread)
+        memory_context = await self._memory_context_for(request)
         metadata = {"intent": request.intent, "taskType": request.task_type}
         if request.client_turn_id:
             metadata["clientTurnId"] = request.client_turn_id
-        self.repository.append_message(
+        await self.repository.append_message(
             thread.thread_id,
             "user",
             request.message,
             metadata,
         )
-        stored = self.repository.list_messages(thread.thread_id)
+        stored = await self.repository.list_messages(thread.thread_id)
         window = self.context_manager.build(stored, thread.summary)
         if window.compacted:
-            self.repository.update_summary(thread.thread_id, window.summary)
+            await self.repository.update_summary(thread.thread_id, window.summary)
         return thread, window, self.planner.plan(request.message), memory_context
 
-    def _get_or_create_thread(self, request: AgentMessageRequest) -> ThreadRecord:
+    async def _get_or_create_thread(self, request: AgentMessageRequest) -> ThreadRecord:
         if request.thread_id:
-            return self.repository.require_thread(
+            return await self.repository.require_thread(
                 request.thread_id, request.owner_id, request.scope_type, request.scope_id
             )
-        return self.create_thread(request.owner_id, request.scope_type, request.scope_id)
+        return await self.create_thread(
+            request.owner_id, request.scope_type, request.scope_id
+        )
 
-    def _memory_context_for(self, request: AgentMessageRequest) -> MemoryContext:
+    async def _memory_context_for(self, request: AgentMessageRequest) -> MemoryContext:
         if not self.settings.agent_memory_enabled:
             return MemoryContext.empty()
         if request.task_type == "RESOURCE_DISCOVERY":
@@ -225,7 +229,7 @@ class AgentRuntime:
             query_parts.append(
                 json.dumps(request.task_payload, ensure_ascii=False, default=str)
             )
-        return self.memory_repository.recall(
+        return await self.memory_repository.recall(
             request.owner_id,
             request.scope_type,
             request.scope_id,
@@ -234,14 +238,14 @@ class AgentRuntime:
             character_limit=self.settings.agent_memory_context_character_limit,
         )
 
-    def _capture_explicit_memory(
+    async def _capture_explicit_memory(
         self, request: AgentMessageRequest, thread: ThreadRecord
     ) -> MemoryRecord | None:
         if not self.settings.agent_memory_enabled:
             return None
         if request.task_type == "RESOURCE_DISCOVERY":
             return None
-        setting = self.memory_repository.get_setting(
+        setting = await self.memory_repository.get_setting(
             request.owner_id, request.scope_type, request.scope_id
         )
         if not setting.enabled:
@@ -249,7 +253,7 @@ class AgentRuntime:
         draft = self.explicit_memory_extractor.extract(request.message)
         if draft is None:
             return None
-        return self.memory_repository.create_memory(
+        return await self.memory_repository.create_memory(
             request.owner_id,
             request.scope_type,
             request.scope_id,
@@ -274,7 +278,7 @@ class AgentRuntime:
             return [(config, self._agent)]
         return [(config, None) for config in self.model.model_configs_for(model_id)]
 
-    def _create_agent_for(self, config: ModelConfig) -> Any:
+    async def _create_agent_for(self, config: ModelConfig) -> Any:
         if not config.configured():
             raise RuntimeError("model_unavailable")
         key = (config.model, config.fallback_level)
@@ -282,7 +286,7 @@ class AgentRuntime:
             self._agents[key] = create_agent(
                 self.model.build_model(config),
                 tools=AGENT_TOOLS,
-                system_prompt=self._load_prompt(),
+                system_prompt=await self._load_prompt(),
             )
         return self._agents[key]
 
@@ -392,7 +396,7 @@ class AgentRuntime:
             )
             token = bind_tool_runtime(runtime)
             try:
-                agent = injected_agent or self._create_agent_for(config)
+                agent = injected_agent or await self._create_agent_for(config)
                 result = await self._invoke_agent(
                     request,
                     request.context,
@@ -422,7 +426,7 @@ class AgentRuntime:
                 )
                 next_config = model_attempts[attempt_index + 1][0] if attempt_index + 1 < len(model_attempts) else None
                 if next_config is not None:
-                    self.alerts.fallback(
+                    await self.alerts.fallback(
                         LlmTraceContext(
                             feature="stateful-agent",
                             user_id=request.owner_id,
@@ -436,7 +440,7 @@ class AgentRuntime:
             finally:
                 reset_tool_runtime(token)
 
-        self.alerts.exhausted(
+        await self.alerts.exhausted(
             LlmTraceContext(
                 feature="stateful-agent",
                 user_id=request.owner_id,
@@ -532,7 +536,7 @@ class AgentRuntime:
                 },
             )
             try:
-                agent = injected_agent or self._create_agent_for(config)
+                agent = injected_agent or await self._create_agent_for(config)
                 emit("phase.completed", {
                     "phase": "reasoning",
                     "label": "分析完成，开始执行",
@@ -589,7 +593,7 @@ class AgentRuntime:
                 reset_tool_runtime(token)
 
         if not model_attempts:
-            self.alerts.exhausted(
+            await self.alerts.exhausted(
                 LlmTraceContext(
                     feature="stateful-agent-stream",
                     user_id=request.owner_id,
@@ -634,9 +638,15 @@ class AgentRuntime:
             if "retrieve_knowledge" in plan.recommended_tools:
                 result = await self._retrieve_with_augmentation(request, thread)
                 _merge_retrieval(runtime, result)
-                runtime.run("retrieve_knowledge", {"query": request.message, "limit": 5}, lambda: result)
+                await runtime.run(
+                    "retrieve_knowledge",
+                    {"query": request.message, "limit": 5},
+                    lambda: result,
+                )
             if "query_graph_relations" in plan.recommended_tools:
-                query_graph_relations.invoke({"query": request.message, "limit": 5})
+                await query_graph_relations.ainvoke(
+                    {"query": request.message, "limit": 5}
+                )
         finally:
             reset_tool_runtime(token)
         return list(runtime.executions), list(runtime.degraded_reasons)
@@ -649,7 +659,7 @@ class AgentRuntime:
         rewrite = await self._controlled_query_rewrite(request, thread)
         payload = self._retrieval_payload(request, rewrite)
         try:
-            first = await asyncio.to_thread(self.business_tool_client.query_knowledge, payload)
+            first = await self.business_tool_client.query_knowledge(payload)
         except Exception as exc:
             return {"retrievalStatus": "degraded", "degradedReason": type(exc).__name__.lower()}
         trace = first.setdefault("retrievalTrace", {}) if isinstance(first, dict) else {}
@@ -667,7 +677,7 @@ class AgentRuntime:
         augmented["hydeQuery"] = hyde or None
         augmented["webEvidence"] = web
         try:
-            final = await asyncio.to_thread(self.business_tool_client.query_knowledge, augmented)
+            final = await self.business_tool_client.query_knowledge(augmented)
         except Exception:
             trace["augmentationReason"] = f"{trace.get('augmentationReason') or 'low_recall'}:augmentation_failed"
             return first
@@ -742,7 +752,7 @@ class AgentRuntime:
         if self.business_tool_client is None:
             return []
         try:
-            domains = await asyncio.to_thread(self.business_tool_client.web_source_domains)
+            domains = await self.business_tool_client.web_source_domains()
         except Exception:
             return []
         self._web_domain_cache = (now, domains)
@@ -792,7 +802,7 @@ class AgentRuntime:
         memory_context: MemoryContext,
     ) -> AgentMessageResponse:
         prompt_key, validator = self._structured_task_config(request)
-        selection, run_id = self._start_structured_prompt(
+        selection, run_id = await self._start_structured_prompt(
             prompt_key, request, thread, memory_context
         )
         started = asyncio.get_running_loop().time()
@@ -814,7 +824,7 @@ class AgentRuntime:
             status = "degraded"
             error_message = "model_unavailable_or_invalid_response"
         else:
-            memory_candidates = self._persist_inferred_candidates(
+            memory_candidates = await self._persist_inferred_candidates(
                 request,
                 thread.thread_id,
                 generated.get("memoryCandidates")
@@ -831,7 +841,9 @@ class AgentRuntime:
             result["promptExperiment"] = selection.experiment_key
             result["promptVariant"] = selection.variant
         elapsed = round((asyncio.get_running_loop().time() - started) * 1000)
-        self._finish_structured_prompt(run_id, status, elapsed, result, error_message)
+        await self._finish_structured_prompt(
+            run_id, status, elapsed, result, error_message
+        )
         return self._structured_response(
             request,
             thread.thread_id,
@@ -852,7 +864,7 @@ class AgentRuntime:
         emit: EventSink,
     ) -> AgentMessageResponse:
         prompt_key, validator = self._structured_task_config(request)
-        selection, prompt_run_id = self._start_structured_prompt(
+        selection, prompt_run_id = await self._start_structured_prompt(
             prompt_key, request, thread, memory_context
         )
         primary = self._primary_model_config(request.model_id)
@@ -905,7 +917,7 @@ class AgentRuntime:
             result = self._structured_fallback(request)
             status = "degraded"
         else:
-            memory_candidates = self._persist_inferred_candidates(
+            memory_candidates = await self._persist_inferred_candidates(
                 request,
                 thread.thread_id,
                 generated.get("memoryCandidates")
@@ -925,7 +937,9 @@ class AgentRuntime:
             if readable_text:
                 await self._emit_answer_chunks(readable_text, emit)
         elapsed = round((asyncio.get_running_loop().time() - started) * 1000)
-        self._finish_structured_prompt(prompt_run_id, status, elapsed, result, error_message)
+        await self._finish_structured_prompt(
+            prompt_run_id, status, elapsed, result, error_message
+        )
         return self._structured_response(
             request,
             thread.thread_id,
@@ -944,7 +958,7 @@ class AgentRuntime:
             return "resource-discovery", resource_discovery_valid
         raise ValueError(f"unsupported taskType: {request.task_type}")
 
-    def _start_structured_prompt(
+    async def _start_structured_prompt(
         self,
         prompt_key: str,
         request: AgentMessageRequest,
@@ -954,21 +968,21 @@ class AgentRuntime:
         if self.prompts is None:
             raise RuntimeError("prompt_manager_unavailable")
         subject_key = f"{request.scope_type}:{request.scope_id}"
-        selection = self.prompts.resolve(
+        selection = await self.prompts.resolve(
             prompt_key,
             subject_key,
             task_context(request, memory_context.prompt),
         )
-        run_id = self.prompts.start_run(
+        run_id = await self.prompts.start_run(
             selection, subject_key, self._primary_model_config(request.model_id).model, len(selection.content)
         )
         return selection, run_id
 
-    def _finish_structured_prompt(
+    async def _finish_structured_prompt(
         self, run_id: str, status: str, elapsed: int, result: dict[str, Any], error_message: str
     ) -> None:
         if self.prompts is not None:
-            self.prompts.finish_run(
+            await self.prompts.finish_run(
                 run_id, status, elapsed, len(json.dumps(result, ensure_ascii=False)), error_message
             )
 
@@ -1041,7 +1055,7 @@ class AgentRuntime:
             ]
         return [item for item in values if item is not None]
 
-    def _persist_response(
+    async def _persist_response(
         self,
         thread: ThreadRecord,
         result: AgentMessageResponse,
@@ -1068,7 +1082,7 @@ class AgentRuntime:
         }
         if client_turn_id:
             metadata["clientTurnId"] = client_turn_id
-        self.repository.append_message(
+        await self.repository.append_message(
             thread.thread_id,
             "assistant",
             result.answer,
@@ -1200,7 +1214,7 @@ class AgentRuntime:
                 request, thread, model_config or self._primary_model_config(), plan
             ),
         )
-        return self._response_from_model_result(
+        return await self._response_from_model_result(
             result,
             trusted,
             thread.thread_id,
@@ -1270,7 +1284,7 @@ class AgentRuntime:
             model_buffer = self._last_ai_message_text(model_messages)
 
         parse_messages = [AIMessage(content=model_buffer)] if model_buffer else model_messages
-        response = self._response_from_model_result(
+        response = await self._response_from_model_result(
             {"messages": parse_messages}, trusted, thread.thread_id, compacted,
             runtime.executions, runtime.degraded_reasons, request.message,
             request.grade, request.theme, memory_context, request,
@@ -1369,7 +1383,7 @@ class AgentRuntime:
             f"{serialized[:6000]}"
         )
 
-    def _response_from_model_result(
+    async def _response_from_model_result(
         self,
         result: dict[str, Any],
         trusted: TrustedContext,
@@ -1385,7 +1399,7 @@ class AgentRuntime:
     ) -> AgentMessageResponse:
         parsed = self._parse_model_output(result)
         memory_candidates = (
-            self._persist_inferred_candidates(
+            await self._persist_inferred_candidates(
                 request, thread_id, parsed.memory_candidates
             )
             if request is not None
@@ -1431,7 +1445,7 @@ class AgentRuntime:
         memory_ids = [item.id for item in memory_context.items]
         return MemoryApplied(count=len(memory_ids), memoryIds=memory_ids)
 
-    def _persist_inferred_candidates(
+    async def _persist_inferred_candidates(
         self,
         request: AgentMessageRequest,
         thread_id: str,
@@ -1445,7 +1459,7 @@ class AgentRuntime:
             return []
         if self.explicit_memory_extractor.extract(request.message) is not None:
             return []
-        setting = self.memory_repository.get_setting(
+        setting = await self.memory_repository.get_setting(
             request.owner_id, request.scope_type, request.scope_id
         )
         if not setting.enabled:
@@ -1461,7 +1475,7 @@ class AgentRuntime:
             if not isinstance(payload, dict):
                 continue
             try:
-                record = self.memory_repository.create_memory(
+                record = await self.memory_repository.create_memory(
                     request.owner_id,
                     request.scope_type,
                     request.scope_id,
@@ -1628,10 +1642,10 @@ class AgentRuntime:
             # the fallback answer appear as one large response.
             await asyncio.sleep(0)
 
-    def _load_prompt(self) -> str:
+    async def _load_prompt(self) -> str:
         if self.prompts is not None:
             try:
-                return self.prompts.active_content("agent")
+                return await self.prompts.active_content("agent")
             except LookupError:
                 pass
         if not self.settings.prompt_path.is_file():
