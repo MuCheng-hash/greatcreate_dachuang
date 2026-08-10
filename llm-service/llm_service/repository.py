@@ -36,6 +36,7 @@ class ThreadRecord:
     scope_id: str
     status: str
     summary: str
+    summary_through_message_id: int
     created_at: str
     updated_at: str
 
@@ -67,6 +68,7 @@ class ConversationRepository:
             scope_id=str(scope_id),
             status="active",
             summary="",
+            summary_through_message_id=0,
             created_at=_iso(now),
             updated_at=_iso(now),
         )
@@ -251,6 +253,60 @@ class ConversationRepository:
             for row in rows
         ]
 
+    async def list_context_messages(self, thread_id: str) -> list[dict[str, Any]]:
+        """只返回可进入后续模型上下文的正式历史。"""
+        async with self.database.connection() as connection:
+            rows = await (
+                await connection.execute(
+                    """
+                    SELECT m.id, m.role, m.content, m.metadata_json, m.created_at
+                    FROM agent_message m
+                    LEFT JOIN agent_turn tr ON tr.turn_id = m.turn_id
+                    WHERE m.thread_id = %s
+                      AND (m.turn_id IS NULL OR tr.status = 'completed')
+                    ORDER BY m.id
+                    """,
+                    (thread_id,),
+                )
+            ).fetchall()
+        return [
+            {
+                "id": int(row["id"]),
+                "role": str(row["role"]),
+                "content": str(row["content"]),
+                "metadata": dict(row["metadata_json"] or {}),
+                "created_at": _iso(row["created_at"]),
+            }
+            for row in rows
+        ]
+
+    async def list_messages_for_turn(
+        self, turn_id: str
+    ) -> list[dict[str, Any]]:
+        async with self.database.connection() as connection:
+            rows = await (
+                await connection.execute(
+                    """
+                    SELECT id, thread_id, role, content, metadata_json, created_at
+                    FROM agent_message
+                    WHERE turn_id = %s
+                    ORDER BY id
+                    """,
+                    (turn_id,),
+                )
+            ).fetchall()
+        return [
+            {
+                "id": int(row["id"]),
+                "thread_id": str(row["thread_id"]),
+                "role": str(row["role"]),
+                "content": str(row["content"]),
+                "metadata": dict(row["metadata_json"] or {}),
+                "created_at": _iso(row["created_at"]),
+            }
+            for row in rows
+        ]
+
     async def find_assistant_message_by_client_turn_id(
         self,
         client_turn_id: str,
@@ -270,6 +326,11 @@ class ConversationRepository:
                       AND t.scope_type = %s
                       AND t.scope_id = %s
                       AND m.role = 'assistant'
+                      AND (m.turn_id IS NULL OR EXISTS (
+                          SELECT 1 FROM agent_turn completed_turn
+                          WHERE completed_turn.turn_id = m.turn_id
+                            AND completed_turn.status = 'completed'
+                      ))
                       AND m.metadata_json ->> 'clientTurnId' = %s
                     ORDER BY m.id DESC
                     LIMIT 1
@@ -288,12 +349,54 @@ class ConversationRepository:
             "created_at": _iso(row["created_at"]),
         }
 
-    async def update_summary(self, thread_id: str, summary: str) -> None:
+    async def update_summary(
+        self,
+        thread_id: str,
+        summary: str,
+        *,
+        expected_cursor: int = 0,
+        new_cursor: int = 0,
+    ) -> bool:
         async with self.database.transaction() as connection:
-            await connection.execute(
-                "UPDATE agent_thread SET summary = %s, updated_at = %s WHERE thread_id = %s",
-                (summary, utc_now(), thread_id),
-            )
+            row = await (
+                await connection.execute(
+                    """
+                    UPDATE agent_thread
+                    SET summary = %s,
+                        summary_through_message_id = %s,
+                        updated_at = %s
+                    WHERE thread_id = %s
+                      AND summary_through_message_id = %s
+                      AND %s >= summary_through_message_id
+                    RETURNING thread_id
+                    """,
+                    (
+                        summary,
+                        new_cursor,
+                        utc_now(),
+                        thread_id,
+                        expected_cursor,
+                        new_cursor,
+                    ),
+                )
+            ).fetchone()
+        return row is not None
+
+    async def find_tool_audit(
+        self, turn_id: str, tool_call_id: str
+    ) -> dict[str, Any] | None:
+        async with self.database.connection() as connection:
+            row = await (
+                await connection.execute(
+                    """
+                    SELECT tool_name, status, duration_ms, result_preview
+                    FROM agent_tool_audit
+                    WHERE turn_id = %s AND tool_call_id = %s
+                    """,
+                    (turn_id, tool_call_id),
+                )
+            ).fetchone()
+        return dict(row) if row is not None else None
 
     async def add_tool_audit(
         self,
@@ -303,14 +406,27 @@ class ConversationRepository:
         status: str,
         duration_ms: int,
         result_preview: str,
-    ) -> None:
+        *,
+        turn_id: str | None = None,
+        tool_call_id: str | None = None,
+    ) -> dict[str, Any]:
         async with self.database.transaction() as connection:
-            await connection.execute(
+            row = await (
+                await connection.execute(
                 """
                 INSERT INTO agent_tool_audit(
                     thread_id, tool_name, arguments_json, status,
-                    duration_ms, result_preview, created_at
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    duration_ms, result_preview, created_at, turn_id, tool_call_id
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (turn_id, tool_call_id)
+                    WHERE turn_id IS NOT NULL AND tool_call_id IS NOT NULL
+                DO UPDATE SET
+                    arguments_json = EXCLUDED.arguments_json,
+                    status = EXCLUDED.status,
+                    duration_ms = EXCLUDED.duration_ms,
+                    result_preview = EXCLUDED.result_preview
+                WHERE agent_tool_audit.status = 'failed'
+                RETURNING tool_name, status, duration_ms, result_preview
                 """,
                 (
                     thread_id,
@@ -318,10 +434,30 @@ class ConversationRepository:
                     Jsonb(arguments),
                     status,
                     duration_ms,
-                    result_preview[:1000],
+                    result_preview,
                     utc_now(),
+                    turn_id,
+                    tool_call_id,
                 ),
-            )
+                )
+            ).fetchone()
+            if row is None and turn_id and tool_call_id:
+                row = await (
+                    await connection.execute(
+                        """
+                        SELECT tool_name, status, duration_ms, result_preview
+                        FROM agent_tool_audit
+                        WHERE turn_id = %s AND tool_call_id = %s
+                        """,
+                        (turn_id, tool_call_id),
+                    )
+                ).fetchone()
+        return dict(row or {
+            "tool_name": tool_name,
+            "status": status,
+            "duration_ms": duration_ms,
+            "result_preview": result_preview,
+        })
 
     async def list_tool_audits(
         self,
@@ -340,8 +476,8 @@ class ConversationRepository:
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         parameters.append(max(1, min(int(limit), 100)))
         query = f"""
-            SELECT id, thread_id, tool_name, arguments_json, status,
-                   duration_ms, result_preview, created_at
+            SELECT id, thread_id, turn_id, tool_call_id, tool_name,
+                   arguments_json, status, duration_ms, result_preview, created_at
             FROM agent_tool_audit
             {where}
             ORDER BY id DESC
@@ -353,6 +489,8 @@ class ConversationRepository:
             {
                 "id": int(row["id"]),
                 "threadId": str(row["thread_id"]),
+                "turnId": str(row["turn_id"]) if row.get("turn_id") else None,
+                "toolCallId": str(row["tool_call_id"]) if row.get("tool_call_id") else None,
                 "toolName": str(row["tool_name"]),
                 "arguments": dict(row["arguments_json"] or {}),
                 "status": str(row["status"]),
@@ -450,6 +588,9 @@ class ConversationRepository:
             scope_id=str(row["scope_id"]),
             status=str(row["status"]),
             summary=str(row["summary"]),
+            summary_through_message_id=int(
+                row.get("summary_through_message_id") or 0
+            ),
             created_at=_iso(row["created_at"]),
             updated_at=_iso(row["updated_at"]),
         )

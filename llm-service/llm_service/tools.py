@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import hashlib
 import json
 import time
 from contextvars import ContextVar, Token
@@ -32,12 +33,15 @@ class ToolRuntimeContext:
     trusted_context: TrustedContext
     repository: ConversationRepository
     output_character_limit: int
+    turn_id: str | None = None
+    call_namespace: str = "graph"
     executions: list[ToolExecution] = field(default_factory=list)
     event_sink: Callable[[str, dict[str, Any]], None] | None = None
     business_tool_client: BusinessToolClient | None = None
     grade: str | None = None
     theme: str | None = None
     degraded_reasons: list[str] = field(default_factory=list)
+    _call_counts: dict[str, int] = field(default_factory=dict)
 
     def _emit(self, event_name: str, data: dict[str, Any]) -> None:
         if self.event_sink is None:
@@ -55,10 +59,34 @@ class ToolRuntimeContext:
     ) -> str:
         started = time.perf_counter()
         safe_arguments = _sanitize(arguments)
+        tool_call_id = self._tool_call_id(name, safe_arguments)
         self._emit(
             "tool.started",
             {"toolName": name, "name": name, "arguments": safe_arguments},
         )
+        if self.turn_id and tool_call_id:
+            existing = await self.repository.find_tool_audit(
+                self.turn_id, tool_call_id
+            )
+            if existing is not None and str(existing["status"]) != "failed":
+                status = str(existing["status"])
+                duration_ms = int(existing["duration_ms"])
+                bounded = str(existing["result_preview"])
+                self.executions.append(
+                    ToolExecution(name=name, status=status, durationMs=duration_ms)
+                )
+                self._emit(
+                    "tool.completed",
+                    {
+                        "toolName": name,
+                        "name": name,
+                        "status": "ok" if status == "completed" else status,
+                        "durationMs": duration_ms,
+                        "resumed": True,
+                        "outputSummary": bounded[:160] or "未返回结果",
+                    },
+                )
+                return bounded
         status = "completed"
         result: Any = None
         try:
@@ -75,14 +103,19 @@ class ToolRuntimeContext:
             )
         duration_ms = int((time.perf_counter() - started) * 1000)
         bounded = output[: self.output_character_limit]
-        await self.repository.add_tool_audit(
+        audit = await self.repository.add_tool_audit(
             self.thread_id,
             name,
             safe_arguments,
             status,
             duration_ms,
             bounded,
+            turn_id=self.turn_id,
+            tool_call_id=tool_call_id,
         )
+        status = str(audit["status"])
+        duration_ms = int(audit["duration_ms"])
+        bounded = str(audit["result_preview"])
         self.executions.append(
             ToolExecution(name=name, status=status, durationMs=duration_ms)
         )
@@ -99,6 +132,25 @@ class ToolRuntimeContext:
             },
         )
         return bounded
+
+    def _tool_call_id(
+        self, name: str, arguments: dict[str, Any]
+    ) -> str | None:
+        if not self.turn_id:
+            return None
+        canonical = json.dumps(
+            arguments,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        identity = f"{self.call_namespace}:{name}:{canonical}"
+        sequence = self._call_counts.get(identity, 0)
+        self._call_counts[identity] = sequence + 1
+        digest = hashlib.sha256(
+            f"{self.turn_id}:{identity}:{sequence}".encode("utf-8")
+        ).hexdigest()
+        return f"tool-{digest}"
 
 
 def _sanitize(arguments: dict[str, Any]) -> dict[str, Any]:

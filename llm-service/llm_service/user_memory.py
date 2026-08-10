@@ -298,6 +298,7 @@ class MemoryRepository:
         field_key: str | None = None,
         status: str = "active",
         source_thread_id: str | None = None,
+        source_turn_id: str | None = None,
         confidence: float | None = None,
         replace_conflicts: bool = False,
     ) -> MemoryRecord:
@@ -311,6 +312,7 @@ class MemoryRepository:
         normalized_field = self._normalize_field_key(field_key)
         normalized_confidence = self._normalize_confidence(confidence)
         normalized_thread = self._normalize_optional(source_thread_id, 128)
+        normalized_turn = self._normalize_optional(source_turn_id, 64)
         now_dt = self._now()
         expires_at, deleted_at, purge_after = self._lifecycle(
             normalized_type, normalized_status, now_dt
@@ -366,10 +368,10 @@ class MemoryRepository:
                     INSERT INTO agent_memory(
                         id, owner_id, scope_type, scope_id, memory_type,
                         field_key, content, status, source, source_thread_id,
-                        confidence, expires_at, deleted_at, purge_after,
+                        source_turn_id, confidence, expires_at, deleted_at, purge_after,
                         created_at, updated_at
                     ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s,
-                              %s, %s, %s, %s, %s, %s, %s, %s)
+                              %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     RETURNING *
                     """,
                     (
@@ -383,6 +385,7 @@ class MemoryRepository:
                         normalized_status,
                         normalized_source,
                         normalized_thread,
+                        normalized_turn,
                         normalized_confidence,
                         expires_at,
                         deleted_at,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import uuid
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -147,6 +148,7 @@ def message_payload(**overrides):
         "scopeType": "SCHOOL",
         "scopeId": 1,
         "message": "附近有哪些红色资源？",
+        "clientTurnId": str(uuid.uuid4()),
         "context": {
             "school": {"schoolName": "里庄小学"},
             "resources": [{"resource": {"resourceName": "红色纪念馆"}}],
@@ -263,6 +265,7 @@ def test_container_can_be_explicitly_injected_and_required_health_failure_is_503
         readiness = client.get("/health/ready")
         assert readiness.status_code == 503
         payload = readiness.json()
+        assert payload["dependencies"]["checkpointer"]["status"] == "up"
         assert payload["dependencies"]["businessService"]["required"] is True
         assert payload["dependencies"]["businessService"]["status"] == "down"
         assert "test-key" not in str(payload)
@@ -404,6 +407,21 @@ def test_new_thread_and_multiturn_persistence(tmp_path: Path):
     assert snapshot["generationStatus"] == data["generationStatus"]
 
 
+def test_client_turn_id_is_required_by_fastapi(tmp_path: Path):
+    payload = message_payload()
+    payload.pop("clientTurnId")
+
+    with build_client(settings_for(tmp_path)) as client:
+        response = client.post("/agent/messages", json=payload)
+
+    assert response.status_code == 422
+    assert any(
+        item["loc"][-1] == "clientTurnId"
+        and item["type"] == "missing"
+        for item in response.json()["detail"]
+    )
+
+
 def test_client_turn_id_persists_and_recovers_only_within_owner_scope(tmp_path: Path):
     client_turn_id = "turn-recovery-1"
     with build_client(settings_for(tmp_path)) as client:
@@ -434,6 +452,14 @@ def test_client_turn_id_persists_and_recovers_only_within_owner_scope(tmp_path: 
             f"/agent/messages/recovery/{client_turn_id}",
             params={"ownerId": "school-user:1", "scopeType": "SCHOOL", "scopeId": 2},
         )
+        completed_cancel = client.post(
+            f"/agent/turns/{client_turn_id}/cancel",
+            params={"ownerId": "school-user:1", "scopeType": "SCHOOL", "scopeId": 1},
+        )
+        cross_owner_cancel = client.post(
+            f"/agent/turns/{client_turn_id}/cancel",
+            params={"ownerId": "school-user:2", "scopeType": "SCHOOL", "scopeId": 1},
+        )
 
     assert detail.status_code == 200
     stored_messages = detail.json()["messages"]
@@ -444,9 +470,25 @@ def test_client_turn_id_persists_and_recovers_only_within_owner_scope(tmp_path: 
     assert recovered.json()["threadId"] == thread_id
     assert recovered.json()["message"]["role"] == "assistant"
     assert recovered.json()["message"]["metadata"]["clientTurnId"] == client_turn_id
-    assert missing.json() == {"found": False, "threadId": None, "message": None}
+    assert missing.json() == {
+        "found": False,
+        "clientTurnId": "turn-missing",
+        "threadId": None,
+        "message": None,
+        "turnStatus": None,
+        "retryable": False,
+        "partialMessage": None,
+    }
     assert cross_owner.json()["found"] is False
     assert cross_scope.json()["found"] is False
+    assert completed_cancel.status_code == 200
+    assert completed_cancel.json() == {
+        "clientTurnId": client_turn_id,
+        "threadId": thread_id,
+        "turnStatus": "completed",
+        "cancellationRequested": False,
+    }
+    assert cross_owner_cancel.status_code == 404
 
 
 def test_unknown_greeting_creates_and_persists_thread(tmp_path: Path):
@@ -715,7 +757,7 @@ def test_stateful_runtime_uses_configured_fallback_model(tmp_path: Path):
         "qwen3:8b": FakeAgent('{"answer":"Ollama回答","citationIds":[]}'),
     }[config.model]
 
-    async def create_agent_for(config):
+    async def create_agent_for(config, _checkpoint_namespace):
         return agent_for(config)
 
     runtime._create_agent_for = create_agent_for
@@ -757,7 +799,7 @@ def test_stateful_stream_reports_primary_failure_and_fallback_success(tmp_path: 
         "qwen3:8b": FakeAgent('{"answer":"Ollama流式回答","citationIds":[]}'),
     }[config.model]
 
-    async def create_agent_for(config):
+    async def create_agent_for(config, _checkpoint_namespace):
         return agent_for(config)
 
     runtime._create_agent_for = create_agent_for
@@ -799,7 +841,7 @@ def test_stateful_stream_deduplicates_cumulative_langgraph_messages_before_final
             ):
                 yield {"data": (AIMessageChunk(content=content), {"langgraph_node": "agent"})}
 
-    async def create_agent_for(_config):
+    async def create_agent_for(_config, _checkpoint_namespace):
         return StreamingAgent()
 
     runtime._create_agent_for = create_agent_for

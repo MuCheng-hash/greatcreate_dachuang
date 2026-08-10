@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from fastapi import Request
 
 from .business_tool_client import BusinessToolClient
+from .checkpointing import CheckpointManager
 from .database import Database, SchemaMigrator
 from .health import HealthService
 from .model_gateway import ModelGateway
@@ -13,6 +14,7 @@ from .prompt_manager import PromptManager
 from .repository import ConversationRepository
 from .runtime import AgentRuntime
 from .settings import Settings
+from .turns import AgentTurnRepository
 from .user_memory import MemoryContentPolicy, MemoryRepository
 
 
@@ -22,6 +24,8 @@ class AppContainer:
     database: Database
     migrator: SchemaMigrator
     repository: ConversationRepository
+    turn_repository: AgentTurnRepository
+    checkpoints: CheckpointManager
     memory_repository: MemoryRepository
     observability: LlmObservability
     alerts: FallbackAlertManager
@@ -40,6 +44,8 @@ def build_container(
     database = Database(settings)
     migrator = SchemaMigrator(database, settings.migration_dsn)
     repository = ConversationRepository(database)
+    turn_repository = AgentTurnRepository(database)
+    checkpoints = CheckpointManager(database)
     memory_repository = MemoryRepository(
         database,
         content_policy=MemoryContentPolicy(
@@ -71,6 +77,8 @@ def build_container(
         prompts,
         business_tool_client,
         memory_repository,
+        turn_repository,
+        checkpoints,
     )
     health = HealthService(
         settings,
@@ -78,12 +86,15 @@ def build_container(
         migrator,
         prompts,
         business_tool_client,
+        checkpoints,
     )
     return AppContainer(
         settings=settings,
         database=database,
         migrator=migrator,
         repository=repository,
+        turn_repository=turn_repository,
+        checkpoints=checkpoints,
         memory_repository=memory_repository,
         observability=observability,
         alerts=alerts,

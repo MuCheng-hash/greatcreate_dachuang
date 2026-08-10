@@ -6,6 +6,7 @@ from dataclasses import asdict, dataclass
 from typing import Any
 
 from .business_tool_client import BusinessToolClient
+from .checkpointing import CheckpointManager
 from .database import Database, SchemaMigrator
 from .prompt_manager import PromptManager
 from .settings import Settings
@@ -32,12 +33,14 @@ class HealthService:
         migrator: SchemaMigrator,
         prompts: PromptManager,
         business_tool_client: BusinessToolClient,
+        checkpoints: CheckpointManager,
     ):
         self.settings = settings
         self.database = database
         self.migrator = migrator
         self.prompts = prompts
         self.business_tool_client = business_tool_client
+        self.checkpoints = checkpoints
 
     def live(self) -> dict[str, Any]:
         return {
@@ -47,9 +50,10 @@ class HealthService:
         }
 
     async def ready(self) -> tuple[bool, dict[str, Any]]:
-        database, schema, prompt, business = await asyncio.gather(
+        database, schema, checkpointer, prompt, business = await asyncio.gather(
             self._check_database(),
             self._check_schema(),
+            self._check_checkpointer(),
             self._check_prompt(),
             self._check_business_service(),
         )
@@ -57,13 +61,21 @@ class HealthService:
         dependencies = {
             "database": database.as_dict(),
             "schema": schema.as_dict(),
+            "checkpointer": checkpointer.as_dict(),
             "prompt": prompt.as_dict(),
             "businessService": business.as_dict(),
             "modelChain": model.as_dict(),
         }
         is_ready = all(
             dependency.status == "up"
-            for dependency in (database, schema, prompt, business, model)
+            for dependency in (
+                database,
+                schema,
+                checkpointer,
+                prompt,
+                business,
+                model,
+            )
             if dependency.required
         )
         return is_ready, {
@@ -103,6 +115,19 @@ class HealthService:
             )
             return self._result(
                 "up", True, started, f"active version {selection.version} readable"
+            )
+        except Exception as exc:
+            return self._result("down", True, started, self._safe_error(exc))
+
+    async def _check_checkpointer(self) -> DependencyHealth:
+        started = time.perf_counter()
+        try:
+            version = await self.checkpoints.validate()
+            return self._result(
+                "up",
+                True,
+                started,
+                f"checkpointer schema version {version} is current",
             )
         except Exception as exc:
             return self._result("down", True, started, self._safe_error(exc))

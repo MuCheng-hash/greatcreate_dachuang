@@ -1,3 +1,4 @@
+import uuid
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -93,6 +94,7 @@ def test_teaching_plan_stream_and_prompt_admin_api(tmp_path: Path):
                 "ownerId": "account:1",
                 "scopeType": "SCHOOL",
                 "scopeId": 1,
+                "clientTurnId": str(uuid.uuid4()),
                 "taskType": "TEACHING_PLAN",
                 "taskPayload": {"schoolId": 1, "theme": "家乡文化", "grade": "四年级"},
                 "message": "请生成结构化教学方案。",

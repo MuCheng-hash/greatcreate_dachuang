@@ -163,6 +163,13 @@ class Settings(BaseSettings):
     agent_memory_task_days: int = 90
     agent_memory_recycle_bin_days: int = 30
     agent_memory_cleanup_interval_seconds: int = 86400
+    agent_turn_lease_seconds: int = Field(default=90, ge=15, le=900)
+    agent_turn_heartbeat_seconds: int = Field(default=15, ge=1, le=300)
+    agent_partial_flush_interval_seconds: float = Field(default=0.5, gt=0, le=30)
+    agent_partial_flush_characters: int = Field(default=256, ge=1, le=10000)
+    agent_checkpoint_retention_days: int = Field(default=7, ge=1, le=365)
+    agent_checkpoint_cleanup_batch_size: int = Field(default=50, ge=1, le=500)
+    agent_checkpoint_cleanup_interval_seconds: int = Field(default=3600, ge=60, le=86400)
 
     @classmethod
     def settings_customise_sources(
@@ -246,6 +253,8 @@ class Settings(BaseSettings):
     def validate_deployment_profile(self) -> "Settings":
         if self.database_pool_min_size > self.database_pool_max_size:
             raise ValueError("DATABASE_POOL_MIN_SIZE cannot exceed DATABASE_POOL_MAX_SIZE")
+        if self.agent_turn_heartbeat_seconds >= self.agent_turn_lease_seconds:
+            raise ValueError("AGENT_TURN_HEARTBEAT_SECONDS must be less than AGENT_TURN_LEASE_SECONDS")
         if self.app_env != "prod":
             return self
         if "*" in self.allowed_origins:

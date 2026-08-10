@@ -61,7 +61,11 @@ class Database:
             max_size=settings.database_pool_max_size,
             timeout=settings.database_pool_timeout_seconds,
             open=False,
-            kwargs={"row_factory": dict_row},
+            kwargs={
+                "autocommit": True,
+                "prepare_threshold": 0,
+                "row_factory": dict_row,
+            },
             name="agent-state",
         )
 
@@ -150,6 +154,8 @@ class SchemaMigrator:
         if self.migration_dsn:
             connection = await AsyncConnection.connect(
                 self.migration_dsn,
+                autocommit=True,
+                prepare_threshold=0,
                 row_factory=dict_row,
             )
             try:
@@ -178,7 +184,8 @@ class SchemaMigrator:
                             )
                         continue
                     await connection.execute(
-                        migration.path.read_text(encoding="utf-8")
+                        migration.path.read_text(encoding="utf-8"),
+                        prepare=False,
                     )
                     await connection.execute(
                         """

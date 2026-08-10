@@ -40,11 +40,13 @@ from .schemas import (
     MemoryUpdateRequest,
     StoredMessage,
     ThreadCreateRequest,
+    TurnCancelResponse,
     TurnRecoveryResponse,
     ThreadResponse,
     ThreadSummaryResponse,
 )
 from .settings import Settings, get_settings
+from .turns import TurnConflictError, TurnLeaseLostError
 from .user_memory import (
     MemoryConflictError,
     MemoryNotFoundError,
@@ -141,6 +143,8 @@ def create_app(
     memory_repository = container.memory_repository
     database = container.database
     migrator = container.migrator
+    checkpoints = container.checkpoints
+    turn_repository = container.turn_repository
 
     async def memory_cleanup_loop() -> None:
         interval = max(1, settings.agent_memory_cleanup_interval_seconds)
@@ -151,26 +155,69 @@ def create_app(
             except Exception:
                 LOGGER.exception("agent_memory_cleanup_failed")
 
+    async def checkpoint_cleanup_once() -> None:
+        turn_ids = await turn_repository.claim_checkpoint_cleanup(
+            settings.agent_checkpoint_retention_days,
+            settings.agent_checkpoint_cleanup_batch_size,
+        )
+        for turn_id in turn_ids:
+            deleted = False
+            try:
+                await checkpoints.delete_thread(turn_id)
+                deleted = True
+            except Exception:
+                LOGGER.exception(
+                    "agent_checkpoint_cleanup_failed",
+                    extra={"turnId": turn_id},
+                )
+            finally:
+                await turn_repository.finish_checkpoint_cleanup(
+                    turn_id, deleted=deleted
+                )
+
+    async def checkpoint_cleanup_loop() -> None:
+        interval = max(
+            60, settings.agent_checkpoint_cleanup_interval_seconds
+        )
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                await checkpoint_cleanup_once()
+            except Exception:
+                LOGGER.exception("agent_checkpoint_cleanup_loop_failed")
+
     @asynccontextmanager
     async def lifespan(application: FastAPI):
         cleanup_task: asyncio.Task[None] | None = None
+        checkpoint_cleanup_task: asyncio.Task[None] | None = None
         database_open = False
         try:
             await database.open()
             database_open = True
             if settings.app_env == "dev":
                 await migrator.migrate()
+                await checkpoints.setup(settings.migration_dsn)
             else:
                 await migrator.validate()
+                await checkpoints.validate()
             await prompts.initialize()
             await alerts.start()
             await memory_repository.cleanup_expired()
+            await checkpoint_cleanup_once()
             cleanup_task = asyncio.create_task(
                 memory_cleanup_loop(), name="agent-memory-cleanup"
             )
             application.state.memory_cleanup_task = cleanup_task
+            checkpoint_cleanup_task = asyncio.create_task(
+                checkpoint_cleanup_loop(), name="agent-checkpoint-cleanup"
+            )
+            application.state.checkpoint_cleanup_task = checkpoint_cleanup_task
             yield
         finally:
+            if checkpoint_cleanup_task is not None:
+                checkpoint_cleanup_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await checkpoint_cleanup_task
             if cleanup_task is not None:
                 cleanup_task.cancel()
                 with suppress(asyncio.CancelledError):
@@ -276,6 +323,12 @@ def create_app(
             model.model_configs_for(request.model_id)
         except ValueError as exc:
             raise HTTPException(status_code=422, detail="unknown modelId") from exc
+
+    def raise_turn_conflict(exc: TurnConflictError) -> None:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": exc.code, "message": str(exc)},
+        ) from exc
 
     if settings.allowed_origins:
         app.add_middleware(
@@ -646,20 +699,74 @@ def create_app(
         scope_type: str = Query(alias="scopeType"),
         scope_id: str | int = Query(alias="scopeId"),
     ) -> TurnRecoveryResponse:
-        message = await repository.find_assistant_message_by_client_turn_id(
-            client_turn_id, owner_id, scope_type, scope_id
+        try:
+            turn = await turn_repository.get(
+                client_turn_id,
+                owner_id=owner_id,
+                scope_type=scope_type,
+                scope_id=scope_id,
+            )
+        except PermissionError as exc:
+            LOGGER.info(
+                "agent_turn_recovery_scope_miss",
+                extra={"errorType": type(exc).__name__},
+            )
+            return TurnRecoveryResponse(
+                found=False, clientTurnId=client_turn_id
+            )
+        if turn is None:
+            return TurnRecoveryResponse(
+                found=False, clientTurnId=client_turn_id
+            )
+        messages = await repository.list_messages_for_turn(turn.turn_id)
+        assistant = next(
+            (item for item in messages if item["role"] == "assistant"), None
         )
-        if message is None:
-            return TurnRecoveryResponse(found=False)
+        stored = (
+            StoredMessage(
+                id=assistant["id"],
+                role=assistant["role"],
+                content=assistant["content"],
+                createdAt=assistant["created_at"],
+                metadata=assistant["metadata"],
+            )
+            if assistant is not None
+            else None
+        )
         return TurnRecoveryResponse(
-            found=True,
-            threadId=message["thread_id"],
-            message=StoredMessage(
-                id=message["id"],
-                role=message["role"],
-                content=message["content"],
-                createdAt=message["created_at"],
-                metadata=message["metadata"],
+            found=turn.status == "completed" and stored is not None,
+            clientTurnId=client_turn_id,
+            threadId=turn.thread_id,
+            message=stored if turn.status == "completed" else None,
+            turnStatus=turn.status,
+            retryable=turn.retryable,
+            partialMessage=stored if turn.status != "completed" else None,
+        )
+
+    @app.post(
+        "/agent/turns/{client_turn_id}/cancel",
+        response_model=TurnCancelResponse,
+        dependencies=[Depends(require_internal_agent_token)],
+    )
+    async def cancel_turn(
+        client_turn_id: str,
+        owner_id: str = Query(alias="ownerId"),
+        scope_type: str = Query(alias="scopeType"),
+        scope_id: str | int = Query(alias="scopeId"),
+    ) -> TurnCancelResponse:
+        try:
+            turn = await runtime.cancel_turn(
+                client_turn_id, owner_id, scope_type, scope_id
+            )
+        except (LookupError, PermissionError) as exc:
+            raise HTTPException(status_code=404, detail="turn not found") from exc
+        return TurnCancelResponse(
+            clientTurnId=client_turn_id,
+            threadId=turn.thread_id,
+            turnStatus=turn.status,
+            cancellationRequested=(
+                turn.cancel_requested_at is not None
+                or turn.status == "cancelled"
             ),
         )
 
@@ -692,6 +799,13 @@ def create_app(
         request.thread_id = thread_id
         try:
             return await runtime.handle(request)
+        except TurnConflictError as exc:
+            raise_turn_conflict(exc)
+        except TurnLeaseLostError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "turn_in_progress", "message": str(exc)},
+            ) from exc
         except (ThreadNotFoundError, ThreadScopeError) as exc:
             raise HTTPException(status_code=404, detail="thread not found") from exc
         except MemoryValidationError as exc:
@@ -705,6 +819,13 @@ def create_app(
         validate_model_selection(request)
         try:
             return await runtime.handle(request)
+        except TurnConflictError as exc:
+            raise_turn_conflict(exc)
+        except TurnLeaseLostError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "turn_in_progress", "message": str(exc)},
+            ) from exc
         except (ThreadNotFoundError, ThreadScopeError) as exc:
             raise HTTPException(status_code=404, detail="thread not found") from exc
         except MemoryValidationError as exc:
@@ -723,8 +844,14 @@ def create_app(
                 )
             except (ThreadNotFoundError, ThreadScopeError) as exc:
                 raise HTTPException(status_code=404, detail="thread not found") from exc
+        try:
+            event_stream = await runtime.start_stream(request)
+        except TurnConflictError as exc:
+            raise_turn_conflict(exc)
+        except (ThreadNotFoundError, ThreadScopeError) as exc:
+            raise HTTPException(status_code=404, detail="thread not found") from exc
         return StreamingResponse(
-            runtime.stream_events(request),
+            event_stream,
             media_type="text/event-stream",
             headers={
                 "Cache-Control": "no-cache",

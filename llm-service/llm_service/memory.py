@@ -13,6 +13,7 @@ class ContextWindow:
     messages: list[dict[str, str]]
     summary: str
     compacted: bool
+    summary_through_message_id: int
 
 
 class ContextWindowManager:
@@ -21,14 +22,31 @@ class ContextWindowManager:
         self.recent_message_count = recent_message_count
         self.summary_character_limit = summary_character_limit
 
-    def build(self, stored_messages: list[dict], existing_summary: str = "") -> ContextWindow:
+    def build(
+        self,
+        stored_messages: list[dict],
+        existing_summary: str = "",
+        summary_through_message_id: int = 0,
+    ) -> ContextWindow:
         normalized = [
-            {"role": str(item.get("role", "user")), "content": str(item.get("content", ""))}
-            for item in stored_messages if item.get("content")
+            {
+                "id": int(item.get("id") or 0),
+                "role": str(item.get("role", "user")),
+                "content": str(item.get("content", "")),
+            }
+            for item in stored_messages
+            if item.get("content")
+            and int(item.get("id") or 0) > summary_through_message_id
         ]
-        total = sum(estimate_tokens(item["content"]) for item in normalized)
+        total = estimate_tokens(existing_summary) if existing_summary else 0
+        total += sum(estimate_tokens(item["content"]) for item in normalized)
         if total <= self.token_budget and len(normalized) <= self.recent_message_count:
-            return ContextWindow(normalized, existing_summary, False)
+            return ContextWindow(
+                self._model_messages(normalized),
+                existing_summary,
+                False,
+                summary_through_message_id,
+            )
 
         retained: list[dict[str, str]] = []
         used = estimate_tokens(existing_summary) if existing_summary else 0
@@ -42,7 +60,17 @@ class ContextWindowManager:
         omitted_count = len(normalized) - len(retained)
         omitted = normalized[:omitted_count]
         summary = self._merge_summary(existing_summary, omitted)
-        return ContextWindow(retained, summary, omitted_count > 0)
+        new_cursor = (
+            max(item["id"] for item in omitted)
+            if omitted
+            else summary_through_message_id
+        )
+        return ContextWindow(
+            self._model_messages(retained),
+            summary,
+            omitted_count > 0,
+            new_cursor,
+        )
 
     def _merge_summary(self, existing: str, omitted: list[dict[str, str]]) -> str:
         lines = [existing.strip()] if existing.strip() else []
@@ -52,3 +80,10 @@ class ContextWindowManager:
             lines.append(f"{role}: {content}")
         value = "\n".join(lines)
         return value[-self.summary_character_limit :]
+
+    @staticmethod
+    def _model_messages(messages: list[dict]) -> list[dict[str, str]]:
+        return [
+            {"role": str(item["role"]), "content": str(item["content"])}
+            for item in messages
+        ]

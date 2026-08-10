@@ -496,6 +496,10 @@ class SqliteImporter:
         converted: list[Any] = []
         for column in spec.columns:
             value = row[column]
+            if spec.name == "agent_thread" and column == "summary":
+                # Legacy summaries may already contain repeated compression output.
+                # Import raw messages as the source of truth and rebuild summaries.
+                value = ""
             if column in spec.json_columns:
                 value = Jsonb(json.loads(value or "{}"))
             elif column in spec.boolean_columns:

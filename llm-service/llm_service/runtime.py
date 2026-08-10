@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import re
 import time
 import uuid
 from collections.abc import AsyncIterator, Callable
+from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlparse
 
@@ -16,12 +18,18 @@ from fastapi.encoders import jsonable_encoder
 from langchain.agents import create_agent
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, SystemMessage
 
-from .memory import ContextWindowManager
+from .checkpointing import CheckpointManager
+from .memory import ContextWindow, ContextWindowManager
 from .model_gateway import ModelGateway, message_text
 from .observability import FallbackAlertManager, LlmObservability, LlmTraceContext, classify_llm_error
 from .planner import AgentPlan, AgentPlanner
 from .prompt_manager import PromptManager
-from .repository import ConversationRepository, ThreadRecord
+from .repository import (
+    ConversationRepository,
+    ThreadNotFoundError,
+    ThreadRecord,
+    ThreadScopeError,
+)
 from .schemas import (
     AgentMessageRequest,
     AgentMessageResponse,
@@ -33,6 +41,13 @@ from .schemas import (
     TrustedContext,
 )
 from .settings import ModelConfig, Settings
+from .turns import (
+    AgentTurnRecord,
+    AgentTurnRepository,
+    TurnConflictError,
+    TurnLeaseLostError,
+    TurnRegistration,
+)
 from .user_memory import (
     ExplicitMemoryExtractor,
     MemoryContentPolicy,
@@ -69,6 +84,61 @@ LOGGER = logging.getLogger("llm.stateful_agent")
 EventSink = Callable[[str, dict[str, Any]], None]
 
 
+@dataclass(slots=True)
+class PreparedTurn:
+    registration: TurnRegistration
+    thread: ThreadRecord
+    window: ContextWindow
+    messages: list[dict[str, str]]
+    plan: AgentPlan
+    memory_context: MemoryContext
+
+
+class PartialAnswerWriter:
+    def __init__(
+        self,
+        repository: AgentTurnRepository,
+        turn_id: str,
+        lease_owner: str,
+        interval_seconds: float,
+        character_threshold: int,
+        initial: str = "",
+    ):
+        self.repository = repository
+        self.turn_id = turn_id
+        self.lease_owner = lease_owner
+        self.interval_seconds = interval_seconds
+        self.character_threshold = character_threshold
+        self.value = initial
+        self._flushed_value = initial
+        self._last_flush = 0.0
+
+    async def update(self, value: str, *, force: bool = False) -> None:
+        if len(value) >= len(self.value):
+            self.value = value
+        now = time.monotonic()
+        if not force and (
+            len(self.value) - len(self._flushed_value) < self.character_threshold
+            and now - self._last_flush < self.interval_seconds
+        ):
+            return
+        if self.value == self._flushed_value and not force:
+            return
+        await self.repository.update_partial(
+            self.turn_id, self.lease_owner, self.value
+        )
+        self._flushed_value = self.value
+        self._last_flush = now
+
+    async def reset(self) -> None:
+        self.value = ""
+        self._flushed_value = ""
+        self._last_flush = time.monotonic()
+        await self.repository.update_partial(
+            self.turn_id, self.lease_owner, ""
+        )
+
+
 class AgentRuntime:
     def __init__(
         self,
@@ -80,6 +150,8 @@ class AgentRuntime:
         prompts: PromptManager | None = None,
         business_tool_client: BusinessToolClient | None = None,
         memory_repository: MemoryRepository | None = None,
+        turn_repository: AgentTurnRepository | None = None,
+        checkpoints: CheckpointManager | None = None,
     ):
         self.settings = settings
         self.repository = repository
@@ -97,6 +169,11 @@ class AgentRuntime:
             task_days=settings.agent_memory_task_days,
             recycle_bin_days=settings.agent_memory_recycle_bin_days,
         )
+        self.turn_repository = turn_repository or AgentTurnRepository(
+            repository.database
+        )
+        self.checkpoints = checkpoints or CheckpointManager(repository.database)
+        self.instance_id = str(uuid.uuid4())
         self.explicit_memory_extractor = ExplicitMemoryExtractor()
         self.context_manager = ContextWindowManager(
             settings.agent_context_token_budget,
@@ -107,26 +184,69 @@ class AgentRuntime:
         # Tests and compatibility callers may inject one agent here. Normal
         # requests build an agent from each configured model in model_chain().
         self._agent: Any | None = None
-        self._agents: dict[tuple[str, int], Any] = {}
+        self._agents: dict[tuple[str, int, str], Any] = {}
         self._web_domain_cache: tuple[float, list[str]] = (0.0, [])
+        self._active_turn_tasks: dict[str, asyncio.Task[Any]] = {}
 
     async def handle(self, request: AgentMessageRequest) -> AgentMessageResponse:
-        thread, window, plan, memory_context = await self._prepare_turn(request)
-        result = await self._run_agent_turn(
-            request,
-            thread,
-            window.messages,
-            window.summary,
-            window.compacted,
-            plan,
-            memory_context,
-        )
-        await self._persist_response(thread, result, request.client_turn_id)
-        return result
+        prepared = await self._prepare_turn(request)
+        completed = self._completed_response(prepared.registration.turn)
+        if completed is not None:
+            return completed
+        writer = self._partial_writer(prepared.registration.turn)
+        heartbeat = self._start_heartbeat(prepared.registration.turn)
+        try:
+            result = await self._run_agent_turn(
+                request,
+                prepared.thread,
+                prepared.messages,
+                prepared.window.summary,
+                prepared.window.compacted,
+                prepared.plan,
+                prepared.memory_context,
+                prepared.registration,
+            )
+            result.client_turn_id = request.client_turn_id
+            await writer.update(result.answer, force=True)
+            await self._persist_response(
+                prepared.thread,
+                result,
+                request.client_turn_id,
+                turn=prepared.registration.turn,
+                request=request,
+            )
+            return result
+        except asyncio.CancelledError:
+            await self._finish_cancelled_or_interrupted(
+                request, prepared.registration.turn, writer, "request_cancelled"
+            )
+            raise
+        except (TurnConflictError, TurnLeaseLostError):
+            raise
+        except Exception as exc:
+            await self._finish_failed_turn(
+                request, prepared.registration.turn, writer, exc
+            )
+            raise
+        finally:
+            await self._stop_heartbeat(heartbeat)
 
-    async def stream_events(self, request: AgentMessageRequest) -> AsyncIterator[str]:
+    async def start_stream(
+        self, request: AgentMessageRequest
+    ) -> AsyncIterator[str]:
+        prepared = await self._prepare_turn(request)
+        return self.stream_events(request, prepared=prepared)
+
+    async def stream_events(
+        self,
+        request: AgentMessageRequest,
+        *,
+        prepared: PreparedTurn | None = None,
+    ) -> AsyncIterator[str]:
         queue: asyncio.Queue[tuple[str, dict[str, Any]] | None] = asyncio.Queue()
         run_id = str(uuid.uuid4())
+        prepared_turn = prepared or await self._prepare_turn(request)
+        completed = self._completed_response(prepared_turn.registration.turn)
 
         def publish(event_name: str, data: dict[str, Any] | None = None) -> None:
             payload = {"runId": run_id}
@@ -135,26 +255,53 @@ class AgentRuntime:
             queue.put_nowait((event_name, payload))
 
         async def worker() -> None:
+            writer = self._partial_writer(prepared_turn.registration.turn)
+            heartbeat: asyncio.Task[None] | None = None
             try:
+                if completed is not None:
+                    publish("run.started", {
+                        "threadId": completed.thread_id,
+                        "clientTurnId": completed.client_turn_id,
+                        "resumed": True,
+                        "attempt": prepared_turn.registration.turn.attempt_count,
+                    })
+                    publish("final", {
+                        "threadId": completed.thread_id,
+                        "response": completed.model_dump(by_alias=True, mode="json"),
+                    })
+                    publish("done")
+                    return
+                heartbeat = self._start_heartbeat(
+                    prepared_turn.registration.turn
+                )
                 publish("phase.started", {"phase": "context", "label": "正在准备会话上下文"})
-                thread, window, plan, memory_context = await self._prepare_turn(request)
                 publish("phase.completed", {
                     "phase": "context",
                     "label": "会话上下文已准备",
-                    "compacted": window.compacted,
+                    "compacted": prepared_turn.window.compacted,
                 })
                 result = await self._stream_agent_turn(
                     request,
                     run_id,
-                    thread,
-                    window.messages,
-                    window.summary,
-                    window.compacted,
-                    plan,
-                    memory_context,
+                    prepared_turn.thread,
+                    prepared_turn.messages,
+                    prepared_turn.window.summary,
+                    prepared_turn.window.compacted,
+                    prepared_turn.plan,
+                    prepared_turn.memory_context,
                     publish,
+                    prepared_turn.registration,
+                    writer,
                 )
-                await self._persist_response(thread, result, request.client_turn_id)
+                result.client_turn_id = request.client_turn_id
+                await writer.update(result.answer, force=True)
+                await self._persist_response(
+                    prepared_turn.thread,
+                    result,
+                    request.client_turn_id,
+                    turn=prepared_turn.registration.turn,
+                    request=request,
+                )
                 publish(
                     "final",
                     {
@@ -164,12 +311,29 @@ class AgentRuntime:
                 )
                 publish("done")
             except asyncio.CancelledError:
+                await self._finish_cancelled_or_interrupted(
+                    request,
+                    prepared_turn.registration.turn,
+                    writer,
+                    "stream_disconnected",
+                )
                 raise
+            except TurnConflictError as exc:
+                publish("error", {"code": exc.code, "message": str(exc)})
+                publish("done")
             except Exception as exc:
+                await self._finish_failed_turn(
+                    request, prepared_turn.registration.turn, writer, exc
+                )
                 LOGGER.exception("stateful_agent_stream_failed", extra={"runId": run_id})
-                publish("error", {"errorType": type(exc).__name__, "message": str(exc)})
+                publish("error", {
+                    "errorType": type(exc).__name__,
+                    "message": "agent execution interrupted",
+                })
                 publish("done")
             finally:
+                if heartbeat is not None:
+                    await self._stop_heartbeat(heartbeat)
                 queue.put_nowait(None)
 
         task = asyncio.create_task(worker())
@@ -183,6 +347,10 @@ class AgentRuntime:
         finally:
             if not task.done():
                 task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
 
     async def create_thread(
         self, owner_id: str, scope_type: str, scope_id: str | int
@@ -191,24 +359,289 @@ class AgentRuntime:
 
     async def _prepare_turn(
         self, request: AgentMessageRequest
-    ) -> tuple[ThreadRecord, Any, AgentPlan, MemoryContext]:
-        thread = await self._get_or_create_thread(request)
-        await self._capture_explicit_memory(request, thread)
-        memory_context = await self._memory_context_for(request)
-        metadata = {"intent": request.intent, "taskType": request.task_type}
-        if request.client_turn_id:
-            metadata["clientTurnId"] = request.client_turn_id
-        await self.repository.append_message(
-            thread.thread_id,
-            "user",
-            request.message,
-            metadata,
+    ) -> PreparedTurn:
+        registration = await self._register_turn(request)
+        if registration.turn.status == "cancelled":
+            raise TurnConflictError(
+                "turn_cancelled", "the requested turn was cancelled"
+            )
+        thread = await self.repository.get_thread(
+            registration.turn.thread_id,
+            request.owner_id,
+            request.scope_type,
+            request.scope_id,
         )
-        stored = await self.repository.list_messages(thread.thread_id)
-        window = self.context_manager.build(stored, thread.summary)
-        if window.compacted:
-            await self.repository.update_summary(thread.thread_id, window.summary)
-        return thread, window, self.planner.plan(request.message), memory_context
+        if registration.turn.status == "completed":
+            return PreparedTurn(
+                registration,
+                thread,
+                ContextWindow([], thread.summary, False, thread.summary_through_message_id),
+                [],
+                self.planner.plan(request.message),
+                MemoryContext.empty(),
+            )
+        await self._capture_explicit_memory(
+            request, thread, registration.turn.turn_id
+        )
+        memory_context = await self._memory_context_for(request)
+        window = await self._context_window(thread)
+        messages = [
+            *window.messages,
+            {"role": "user", "content": request.message},
+        ]
+        return PreparedTurn(
+            registration,
+            thread,
+            window,
+            messages,
+            self.planner.plan(request.message),
+            memory_context,
+        )
+
+    async def _register_turn(
+        self, request: AgentMessageRequest
+    ) -> TurnRegistration:
+        request_hash, request_summary = self._request_identity(request)
+        try:
+            return await self.turn_repository.register(
+                client_turn_id=request.client_turn_id,
+                requested_thread_id=request.thread_id,
+                owner_id=request.owner_id,
+                scope_type=request.scope_type,
+                scope_id=request.scope_id,
+                task_type=request.task_type,
+                request_hash=request_hash,
+                request_summary=request_summary,
+                lease_owner=self.instance_id,
+                lease_seconds=self.settings.agent_turn_lease_seconds,
+            )
+        except LookupError as exc:
+            raise ThreadNotFoundError(str(exc)) from exc
+        except PermissionError as exc:
+            raise ThreadScopeError(str(exc)) from exc
+
+    async def _context_window(self, thread: ThreadRecord) -> ContextWindow:
+        current = thread
+        for _ in range(3):
+            stored = await self.repository.list_context_messages(
+                current.thread_id
+            )
+            window = self.context_manager.build(
+                stored,
+                current.summary,
+                current.summary_through_message_id,
+            )
+            if not window.compacted:
+                return window
+            updated = await self.repository.update_summary(
+                current.thread_id,
+                window.summary,
+                expected_cursor=current.summary_through_message_id,
+                new_cursor=window.summary_through_message_id,
+            )
+            if updated:
+                return window
+            current = await self.repository.get_thread(
+                current.thread_id, current.owner_id
+            )
+        raise RuntimeError("summary_cursor_update_conflict")
+
+    @staticmethod
+    def _request_identity(
+        request: AgentMessageRequest,
+    ) -> tuple[str, dict[str, Any]]:
+        payload = request.model_dump(by_alias=True, mode="json")
+        payload.pop("clientTurnId", None)
+        payload.pop("threadId", None)
+        canonical = json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        attachment_hashes = [
+            hashlib.sha256(item.data_url.encode("utf-8")).hexdigest()
+            for item in request.attachments
+        ]
+        summary = {
+            "message": request.message,
+            "messageSha256": hashlib.sha256(
+                request.message.encode("utf-8")
+            ).hexdigest(),
+            "messageCharacters": len(request.message),
+            "taskType": request.task_type,
+            "intent": request.intent,
+            "modelId": request.model_id,
+            "attachmentSha256": attachment_hashes,
+        }
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest(), summary
+
+    @staticmethod
+    def _completed_response(
+        turn: AgentTurnRecord,
+    ) -> AgentMessageResponse | None:
+        if turn.status != "completed":
+            return None
+        if not turn.response:
+            raise RuntimeError("completed_turn_response_missing")
+        response = AgentMessageResponse.model_validate(turn.response)
+        response.thread_id = turn.thread_id
+        response.client_turn_id = turn.client_turn_id
+        return response
+
+    def _partial_writer(self, turn: AgentTurnRecord) -> PartialAnswerWriter:
+        return PartialAnswerWriter(
+            self.turn_repository,
+            turn.turn_id,
+            self.instance_id,
+            self.settings.agent_partial_flush_interval_seconds,
+            self.settings.agent_partial_flush_characters,
+            turn.partial_answer,
+        )
+
+    def _start_heartbeat(self, turn: AgentTurnRecord) -> asyncio.Task[None]:
+        execution_task = asyncio.current_task()
+        if execution_task is None:
+            raise RuntimeError("agent turn requires an asyncio task")
+        self._active_turn_tasks[turn.turn_id] = execution_task
+
+        async def heartbeat_loop() -> None:
+            while True:
+                await asyncio.sleep(self.settings.agent_turn_heartbeat_seconds)
+                try:
+                    cancellation_requested = await self.turn_repository.heartbeat(
+                        turn.turn_id,
+                        self.instance_id,
+                        self.settings.agent_turn_lease_seconds,
+                    )
+                except Exception:
+                    execution_task.cancel()
+                    return
+                if cancellation_requested:
+                    execution_task.cancel()
+                    return
+
+        return asyncio.create_task(
+            heartbeat_loop(), name=f"agent-turn-heartbeat-{turn.turn_id}"
+        )
+
+    async def _stop_heartbeat(self, task: asyncio.Task[None]) -> None:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        for turn_id, active in list(self._active_turn_tasks.items()):
+            if active is asyncio.current_task() or active.done():
+                self._active_turn_tasks.pop(turn_id, None)
+
+    async def cancel_turn(
+        self,
+        client_turn_id: str,
+        owner_id: str,
+        scope_type: str,
+        scope_id: str | int,
+    ) -> AgentTurnRecord:
+        turn = await self.turn_repository.request_cancel(
+            client_turn_id, owner_id, scope_type, scope_id
+        )
+        active = self._active_turn_tasks.get(turn.turn_id)
+        if active is not None and active is not asyncio.current_task():
+            active.cancel()
+        return turn
+
+    async def _finish_cancelled_or_interrupted(
+        self,
+        request: AgentMessageRequest,
+        turn: AgentTurnRecord,
+        writer: PartialAnswerWriter,
+        error_code: str,
+    ) -> None:
+        try:
+            await writer.update(writer.value, force=True)
+            cancelled = await self.turn_repository.cancel_requested(turn.turn_id)
+            await self.turn_repository.finish_incomplete(
+                turn_id=turn.turn_id,
+                lease_owner=self.instance_id,
+                status="cancelled" if cancelled else "interrupted",
+                retryable=not cancelled,
+                error_code=error_code,
+                user_content=request.message,
+                user_metadata=self._user_message_metadata(
+                    request,
+                    incomplete=True,
+                    turn_status="cancelled" if cancelled else "interrupted",
+                ),
+                partial_answer=writer.value,
+                assistant_metadata=self._incomplete_assistant_metadata(
+                    request,
+                    "cancelled" if cancelled else "interrupted",
+                ),
+            )
+        except Exception:
+            LOGGER.exception(
+                "agent_turn_interrupt_persist_failed",
+                extra={"turnId": turn.turn_id},
+            )
+
+    async def _finish_failed_turn(
+        self,
+        request: AgentMessageRequest,
+        turn: AgentTurnRecord,
+        writer: PartialAnswerWriter,
+        exc: Exception,
+    ) -> None:
+        retryable = not isinstance(exc, (AssertionError, TypeError, ValueError))
+        status = "interrupted" if retryable else "failed"
+        try:
+            await writer.update(writer.value, force=True)
+            await self.turn_repository.finish_incomplete(
+                turn_id=turn.turn_id,
+                lease_owner=self.instance_id,
+                status=status,
+                retryable=retryable,
+                error_code=type(exc).__name__,
+                user_content=request.message,
+                user_metadata=self._user_message_metadata(
+                    request, incomplete=True, turn_status=status
+                ),
+                partial_answer=writer.value,
+                assistant_metadata=self._incomplete_assistant_metadata(
+                    request, status
+                ),
+            )
+        except Exception:
+            LOGGER.exception(
+                "agent_turn_failure_persist_failed",
+                extra={"turnId": turn.turn_id},
+            )
+
+    @staticmethod
+    def _user_message_metadata(
+        request: AgentMessageRequest,
+        *,
+        incomplete: bool,
+        turn_status: str,
+    ) -> dict[str, Any]:
+        return {
+            "intent": request.intent,
+            "taskType": request.task_type,
+            "clientTurnId": request.client_turn_id,
+            "incomplete": incomplete,
+            "turnStatus": turn_status,
+        }
+
+    @staticmethod
+    def _incomplete_assistant_metadata(
+        request: AgentMessageRequest, turn_status: str
+    ) -> dict[str, Any]:
+        return {
+            "status": "incomplete",
+            "taskType": request.task_type,
+            "clientTurnId": request.client_turn_id,
+            "incomplete": True,
+            "turnStatus": turn_status,
+        }
 
     async def _get_or_create_thread(self, request: AgentMessageRequest) -> ThreadRecord:
         if request.thread_id:
@@ -239,7 +672,10 @@ class AgentRuntime:
         )
 
     async def _capture_explicit_memory(
-        self, request: AgentMessageRequest, thread: ThreadRecord
+        self,
+        request: AgentMessageRequest,
+        thread: ThreadRecord,
+        turn_id: str | None = None,
     ) -> MemoryRecord | None:
         if not self.settings.agent_memory_enabled:
             return None
@@ -263,6 +699,7 @@ class AgentRuntime:
             status="active",
             source="explicit_chat",
             source_thread_id=thread.thread_id,
+            source_turn_id=turn_id,
             confidence=1.0,
         )
 
@@ -278,15 +715,20 @@ class AgentRuntime:
             return [(config, self._agent)]
         return [(config, None) for config in self.model.model_configs_for(model_id)]
 
-    async def _create_agent_for(self, config: ModelConfig) -> Any:
+    async def _create_agent_for(
+        self, config: ModelConfig, checkpoint_namespace: str
+    ) -> Any:
         if not config.configured():
             raise RuntimeError("model_unavailable")
-        key = (config.model, config.fallback_level)
+        key = (config.model, config.fallback_level, checkpoint_namespace)
         if key not in self._agents:
             self._agents[key] = create_agent(
                 self.model.build_model(config),
                 tools=AGENT_TOOLS,
                 system_prompt=await self._load_prompt(),
+                checkpointer=self.checkpoints.scoped_saver(
+                    checkpoint_namespace
+                ),
             )
         return self._agents[key]
 
@@ -326,10 +768,14 @@ class AgentRuntime:
         thread: ThreadRecord,
         config: ModelConfig,
         plan: AgentPlan,
+        turn: AgentTurnRecord | None = None,
+        checkpoint_namespace: str | None = None,
     ) -> dict[str, Any]:
         invoke_config: dict[str, Any] = {
             "recursion_limit": max(3, plan.max_tool_rounds * 2 + 3),
         }
+        if turn is not None and checkpoint_namespace:
+            invoke_config["configurable"] = {"thread_id": turn.turn_id}
         if self.observability is not None:
             metadata: dict[str, Any] = {
                 "intent": request.intent or "",
@@ -372,19 +818,39 @@ class AgentRuntime:
         compacted: bool,
         plan: AgentPlan,
         memory_context: MemoryContext,
+        registration: TurnRegistration,
     ) -> AgentMessageResponse:
         if request.task_type != "CHAT":
             return await self._run_structured_task(
-                request, thread, compacted, memory_context
+                request,
+                thread,
+                compacted,
+                memory_context,
+                registration.turn.turn_id,
             )
         prefetched_executions, prefetched_reasons = await self._prefetch_planned_tools(
-            request, thread, plan
+            request, thread, plan, turn=registration.turn
         )
         executions: list[ToolExecution] = list(prefetched_executions)
         model_attempts = self._model_attempts(request.model_id)
+        resume_namespace = registration.turn.checkpoint_namespace
         for attempt_index, (config, injected_agent) in enumerate(model_attempts):
+            checkpoint_namespace = f"chat-v1/model-attempt-{attempt_index + 1}"
+            if (
+                registration.resumed
+                and resume_namespace
+                and checkpoint_namespace != resume_namespace
+            ):
+                continue
+            await self.turn_repository.set_checkpoint_namespace(
+                registration.turn.turn_id,
+                self.instance_id,
+                checkpoint_namespace,
+            )
             runtime = ToolRuntimeContext(
                 thread_id=thread.thread_id,
+                turn_id=registration.turn.turn_id,
+                call_namespace=checkpoint_namespace,
                 trusted_context=request.context,
                 repository=self.repository,
                 output_character_limit=self.settings.agent_tool_output_character_limit,
@@ -396,7 +862,9 @@ class AgentRuntime:
             )
             token = bind_tool_runtime(runtime)
             try:
-                agent = injected_agent or await self._create_agent_for(config)
+                agent = injected_agent or await self._create_agent_for(
+                    config, checkpoint_namespace
+                )
                 result = await self._invoke_agent(
                     request,
                     request.context,
@@ -409,8 +877,13 @@ class AgentRuntime:
                     tool_runtime=runtime,
                     agent=agent,
                     model_config=config,
+                    turn=registration.turn,
+                    checkpoint_namespace=checkpoint_namespace,
+                    resumed=registration.resumed,
                 )
                 return self._with_model_metadata(result, config)
+            except (TurnConflictError, TurnLeaseLostError):
+                raise
             except Exception as exc:
                 executions.extend(runtime.executions[len(prefetched_executions):])
                 error_type = classify_llm_error(exc)
@@ -437,6 +910,7 @@ class AgentRuntime:
                         error_type,
                         next_config.fallback_level,
                     )
+                    resume_namespace = None
             finally:
                 reset_tool_runtime(token)
 
@@ -471,16 +945,26 @@ class AgentRuntime:
         plan: AgentPlan,
         memory_context: MemoryContext,
         emit: EventSink,
+        registration: TurnRegistration,
+        partial_writer: PartialAnswerWriter,
     ) -> AgentMessageResponse:
         if request.task_type != "CHAT":
             return await self._stream_structured_task(
-                request, thread, compacted, memory_context, emit
+                request,
+                thread,
+                compacted,
+                memory_context,
+                emit,
+                registration,
             )
         primary = self._primary_model_config(request.model_id)
         emit(
             "run.started",
             {
                 "threadId": thread.thread_id,
+                "clientTurnId": request.client_turn_id,
+                "resumed": registration.resumed,
+                "attempt": registration.turn.attempt_count,
                 "provider": primary.provider,
                 "model": primary.model,
             },
@@ -491,7 +975,7 @@ class AgentRuntime:
             "recommendedTools": plan.recommended_tools,
         })
         prefetched_executions, prefetched_reasons = await self._prefetch_planned_tools(
-            request, thread, plan, emit
+            request, thread, plan, emit, turn=registration.turn
         )
         executions: list[ToolExecution] = list(prefetched_executions)
         model_attempts = self._model_attempts(request.model_id)
@@ -513,9 +997,37 @@ class AgentRuntime:
                     "errorType": "not_configured",
                 },
             )
-        for config, injected_agent in model_attempts:
+        resume_namespace = registration.turn.checkpoint_namespace
+        for attempt_index, (config, injected_agent) in enumerate(model_attempts):
+            checkpoint_namespace = f"chat-v1/model-attempt-{attempt_index + 1}"
+            if (
+                registration.resumed
+                and resume_namespace
+                and checkpoint_namespace != resume_namespace
+            ):
+                continue
+            await self.turn_repository.set_checkpoint_namespace(
+                registration.turn.turn_id,
+                self.instance_id,
+                checkpoint_namespace,
+            )
+            if registration.resumed or attempt_index > 0:
+                emit(
+                    "response.reset",
+                    {
+                        "clientTurnId": request.client_turn_id,
+                        "reason": (
+                            "checkpoint_resumed"
+                            if registration.resumed
+                            else "model_fallback"
+                        ),
+                    },
+                )
+                await partial_writer.reset()
             runtime = ToolRuntimeContext(
                 thread_id=thread.thread_id,
+                turn_id=registration.turn.turn_id,
+                call_namespace=checkpoint_namespace,
                 trusted_context=request.context,
                 repository=self.repository,
                 output_character_limit=self.settings.agent_tool_output_character_limit,
@@ -536,7 +1048,9 @@ class AgentRuntime:
                 },
             )
             try:
-                agent = injected_agent or await self._create_agent_for(config)
+                agent = injected_agent or await self._create_agent_for(
+                    config, checkpoint_namespace
+                )
                 emit("phase.completed", {
                     "phase": "reasoning",
                     "label": "分析完成，开始执行",
@@ -556,6 +1070,10 @@ class AgentRuntime:
                     emit,
                     agent=agent,
                     model_config=config,
+                    turn=registration.turn,
+                    checkpoint_namespace=checkpoint_namespace,
+                    resumed=registration.resumed,
+                    partial_writer=partial_writer,
                 )
                 result = self._with_model_metadata(result, config)
                 emit(
@@ -568,6 +1086,8 @@ class AgentRuntime:
                 )
                 emit("phase.completed", {"phase": "response", "label": "回答生成完成"})
                 return result
+            except (TurnConflictError, TurnLeaseLostError):
+                raise
             except Exception as exc:
                 executions.extend(runtime.executions[len(prefetched_executions):])
                 LOGGER.warning(
@@ -580,6 +1100,7 @@ class AgentRuntime:
                         "errorType": classify_llm_error(exc),
                     },
                 )
+                resume_namespace = None
                 emit(
                     "model.failed",
                     {
@@ -613,6 +1134,7 @@ class AgentRuntime:
         thread: ThreadRecord,
         plan: AgentPlan,
         emit: EventSink | None = None,
+        turn: AgentTurnRecord | None = None,
     ) -> tuple[list[ToolExecution], list[str]]:
         """Run deterministic evidence retrieval before model generation.
 
@@ -625,6 +1147,8 @@ class AgentRuntime:
 
         runtime = ToolRuntimeContext(
             thread_id=thread.thread_id,
+            turn_id=turn.turn_id if turn else None,
+            call_namespace="prefetch",
             trusted_context=request.context,
             repository=self.repository,
             output_character_limit=self.settings.agent_tool_output_character_limit,
@@ -636,13 +1160,17 @@ class AgentRuntime:
         token = bind_tool_runtime(runtime)
         try:
             if "retrieve_knowledge" in plan.recommended_tools:
-                result = await self._retrieve_with_augmentation(request, thread)
-                _merge_retrieval(runtime, result)
-                await runtime.run(
+                output = await runtime.run(
                     "retrieve_knowledge",
                     {"query": request.message, "limit": 5},
-                    lambda: result,
+                    lambda: self._retrieve_with_augmentation(request, thread),
                 )
+                try:
+                    result = json.loads(output)
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    result = {}
+                if isinstance(result, dict):
+                    _merge_retrieval(runtime, result)
             if "query_graph_relations" in plan.recommended_tools:
                 await query_graph_relations.ainvoke(
                     {"query": request.message, "limit": 5}
@@ -800,6 +1328,7 @@ class AgentRuntime:
         thread: ThreadRecord,
         compacted: bool,
         memory_context: MemoryContext,
+        turn_id: str,
     ) -> AgentMessageResponse:
         prompt_key, validator = self._structured_task_config(request)
         selection, run_id = await self._start_structured_prompt(
@@ -831,6 +1360,7 @@ class AgentRuntime:
                 if isinstance(generated.get("memoryCandidates"), list)
                 else [],
                 source="teaching_plan",
+                source_turn_id=turn_id,
             )
             result = self._normalize_structured_result(generated, request)
             status = "completed"
@@ -862,6 +1392,7 @@ class AgentRuntime:
         compacted: bool,
         memory_context: MemoryContext,
         emit: EventSink,
+        registration: TurnRegistration,
     ) -> AgentMessageResponse:
         prompt_key, validator = self._structured_task_config(request)
         selection, prompt_run_id = await self._start_structured_prompt(
@@ -870,7 +1401,15 @@ class AgentRuntime:
         primary = self._primary_model_config(request.model_id)
         emit(
             "run.started",
-            {"threadId": thread.thread_id, "taskType": request.task_type, "provider": primary.provider, "model": primary.model},
+            {
+                "threadId": thread.thread_id,
+                "clientTurnId": request.client_turn_id,
+                "resumed": registration.resumed,
+                "attempt": registration.turn.attempt_count,
+                "taskType": request.task_type,
+                "provider": primary.provider,
+                "model": primary.model,
+            },
         )
         started = asyncio.get_running_loop().time()
         trace_context = LlmTraceContext(
@@ -924,6 +1463,7 @@ class AgentRuntime:
                 if isinstance(generated.get("memoryCandidates"), list)
                 else [],
                 source="teaching_plan",
+                source_turn_id=registration.turn.turn_id,
             )
             result = self._normalize_structured_result(generated, request)
             status = "completed"
@@ -1011,6 +1551,7 @@ class AgentRuntime:
     ) -> AgentMessageResponse:
         response = AgentMessageResponse(
             threadId=thread_id,
+            clientTurnId=request.client_turn_id,
             taskType=request.task_type,
             answer=task_answer(request, result),
             status=status,
@@ -1060,6 +1601,9 @@ class AgentRuntime:
         thread: ThreadRecord,
         result: AgentMessageResponse,
         client_turn_id: str | None = None,
+        *,
+        turn: AgentTurnRecord | None = None,
+        request: AgentMessageRequest | None = None,
     ) -> None:
         metadata = {
             "status": result.status,
@@ -1082,6 +1626,23 @@ class AgentRuntime:
         }
         if client_turn_id:
             metadata["clientTurnId"] = client_turn_id
+        metadata["incomplete"] = False
+        metadata["turnStatus"] = "completed"
+        if turn is not None:
+            if request is None:
+                raise ValueError("request is required when completing an agent turn")
+            await self.turn_repository.complete(
+                turn_id=turn.turn_id,
+                lease_owner=self.instance_id,
+                user_content=request.message,
+                user_metadata=self._user_message_metadata(
+                    request, incomplete=False, turn_status="completed"
+                ),
+                assistant_content=result.answer,
+                assistant_metadata=metadata,
+                response=result.model_dump(by_alias=True, mode="json"),
+            )
+            return
         await self.repository.append_message(
             thread.thread_id,
             "assistant",
@@ -1192,12 +1753,17 @@ class AgentRuntime:
         tool_runtime: ToolRuntimeContext | None = None,
         agent: Any | None = None,
         model_config: ModelConfig | None = None,
+        turn: AgentTurnRecord | None = None,
+        checkpoint_namespace: str | None = None,
+        resumed: bool = False,
     ) -> AgentMessageResponse:
         lc_messages = self._build_messages(
             messages, summary, plan, request, memory_context
         )
         runtime = tool_runtime or ToolRuntimeContext(
             thread_id=thread.thread_id,
+            turn_id=turn.turn_id if turn else None,
+            call_namespace=checkpoint_namespace or "graph",
             trusted_context=trusted,
             repository=self.repository,
             output_character_limit=self.settings.agent_tool_output_character_limit,
@@ -1208,10 +1774,24 @@ class AgentRuntime:
         target_agent = agent or self._agent
         if target_agent is None:
             raise RuntimeError("model_unavailable")
+        durable_resume = bool(
+            resumed
+            and turn is not None
+            and checkpoint_namespace
+            and hasattr(target_agent, "aget_state")
+            and await self.checkpoints.has_checkpoint(
+                turn.turn_id, checkpoint_namespace
+            )
+        )
         result = await target_agent.ainvoke(
-            {"messages": lc_messages},
+            None if durable_resume else {"messages": lc_messages},
             config=self._agent_invoke_config(
-                request, thread, model_config or self._primary_model_config(), plan
+                request,
+                thread,
+                model_config or self._primary_model_config(),
+                plan,
+                turn,
+                checkpoint_namespace,
             ),
         )
         return await self._response_from_model_result(
@@ -1226,6 +1806,7 @@ class AgentRuntime:
             request.theme,
             memory_context,
             request,
+            source_turn_id=turn.turn_id if turn else None,
         )
 
     async def _invoke_agent_stream(
@@ -1242,6 +1823,10 @@ class AgentRuntime:
         emit: EventSink,
         agent: Any | None = None,
         model_config: ModelConfig | None = None,
+        turn: AgentTurnRecord | None = None,
+        checkpoint_namespace: str | None = None,
+        resumed: bool = False,
+        partial_writer: PartialAnswerWriter | None = None,
     ) -> AgentMessageResponse:
         lc_messages = self._build_messages(
             messages, summary, plan, request, memory_context
@@ -1252,11 +1837,25 @@ class AgentRuntime:
         target_agent = agent or self._agent
         if target_agent is None:
             raise RuntimeError("model_unavailable")
+        durable_resume = bool(
+            resumed
+            and turn is not None
+            and checkpoint_namespace
+            and hasattr(target_agent, "aget_state")
+            and await self.checkpoints.has_checkpoint(
+                turn.turn_id, checkpoint_namespace
+            )
+        )
         if hasattr(target_agent, "astream"):
             async for chunk in target_agent.astream(
-                {"messages": lc_messages},
+                None if durable_resume else {"messages": lc_messages},
                 config=self._agent_invoke_config(
-                    request, thread, model_config or self._primary_model_config(), plan
+                    request,
+                    thread,
+                    model_config or self._primary_model_config(),
+                    plan,
+                    turn,
+                    checkpoint_namespace,
                 ),
                 stream_mode="messages",
                 version="v2",
@@ -1273,11 +1872,33 @@ class AgentRuntime:
                     if delta and partial_answer and len(partial_answer) > emitted_answer_length:
                         emit("token", {"delta": partial_answer[emitted_answer_length:]})
                         emitted_answer_length = len(partial_answer)
+                        if partial_writer is not None:
+                            await partial_writer.update(partial_answer)
+            if durable_resume and not model_buffer:
+                snapshot = await target_agent.aget_state(
+                    self._agent_invoke_config(
+                        request,
+                        thread,
+                        model_config or self._primary_model_config(),
+                        plan,
+                        turn,
+                        checkpoint_namespace,
+                    )
+                )
+                values = getattr(snapshot, "values", {}) or {}
+                if isinstance(values, dict):
+                    model_messages = list(values.get("messages") or [])
+                    model_buffer = self._last_ai_message_text(model_messages)
         else:
             result = await target_agent.ainvoke(
-                {"messages": lc_messages},
+                None if durable_resume else {"messages": lc_messages},
                 config=self._agent_invoke_config(
-                    request, thread, model_config or self._primary_model_config(), plan
+                    request,
+                    thread,
+                    model_config or self._primary_model_config(),
+                    plan,
+                    turn,
+                    checkpoint_namespace,
                 ),
             )
             model_messages = result.get("messages", []) if isinstance(result, dict) else []
@@ -1288,9 +1909,12 @@ class AgentRuntime:
             {"messages": parse_messages}, trusted, thread.thread_id, compacted,
             runtime.executions, runtime.degraded_reasons, request.message,
             request.grade, request.theme, memory_context, request,
+            turn.turn_id if turn else None,
         )
         if emitted_answer_length < len(response.answer):
             await self._emit_answer_chunks(response.answer[emitted_answer_length:], emit)
+        if partial_writer is not None:
+            await partial_writer.update(response.answer, force=True)
         return response
 
     def _build_messages(
@@ -1396,11 +2020,15 @@ class AgentRuntime:
         theme: str | None = None,
         memory_context: MemoryContext | None = None,
         request: AgentMessageRequest | None = None,
+        source_turn_id: str | None = None,
     ) -> AgentMessageResponse:
         parsed = self._parse_model_output(result)
         memory_candidates = (
             await self._persist_inferred_candidates(
-                request, thread_id, parsed.memory_candidates
+                request,
+                thread_id,
+                parsed.memory_candidates,
+                source_turn_id=source_turn_id,
             )
             if request is not None
             else []
@@ -1418,6 +2046,7 @@ class AgentRuntime:
         normalized_reasons = list(dict.fromkeys(degraded_reasons or []))
         return AgentMessageResponse(
             threadId=thread_id,
+            clientTurnId=request.client_turn_id if request is not None else "",
             answer=answer or "暂时无法生成有效回答。",
             status="completed" if answer else "incomplete",
             generationStatus="completed" if answer else "degraded",
@@ -1452,6 +2081,7 @@ class AgentRuntime:
         candidates: list[Any] | None,
         *,
         source: str = "inferred_chat",
+        source_turn_id: str | None = None,
     ) -> list[MemoryItem]:
         if not candidates or not self.settings.agent_memory_enabled:
             return []
@@ -1485,6 +2115,7 @@ class AgentRuntime:
                     status="pending",
                     source=source,
                     source_thread_id=thread_id,
+                    source_turn_id=source_turn_id,
                     confidence=payload.get("confidence"),
                 )
             except (MemoryValidationError, TypeError, ValueError):
@@ -1688,7 +2319,10 @@ class AgentRuntime:
             for item in self._ordered_evidence_citation_ids(trusted)[:5]
         ]
         return AgentMessageResponse(
-            threadId=thread_id, answer=answer, status=status,
+            threadId=thread_id,
+            clientTurnId=request.client_turn_id,
+            answer=answer,
+            status=status,
             generationStatus="degraded",
             retrievalStatus=self._retrieval_status(trusted),
             retrievalMethods=self._retrieval_methods(trusted),

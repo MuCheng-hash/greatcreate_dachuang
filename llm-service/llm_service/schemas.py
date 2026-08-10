@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 
 TaskType = Literal["CHAT", "TEACHING_PLAN", "RESOURCE_DISCOVERY"]
+TurnStatus = Literal["running", "completed", "interrupted", "failed", "cancelled"]
 MemoryType = Literal["PROFILE", "TASK"]
 MemoryStatus = Literal["pending", "active", "deleted"]
 MemorySource = Literal["explicit_chat", "inferred_chat", "profile_ui", "teaching_plan"]
@@ -55,7 +56,7 @@ class AgentMessageRequest(ApiModel):
     scope_id: str | int = Field(alias="scopeId")
     message: str = Field(min_length=1, max_length=12000)
     thread_id: str | None = Field(default=None, alias="threadId", max_length=64)
-    client_turn_id: str | None = Field(default=None, alias="clientTurnId", min_length=1, max_length=96)
+    client_turn_id: str = Field(alias="clientTurnId", min_length=1, max_length=96)
     model_id: str | None = Field(default=None, alias="modelId", min_length=1, max_length=300)
     task_type: TaskType = Field(default="CHAT", alias="taskType")
     task_payload: dict[str, Any] = Field(default_factory=dict, alias="taskPayload")
@@ -210,6 +211,7 @@ class ToolExecution(ApiModel):
 
 class AgentMessageResponse(ApiModel):
     thread_id: str = Field(alias="threadId")
+    client_turn_id: str = Field(alias="clientTurnId")
     task_type: TaskType = Field(default="CHAT", alias="taskType")
     answer: str
     status: Literal["completed", "degraded", "incomplete"]
@@ -245,8 +247,21 @@ class StoredMessage(ApiModel):
 
 class TurnRecoveryResponse(ApiModel):
     found: bool
+    client_turn_id: str = Field(alias="clientTurnId")
     thread_id: str | None = Field(default=None, alias="threadId")
     message: StoredMessage | None = None
+    turn_status: TurnStatus | None = Field(default=None, alias="turnStatus")
+    retryable: bool = False
+    partial_message: StoredMessage | None = Field(
+        default=None, alias="partialMessage"
+    )
+
+
+class TurnCancelResponse(ApiModel):
+    client_turn_id: str = Field(alias="clientTurnId")
+    thread_id: str = Field(alias="threadId")
+    turn_status: TurnStatus = Field(alias="turnStatus")
+    cancellation_requested: bool = Field(alias="cancellationRequested")
 
 
 class ThreadResponse(ApiModel):

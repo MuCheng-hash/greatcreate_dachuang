@@ -47,6 +47,13 @@ business service, set the same environment variable before starting this service
 | `DATABASE_POOL_MAX_SIZE` | `10` | Maximum async PostgreSQL pool size |
 | `DATABASE_POOL_TIMEOUT_SECONDS` | `5` | Maximum wait for a pooled connection |
 | `DATABASE_POOL_OPEN_TIMEOUT_SECONDS` | `10` | Startup wait for the PostgreSQL pool |
+| `AGENT_TURN_LEASE_SECONDS` | `90` | Running turn lease used for crash recovery |
+| `AGENT_TURN_HEARTBEAT_SECONDS` | `15` | Lease heartbeat interval; must be shorter than the lease |
+| `AGENT_PARTIAL_FLUSH_INTERVAL_SECONDS` | `0.5` | Maximum interval between throttled partial-answer writes |
+| `AGENT_PARTIAL_FLUSH_CHARACTERS` | `256` | Partial-answer character threshold before a write |
+| `AGENT_CHECKPOINT_RETENTION_DAYS` | `7` | Retention for terminal single-turn graph checkpoints |
+| `AGENT_CHECKPOINT_CLEANUP_BATCH_SIZE` | `50` | Maximum checkpoint threads claimed per cleanup batch |
+| `AGENT_CHECKPOINT_CLEANUP_INTERVAL_SECONDS` | `3600` | Lifespan-managed checkpoint cleanup interval |
 | `PROMPT_ADMIN_TOKEN` | empty | Required token for prompt-management APIs |
 | `OBSERVABILITY_ADMIN_TOKEN` | empty | Required token for observability APIs |
 | `AGENT_INTERNAL_SERVICE_TOKEN` | empty | Required internal token for Agent thread/message APIs; missing configuration returns `503` |
@@ -90,11 +97,11 @@ config/base.toml -> config/{APP_ENV}.toml -> APP_CONFIG_FILE -> .env -> .env.loc
 
 `dev` permits optional business/model dependencies so local fallback flows remain usable. `staging` and `prod` require both dependencies. The production profile also rejects wildcard CORS and missing prompt/observability admin tokens.
 
-`GET /health/live` only verifies that the process can respond. `GET /health/ready` checks the PostgreSQL pool, Schema version, active Prompt readability, model chain, and authenticated Java business-service endpoint. It returns HTTP `503` when a required dependency is down; dependency details never include credentials or DSN values.
+`GET /health/live` only verifies that the process can respond. `GET /health/ready` checks the PostgreSQL pool, application Schema version, LangGraph checkpoint Schema version, active Prompt readability, model chain, and authenticated Java business-service endpoint. It returns HTTP `503` when a required dependency is down; dependency details never include credentials or DSN values.
 
 ## PostgreSQL Schema 与 SQLite 数据迁移
 
-PostgreSQL 是会话、长期记忆、Prompt、工具审计和 LLM Trace 的唯一事实源。Redis 仅保留知识入库队列职责。`dev` 启动时会自动应用版本化 SQL；`staging` 和 `prod` 只校验 Schema，部署前必须显式执行：
+PostgreSQL 是会话、长期记忆、Prompt、工具审计、LLM Trace 和单轮执行 checkpoint 的唯一持久化后端。正式会话历史仍是跨轮次模型上下文的唯一事实源；checkpoint 仅以内部 `turn_id` 保存当前一轮的执行状态，不使用会话 `threadId`。Redis 仅保留知识入库队列职责。`dev` 启动时会依次应用版本化 SQL 和 checkpointer `setup()`；`staging` 和 `prod` 只校验两套 Schema，部署前必须显式执行：
 
 ```powershell
 python -m llm_service.db_cli migrate
@@ -132,6 +139,7 @@ Content-Type: application/json
   "ownerId": "account:1",
   "scopeType": "SCHOOL",
   "scopeId": 1,
+  "clientTurnId": "54e4cb34-bf4e-4c1a-b7ea-a625cde67c29",
   "message": "附近有哪些适合四年级的资源？",
   "threadId": null,
   "context": {
@@ -143,7 +151,7 @@ Content-Type: application/json
 }
 ```
 
-The response contains `threadId`, `status`, `citations`, `toolExecutions`, related resources, and follow-up questions. Reuse the returned `threadId` for subsequent turns. The public Spring endpoint remains `/api/ai/qa/ask`; Spring supplies the authenticated owner and trusted context before calling this service.
+`clientTurnId` 在 FastAPI 内部接口为必填；浏览器自动生成，Java 对缺失的旧请求补 UUID。网络中断后的重试必须复用原 ID。响应包含 `clientTurnId`、`threadId`、`status`、`citations`、`toolExecutions`、相关资源和追问建议；后续轮次继续复用返回的 `threadId`。公共 Spring 入口仍为 `/api/ai/qa/ask`，Spring 会在调用本服务前补齐已认证 owner 与可信上下文。
 
 ### Conversation history
 
@@ -152,11 +160,12 @@ Assistant conversations are stored in PostgreSQL configured by
 owner and school scope from the authenticated account; browser requests cannot
 select another owner. Active CHAT threads can be listed, restored, continued,
 and archived. Archiving retains messages in PostgreSQL and removes the thread from
-the active history list. Existing clients that only send `threadId` continue to
-work unchanged.
+the active history list. 取消或失败轮次的用户问题与部分回答仍可展示，但带有
+`incomplete` 元数据且不会进入下一轮模型上下文或会话摘要。
 
 流式问答使用 `POST /agent/messages/stream`，事件统一为
-`run.started`、`model.started`、`tool.started`、`tool.completed`、`token`、`final`、`error`、`done`。
+`run.started`、`response.reset`、`model.started`、`tool.started`、`tool.completed`、`token`、`final`、`error`、`done`。
+`run.started` 会返回 `clientTurnId`、`resumed` 和 `attempt`；恢复需要重跑模型节点时，客户端收到 `response.reset` 后必须先清空已有部分文本。主动停止调用 `POST /agent/turns/{clientTurnId}/cancel`；Java 对外提供 `POST /api/ai/qa/turns/{clientTurnId}/cancel`。
 调用 Agent 接口时应携带 `X-Agent-Service-Token`；服务端不会信任外部请求伪造的 `ownerId` 或学校范围。
 
 ## Unified task workflows
@@ -289,7 +298,7 @@ Agent 运行时通用配置：
 
 兼容模型服务配置：
 
-当前运行时使用 PostgreSQL 持久化 thread、message、长期记忆、Prompt、工具审计和 Trace；不使用 LangGraph checkpointer 保存第二份会话状态。
+当前运行时使用 PostgreSQL 持久化 thread、message、长期记忆、Prompt、工具审计和 Trace。`CHAT` 额外使用 PostgreSQL `AsyncPostgresSaver` 保存单轮执行 checkpoint：`thread_id` 为内部 `agent_turn.turn_id`，namespace 按 Graph/模型尝试隔离，保留 7 天。它不保存或替代跨轮次正式聊天历史；`TEACHING_PLAN` 与 `RESOURCE_DISCOVERY` 只复用轮次幂等机制，失败时整轮重试。
 运行日志会携带 `runId`、`conversationId`、模型、提示词版本、工具名称、耗时、token usage、
 生成/检索状态、降级级别和错误类型；模型未返回 usage 时保持为空，不伪造统计数据。
 

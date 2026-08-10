@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import uuid
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -97,6 +98,7 @@ def agent_request(message: str, **overrides: object) -> AgentMessageRequest:
     payload: dict[str, object] = {
         **memory_scope(),
         "message": message,
+        "clientTurnId": str(uuid.uuid4()),
         "context": {},
     }
     payload.update(overrides)

@@ -11,6 +11,7 @@ from urllib.parse import quote
 
 from pydantic import ValidationError
 
+from .checkpointing import CheckpointManager, CheckpointSchemaError
 from .database import Database, SchemaMigrationError, SchemaMigrator
 from .settings import Settings, load_settings
 from .sqlite_import import SqliteImportError, SqliteImporter
@@ -43,10 +44,16 @@ def _parser() -> argparse.ArgumentParser:
 async def _migrate(settings: Settings) -> dict[str, object]:
     database = Database(settings)
     migrator = SchemaMigrator(database, settings.migration_dsn)
+    checkpoints = CheckpointManager(database)
     await database.open()
     try:
         version = await migrator.migrate()
-        return {"status": "current", "schemaVersion": version}
+        checkpoint_version = await checkpoints.setup(settings.migration_dsn)
+        return {
+            "status": "current",
+            "schemaVersion": version,
+            "checkpointSchemaVersion": checkpoint_version,
+        }
     finally:
         await database.close()
 
@@ -126,7 +133,12 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 2
-    except (SqliteImportError, SchemaMigrationError, ValueError) as exc:
+    except (
+        SqliteImportError,
+        SchemaMigrationError,
+        CheckpointSchemaError,
+        ValueError,
+    ) as exc:
         print(
             json.dumps(
                 {"status": "failed", "error": str(exc)}, ensure_ascii=False
