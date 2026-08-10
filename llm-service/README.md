@@ -2,7 +2,7 @@
 
 本目录是独立 LLM 服务入口，负责地图讲解、学校周边资源问答、教学方案生成和 Agent 运行时。Agent 使用 FastAPI + LangChain/LangGraph，业务数据和 RAG 通过 Java 内部受控工具接口访问。
 
-This service is the model-facing runtime for the platform. It provides typed read-only tools, owner-scoped conversation threads, SQLite persistence for local development, and explicit degraded responses when no model is configured.
+This service is the model-facing runtime for the platform. It provides typed read-only tools, owner-scoped conversation threads, PostgreSQL persistence, and explicit degraded responses when no model is configured.
 
 ## Start
 
@@ -10,10 +10,17 @@ This service is the model-facing runtime for the platform. It provides typed rea
 python -m venv .venv
 & .venv/Scripts/Activate.ps1
 python -m pip install -r requirements.txt
+python -m llm_service.db_cli init-local-env
+Set-Location ..
+docker compose --env-file llm-service/.env.local -f docker-compose.rag.yml up -d postgres
+Set-Location llm-service
+python -m llm_service.db_cli migrate
 python app.py
 ```
 
 The default address is `http://127.0.0.1:5050`.
+`init-local-env` 只在文件不存在时创建 Git 忽略的 `.env.local`，不会覆盖现有
+`.env` 或输出生成的数据库密码；该文件同时供 Compose 与 FastAPI 读取。
 The `dev` profile already includes the same local-only Agent service token as
 `business-service`, so no per-session token setup is required for the default
 local configuration. If `AGENT_INTERNAL_SERVICE_TOKEN` is overridden for the
@@ -34,7 +41,12 @@ business service, set the same environment variable before starting this service
 | `LLM_MODELS` | empty | JSON array of selectable models; when set, replaces the legacy primary/fallback/lightweight chain |
 | `LLM_TIMEOUT_SECONDS` | `20` | Model request timeout |
 | `LLM_MAX_OUTPUT_TOKENS` | `512` | Ollama fallback maximum output tokens |
-| `DATABASE_PATH` | `data/agent-state.sqlite3` | Durable local conversation store |
+| `DATABASE_URL` | required | PostgreSQL application DSN; treated as a secret |
+| `DATABASE_MIGRATION_URL` | empty | Optional elevated PostgreSQL DSN used only by the migration CLI |
+| `DATABASE_POOL_MIN_SIZE` | `1` | Minimum async PostgreSQL pool size |
+| `DATABASE_POOL_MAX_SIZE` | `10` | Maximum async PostgreSQL pool size |
+| `DATABASE_POOL_TIMEOUT_SECONDS` | `5` | Maximum wait for a pooled connection |
+| `DATABASE_POOL_OPEN_TIMEOUT_SECONDS` | `10` | Startup wait for the PostgreSQL pool |
 | `PROMPT_ADMIN_TOKEN` | empty | Required token for prompt-management APIs |
 | `OBSERVABILITY_ADMIN_TOKEN` | empty | Required token for observability APIs |
 | `AGENT_INTERNAL_SERVICE_TOKEN` | empty | Required internal token for Agent thread/message APIs; missing configuration returns `503` |
@@ -73,12 +85,31 @@ assistant selectors; failed calls continue through the remaining items once.
 Configuration is loaded in this order, with later sources taking precedence:
 
 ```text
-config/base.toml -> config/{APP_ENV}.toml -> APP_CONFIG_FILE -> .env -> process environment
+config/base.toml -> config/{APP_ENV}.toml -> APP_CONFIG_FILE -> .env -> .env.local -> process environment
 ```
 
-`dev` permits optional business/model dependencies so local fallback flows remain usable. `staging` and `prod` require both dependencies. The production profile also rejects wildcard CORS, in-memory SQLite, and missing prompt/observability admin tokens.
+`dev` permits optional business/model dependencies so local fallback flows remain usable. `staging` and `prod` require both dependencies. The production profile also rejects wildcard CORS and missing prompt/observability admin tokens.
 
-`GET /health/live` only verifies that the process can respond. `GET /health/ready` checks SQLite access, the active teaching-plan prompt, the model chain, and the authenticated Java business-service endpoint. It returns HTTP `503` when a required dependency is down; dependency details never include credentials.
+`GET /health/live` only verifies that the process can respond. `GET /health/ready` checks the PostgreSQL pool, Schema version, active Prompt readability, model chain, and authenticated Java business-service endpoint. It returns HTTP `503` when a required dependency is down; dependency details never include credentials or DSN values.
+
+## PostgreSQL Schema 与 SQLite 数据迁移
+
+PostgreSQL 是会话、长期记忆、Prompt、工具审计和 LLM Trace 的唯一事实源。Redis 仅保留知识入库队列职责。`dev` 启动时会自动应用版本化 SQL；`staging` 和 `prod` 只校验 Schema，部署前必须显式执行：
+
+```powershell
+python -m llm_service.db_cli migrate
+```
+
+从旧 SQLite 迁移时应先停止 FastAPI，先只读检查，再执行单事务导入：
+
+```powershell
+python -m llm_service.db_cli import-sqlite --source data/agent-state.sqlite3 --dry-run
+python -m llm_service.db_cli import-sqlite --source data/agent-state.sqlite3 --apply
+```
+
+`--apply` 会先通过 SQLite backup API 创建带 UTC 时间戳的快照，随后按外键顺序导入全部 10 张表、保留原 ID，并校验行数、主键、JSONB、外键、活动 Prompt 唯一性和 identity sequence。同一来源 SHA-256 重复执行只做校验并安全退出；切流后允许 PostgreSQL 出现合法新增行，但来源主键必须仍完整存在且 sequence 不得碰撞。原文件与备份不会自动删除。
+
+迁移期间不双写。重新开放流量前可以停服并回滚到迁移前应用版本与原 SQLite；开放流量后 PostgreSQL 已产生新数据，只能以 PostgreSQL 为事实源，不能直接切回旧文件。
 
 ## Stateful Agent API
 
@@ -116,11 +147,11 @@ The response contains `threadId`, `status`, `citations`, `toolExecutions`, relat
 
 ### Conversation history
 
-Assistant conversations are stored in the SQLite file configured by
-`DATABASE_PATH`. The Spring endpoints under `/api/ai/qa/history` derive the
+Assistant conversations are stored in PostgreSQL configured by
+`DATABASE_URL`. The Spring endpoints under `/api/ai/qa/history` derive the
 owner and school scope from the authenticated account; browser requests cannot
 select another owner. Active CHAT threads can be listed, restored, continued,
-and archived. Archiving retains messages in SQLite and removes the thread from
+and archived. Archiving retains messages in PostgreSQL and removes the thread from
 the active history list. Existing clients that only send `threadId` continue to
 work unchanged.
 
@@ -151,13 +182,14 @@ FastAPI 只保留一套 Stateful Agent 接口族，所有任务共用线程持�
 调用 `/agent/messages*` 必须携带 `X-Agent-Service-Token`。Java 业务服务负责
 JWT、学校范围和可信上下文校验，再向 FastAPI 转发；浏览器不能直接调用 FastAPI。
 未配置真实模型或模型响应不可用时，接口返回 `generationStatus=degraded` 并使用
-可信业务数据生成有意义的本地兜底响应。旧 `/llm/*` 路径已删除，调用会返回 `404`。
+可信业务数据生成有意义的本地兜底响应。旧 `/llm/agent/answer`、`/llm/agent/run`
+和 `/llm/agent/stream` 已删除并固定返回 `404`；其余兼容 `/llm/*` 接口保留原协议。
 
 ## Prompt 管理与效果评估
 
 教学方案和资源发现 prompt 不再写在 Python 源码中。仓库中的
 `prompts/teaching-plan/v1/system.md` 与 `prompts/resource-discovery/v1/system.md`
-只负责首次初始化；运行时版本和调用记录均保存在 `DATABASE_PATH` 指向的 SQLite
+只负责首次初始化；运行时版本和调用记录均保存在 `DATABASE_URL` 指向的 PostgreSQL
 数据库中。管理操作需要请求头：
 
 ```http
@@ -257,7 +289,7 @@ Agent 运行时通用配置：
 
 兼容模型服务配置：
 
-当前本地运行使用 SQLite 持久化 thread、message 和工具审计；生产环境可在不改变 HTTP 协议的前提下替换为 Redis 或 PostgreSQL 等持久化后端。
+当前运行时使用 PostgreSQL 持久化 thread、message、长期记忆、Prompt、工具审计和 Trace；不使用 LangGraph checkpointer 保存第二份会话状态。
 运行日志会携带 `runId`、`conversationId`、模型、提示词版本、工具名称、耗时、token usage、
 生成/检索状态、降级级别和错误类型；模型未返回 usage 时保持为空，不伪造统计数据。
 
@@ -267,7 +299,7 @@ The Agent can only call the registered read-only tools for the trusted context s
 
 ## LLM observability
 
-Every provider call is recorded in the `llm_trace` SQLite table. Agent tool loops create
+Every provider call is recorded in the PostgreSQL `llm_trace` table. Agent tool loops create
 one span for each provider request under the same trace. Prompt and response bodies are
 not stored. Each record contains user, session, feature, provider, model, status, typed
 error, provider token usage, calculated cost, total latency, time to first token, and JSON
