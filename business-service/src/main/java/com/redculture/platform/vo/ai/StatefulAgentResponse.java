@@ -12,6 +12,8 @@ public class StatefulAgentResponse {
 
     private String threadId;
 
+    private String clientTurnId;
+
     private String taskType;
 
     private String answer;

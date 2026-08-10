@@ -9,5 +9,13 @@ public class AssistantConversationTurnRecovery {
 
     private String threadId;
 
+    private String clientTurnId;
+
+    private String turnStatus;
+
+    private boolean retryable;
+
+    private AssistantConversationMessage partialMessage;
+
     private AssistantConversationMessage message;
 }

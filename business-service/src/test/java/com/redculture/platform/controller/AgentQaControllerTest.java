@@ -5,6 +5,7 @@ import com.redculture.platform.config.AuthContext;
 import com.redculture.platform.vo.AgentIntent;
 import com.redculture.platform.vo.AgentQaResponse;
 import com.redculture.platform.vo.AuthCurrentUserVO;
+import com.redculture.platform.vo.ai.AssistantConversationTurnCancellation;
 import com.redculture.platform.vo.ai.KnowledgeRetrievalStatus;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.MediaType;
@@ -66,6 +67,33 @@ class AgentQaControllerTest {
                 .andExpect(status().isOk())
                 .andExpect(header().string("Cache-Control", "no-cache, no-transform"))
                 .andExpect(header().string("X-Accel-Buffering", "no"));
+    }
+
+    @Test
+    void exposesTurnCancellationForCurrentSchoolUser() throws Exception {
+        AgentQaService agentQaService = mock(AgentQaService.class);
+        AuthCurrentUserVO user = new AuthCurrentUserVO();
+        user.setRoleCode("school_admin");
+        user.setSchoolId(1L);
+        AssistantConversationTurnCancellation cancellation =
+                new AssistantConversationTurnCancellation();
+        cancellation.setClientTurnId("turn-client-1");
+        cancellation.setThreadId("thread-1");
+        cancellation.setTurnStatus("running");
+        cancellation.setCancellationRequested(true);
+        when(agentQaService.cancelTurn("turn-client-1", user))
+                .thenReturn(cancellation);
+
+        MockMvc mockMvc = MockMvcBuilders
+                .standaloneSetup(new AgentQaController(agentQaService))
+                .build();
+
+        mockMvc.perform(post("/api/ai/qa/turns/turn-client-1/cancel")
+                        .requestAttr(AuthContext.CURRENT_USER_ATTRIBUTE, user))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.clientTurnId").value("turn-client-1"))
+                .andExpect(jsonPath("$.data.threadId").value("thread-1"))
+                .andExpect(jsonPath("$.data.cancellationRequested").value(true));
     }
 
 }
