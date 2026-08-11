@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import AliasChoices, Field, field_validator, model_validator
+from pydantic import AliasChoices, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import (
     BaseSettings,
     PydanticBaseSettingsSource,
@@ -55,14 +55,19 @@ class ModelConfig:
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=".env", extra="ignore", populate_by_name=True
+        env_file=(".env", ".env.local"), extra="ignore", populate_by_name=True
     )
 
     app_env: str = "dev"
     service_name: str = "red-culture-agent-service"
     host: str = Field("127.0.0.1", validation_alias=AliasChoices("host", "LLM_HOST"))
     port: int = Field(5050, validation_alias=AliasChoices("port", "LLM_PORT"))
-    database_path: Path = Path("data/agent-state.sqlite3")
+    database_url: SecretStr
+    database_migration_url: SecretStr | None = None
+    database_pool_min_size: int = Field(default=1, ge=1, le=100)
+    database_pool_max_size: int = Field(default=10, ge=1, le=200)
+    database_pool_timeout_seconds: float = Field(default=5.0, gt=0, le=120)
+    database_pool_open_timeout_seconds: float = Field(default=10.0, gt=0, le=300)
     prompt_root: Path = Path(__file__).resolve().parent.parent / "prompts"
     prompt_admin_token: str = ""
     observability_admin_token: str = ""
@@ -158,6 +163,23 @@ class Settings(BaseSettings):
     agent_memory_task_days: int = 90
     agent_memory_recycle_bin_days: int = 30
     agent_memory_cleanup_interval_seconds: int = 86400
+    agent_turn_lease_seconds: int = Field(default=90, ge=15, le=900)
+    agent_turn_heartbeat_seconds: int = Field(default=15, ge=1, le=300)
+    agent_partial_flush_interval_seconds: float = Field(default=0.5, gt=0, le=30)
+    agent_partial_flush_characters: int = Field(default=256, ge=1, le=10000)
+    agent_checkpoint_retention_days: int = Field(default=7, ge=1, le=365)
+    agent_checkpoint_cleanup_batch_size: int = Field(default=50, ge=1, le=500)
+    agent_checkpoint_cleanup_interval_seconds: int = Field(default=3600, ge=60, le=86400)
+    agent_write_tools_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices(
+            "agent_write_tools_enabled", "AGENT_WRITE_TOOLS_ENABLED"
+        ),
+    )
+    agent_action_confirmation_minutes: int = Field(default=15, ge=1, le=1440)
+    agent_action_payload_retention_days: int = Field(default=30, ge=1, le=3650)
+    agent_action_cleanup_batch_size: int = Field(default=100, ge=1, le=500)
+    agent_action_cleanup_interval_seconds: int = Field(default=3600, ge=60, le=86400)
 
     @classmethod
     def settings_customise_sources(
@@ -219,6 +241,16 @@ class Settings(BaseSettings):
     def normalize_business_url(cls, value: str) -> str:
         return value.strip().rstrip("/")
 
+    @field_validator("database_url", "database_migration_url")
+    @classmethod
+    def validate_database_url(cls, value: SecretStr | None) -> SecretStr | None:
+        if value is None:
+            return None
+        raw = value.get_secret_value().strip()
+        if not raw.startswith(("postgresql://", "postgres://")):
+            raise ValueError("database URL must use postgresql:// or postgres://")
+        return SecretStr(raw)
+
     @field_validator("business_health_path")
     @classmethod
     def normalize_health_path(cls, value: str) -> str:
@@ -229,17 +261,31 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_deployment_profile(self) -> "Settings":
+        if self.database_pool_min_size > self.database_pool_max_size:
+            raise ValueError("DATABASE_POOL_MIN_SIZE cannot exceed DATABASE_POOL_MAX_SIZE")
+        if self.agent_turn_heartbeat_seconds >= self.agent_turn_lease_seconds:
+            raise ValueError("AGENT_TURN_HEARTBEAT_SECONDS must be less than AGENT_TURN_LEASE_SECONDS")
         if self.app_env != "prod":
             return self
         if "*" in self.allowed_origins:
             raise ValueError("wildcard CORS is not allowed when APP_ENV=prod")
-        if str(self.database_path).strip() == ":memory:":
-            raise ValueError("an in-memory database is not allowed when APP_ENV=prod")
         if not self.prompt_admin_token or not self.observability_admin_token:
             raise ValueError("admin tokens are required when APP_ENV=prod")
         if self.require_llm_model and not self.model_configured:
             raise ValueError("at least one LLM model must be configured when REQUIRE_LLM_MODEL=true")
         return self
+
+    @property
+    def database_dsn(self) -> str:
+        return self.database_url.get_secret_value()
+
+    @property
+    def migration_dsn(self) -> str | None:
+        return (
+            self.database_migration_url.get_secret_value()
+            if self.database_migration_url is not None
+            else None
+        )
 
     @property
     def observability_token(self) -> str:

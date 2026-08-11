@@ -27,6 +27,7 @@ import com.redculture.platform.vo.SchoolResourceItemVO;
 import com.redculture.platform.vo.SchoolSummaryVO;
 import com.redculture.platform.vo.ai.AgentMemoryApplied;
 import com.redculture.platform.vo.ai.AgentMemoryItem;
+import com.redculture.platform.vo.ai.AssistantConversationTurnCancellation;
 import com.redculture.platform.vo.ai.KnowledgeRetrieveRequest;
 import com.redculture.platform.vo.ai.KnowledgeRetrieveResult;
 import com.redculture.platform.vo.ai.KnowledgeRetrievalStatus;
@@ -144,6 +145,66 @@ public class AgentQaServiceImpl implements AgentQaService {
     }
 
     @Override
+    public AssistantConversationTurnCancellation cancelTurn(
+            String clientTurnId, AuthCurrentUserVO currentUser) {
+        if (!StringUtils.hasText(clientTurnId)) {
+            throw new IllegalArgumentException("clientTurnId is required");
+        }
+        if (currentUser == null || currentUser.getSchoolId() == null) {
+            throw new IllegalArgumentException("school account is required");
+        }
+        if (agentRuntimeClient == null) {
+            throw new IllegalStateException("stateful agent runtime is unavailable");
+        }
+        return agentRuntimeClient.cancelConversationTurn(
+                clientTurnId,
+                agentRuntimeClient.ownerIdFor(currentUser),
+                "SCHOOL",
+                currentUser.getSchoolId()
+        );
+    }
+
+    @Override
+    public com.redculture.platform.vo.ai.AgentActionVO getAction(
+            String actionId, AuthCurrentUserVO currentUser) {
+        validateActionRequest(actionId, currentUser);
+        return agentRuntimeClient.getAction(
+                actionId,
+                agentRuntimeClient.ownerIdFor(currentUser),
+                "SCHOOL",
+                currentUser.getSchoolId()
+        );
+    }
+
+    @Override
+    public com.redculture.platform.vo.ai.AgentActionVO decideAction(
+            String actionId, String decision, AuthCurrentUserVO currentUser) {
+        validateActionRequest(actionId, currentUser);
+        if (!"approve".equals(decision) && !"reject".equals(decision)) {
+            throw new IllegalArgumentException("decision must be approve or reject");
+        }
+        return agentRuntimeClient.decideAction(
+                actionId,
+                decision,
+                agentRuntimeClient.ownerIdFor(currentUser),
+                "SCHOOL",
+                currentUser.getSchoolId()
+        );
+    }
+
+    private void validateActionRequest(String actionId, AuthCurrentUserVO currentUser) {
+        if (!StringUtils.hasText(actionId)) {
+            throw new IllegalArgumentException("actionId is required");
+        }
+        if (currentUser == null || currentUser.getSchoolId() == null) {
+            throw new IllegalArgumentException("school account is required");
+        }
+        if (agentRuntimeClient == null) {
+            throw new IllegalStateException("stateful agent runtime is unavailable");
+        }
+    }
+
+    @Override
     public SseEmitter stream(AgentQaRequest request, AuthCurrentUserVO currentUser) {
         validateRequest(request);
         if (currentUser == null) {
@@ -154,11 +215,13 @@ public class AgentQaServiceImpl implements AgentQaService {
                 request.getScopeType(), request.getScopeId(), currentUser, request.getQuestion().trim()
         );
         if (scopeResolution.clarificationRequired()) {
-            sendEvent(emitter, "final", Map.of("response", clarificationResponse(
+            AgentQaResponse clarification = clarificationResponse(
                     AgentIntent.UNKNOWN,
                     scopeResolution.message(),
                     scopeResolution.options()
-            )));
+            );
+            clarification.setClientTurnId(request.getClientTurnId());
+            sendEvent(emitter, "final", Map.of("response", clarification));
             sendEvent(emitter, "done", Collections.emptyMap());
             emitter.complete();
             return emitter;
@@ -227,15 +290,16 @@ public class AgentQaServiceImpl implements AgentQaService {
                     emitter.complete();
                     return;
                 }
-                // Stateful FastAPI 不可用时退回本地 Java 生成链路，仍然保持流式协议。
-                sendEvent(emitter, "model.failed", Map.of(
-                        "errorType", "stateful_agent_unavailable"
+                sendEvent(emitter, "error", Map.of(
+                        "errorType", "agent_stream_interrupted",
+                        "message", "连接中断，可使用同一 clientTurnId 恢复本轮执行",
+                        "clientTurnId", request.getClientTurnId(),
+                        "retryable", true
                 ));
-                sendEvent(emitter, "model.fallback", Map.of(
-                        "reset", true,
-                        "reason", "stateful_agent_unavailable"
+                sendEvent(emitter, "done", Map.of(
+                        "clientTurnId", request.getClientTurnId()
                 ));
-                startLocalFallbackStream(emitter, request, currentUser);
+                emitter.complete();
                 return;
             } finally {
                 finished.set(true);
@@ -253,7 +317,12 @@ public class AgentQaServiceImpl implements AgentQaService {
         Thread thread = new Thread(() -> {
             String runId = java.util.UUID.randomUUID().toString();
             try {
-                sendEvent(emitter, "run.started", Map.of("runId", runId));
+                sendEvent(emitter, "run.started", Map.of(
+                        "runId", runId,
+                        "clientTurnId", request.getClientTurnId(),
+                        "resumed", false,
+                        "attempt", 1
+                ));
                 sendEvent(emitter, "phase.started", Map.of(
                         "runId", runId,
                         "phase", "retrieval",
@@ -312,6 +381,10 @@ public class AgentQaServiceImpl implements AgentQaService {
         String answer = textValue(responseMap.get("answer"));
         response.setAnswer(StringUtils.hasText(answer) ? answer : "暂时无法生成有效回答。");
         response.setThreadId(firstText(responseMap.get("threadId"), eventData.get("threadId")));
+        response.setClientTurnId(firstText(
+                responseMap.get("clientTurnId"),
+                firstText(eventData.get("clientTurnId"), request.getClientTurnId())
+        ));
         response.setStatus(firstText(responseMap.get("status"), "degraded"));
         response.setDegradedReason(textValue(responseMap.get("degradedReason")));
         response.setRunId(textValue(eventData.get("runId")));
@@ -348,6 +421,7 @@ public class AgentQaServiceImpl implements AgentQaService {
         response.setMemoryCandidates(memoryItems(responseMap.get("memoryCandidates")));
         response.setMemoryApplied(memoryApplied(responseMap.get("memoryApplied")));
         normalized.put("threadId", response.getThreadId());
+        normalized.put("clientTurnId", response.getClientTurnId());
         normalized.put("response", response);
         return normalized;
     }
@@ -593,6 +667,7 @@ public class AgentQaServiceImpl implements AgentQaService {
         response.setCitations(validatedCitations(generated, retrieval));
         response.setFollowUpQuestions(nonNullList(generated.getFollowUpQuestions()));
         response.setThreadId(remote == null ? request.getThreadId() : remote.getThreadId());
+        response.setClientTurnId(request.getClientTurnId());
         response.setConversationId(request.getConversationId());
         response.setStatus(remote == null ? "degraded" : remote.getStatus());
         response.setDegradedReason(remote == null ? null : remote.getDegradedReason());
@@ -612,6 +687,9 @@ public class AgentQaServiceImpl implements AgentQaService {
         }
         if (request.getScopeId() != null && request.getScopeId() <= 0) {
             throw new IllegalArgumentException("scopeId must be positive");
+        }
+        if (!StringUtils.hasText(request.getClientTurnId())) {
+            request.setClientTurnId(java.util.UUID.randomUUID().toString());
         }
         List<AgentAttachmentRequest> attachments = request.getAttachments() == null
                 ? Collections.emptyList() : request.getAttachments();

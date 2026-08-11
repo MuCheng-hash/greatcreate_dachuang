@@ -4,10 +4,10 @@ from dataclasses import dataclass
 
 from fastapi import Request
 
-from agent.config import AgentSettings
-from agent.runtime import AgentRuntime as LegacyAgentRuntime
-
 from .business_tool_client import BusinessToolClient
+from .actions import AgentActionRepository
+from .checkpointing import CheckpointManager
+from .database import Database, SchemaMigrator
 from .health import HealthService
 from .model_gateway import ModelGateway
 from .observability import FallbackAlertManager, LlmObservability
@@ -15,20 +15,25 @@ from .prompt_manager import PromptManager
 from .repository import ConversationRepository
 from .runtime import AgentRuntime
 from .settings import Settings
+from .turns import AgentTurnRepository
 from .user_memory import MemoryContentPolicy, MemoryRepository
 
 
 @dataclass(frozen=True, slots=True)
 class AppContainer:
     settings: Settings
+    database: Database
+    migrator: SchemaMigrator
     repository: ConversationRepository
+    turn_repository: AgentTurnRepository
+    action_repository: AgentActionRepository
+    checkpoints: CheckpointManager
     memory_repository: MemoryRepository
     observability: LlmObservability
     alerts: FallbackAlertManager
     model_gateway: ModelGateway
     prompts: PromptManager
     runtime: AgentRuntime
-    legacy_agent_runtime: LegacyAgentRuntime
     health: HealthService
     business_tool_client: BusinessToolClient
 
@@ -38,9 +43,16 @@ def build_container(
     observability: LlmObservability | None = None,
     alerts: FallbackAlertManager | None = None,
 ) -> AppContainer:
-    repository = ConversationRepository(settings.database_path)
+    database = Database(settings)
+    migrator = SchemaMigrator(database, settings.migration_dsn)
+    repository = ConversationRepository(database)
+    turn_repository = AgentTurnRepository(database)
+    action_repository = AgentActionRepository(
+        database, settings.agent_action_confirmation_minutes
+    )
+    checkpoints = CheckpointManager(database)
     memory_repository = MemoryRepository(
-        settings.database_path,
+        database,
         content_policy=MemoryContentPolicy(
             settings.agent_memory_content_character_limit
         ),
@@ -49,15 +61,18 @@ def build_container(
         recycle_bin_days=settings.agent_memory_recycle_bin_days,
     )
     observability = observability or LlmObservability(
-        settings.database_path, settings.llm_model_pricing
+        database, settings.llm_model_pricing
     )
     alerts = alerts or FallbackAlertManager(settings.llm_alert_webhook_url)
     model_gateway = ModelGateway(settings, observability, alerts)
-    prompts = PromptManager(settings.database_path, settings.prompt_root, settings.agent_prompt_version)
+    prompts = PromptManager(
+        database, settings.prompt_root, settings.agent_prompt_version
+    )
     business_tool_client = BusinessToolClient(
         settings.internal_business_base_url,
         settings.internal_service_token,
         settings.agent_tool_timeout_seconds,
+        write_tools_enabled=settings.agent_write_tools_enabled,
     )
     runtime = AgentRuntime(
         settings,
@@ -68,21 +83,32 @@ def build_container(
         prompts,
         business_tool_client,
         memory_repository,
+        turn_repository,
+        checkpoints,
+        action_repository,
     )
-    legacy_agent_runtime = LegacyAgentRuntime(
-        AgentSettings.from_settings(settings), observability, alerts
+    health = HealthService(
+        settings,
+        database,
+        migrator,
+        prompts,
+        business_tool_client,
+        checkpoints,
     )
-    health = HealthService(settings, prompts)
     return AppContainer(
         settings=settings,
+        database=database,
+        migrator=migrator,
         repository=repository,
+        turn_repository=turn_repository,
+        action_repository=action_repository,
+        checkpoints=checkpoints,
         memory_repository=memory_repository,
         observability=observability,
         alerts=alerts,
         model_gateway=model_gateway,
         prompts=prompts,
         runtime=runtime,
-        legacy_agent_runtime=legacy_agent_runtime,
         health=health,
         business_tool_client=business_tool_client,
     )

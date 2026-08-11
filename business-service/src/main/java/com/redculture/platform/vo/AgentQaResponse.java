@@ -14,6 +14,8 @@ public class AgentQaResponse {
 
     private String threadId;
 
+    private String clientTurnId;
+
     private String status;
 
     private String answer;

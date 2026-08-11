@@ -9,6 +9,13 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 
 TaskType = Literal["CHAT", "TEACHING_PLAN", "RESOURCE_DISCOVERY"]
+TurnStatus = Literal[
+    "running", "awaiting_confirmation", "completed", "interrupted", "failed", "cancelled"
+]
+ActionStatus = Literal[
+    "pending_confirmation", "approved", "executing", "succeeded",
+    "rejected", "failed", "expired",
+]
 MemoryType = Literal["PROFILE", "TASK"]
 MemoryStatus = Literal["pending", "active", "deleted"]
 MemorySource = Literal["explicit_chat", "inferred_chat", "profile_ui", "teaching_plan"]
@@ -55,7 +62,7 @@ class AgentMessageRequest(ApiModel):
     scope_id: str | int = Field(alias="scopeId")
     message: str = Field(min_length=1, max_length=12000)
     thread_id: str | None = Field(default=None, alias="threadId", max_length=64)
-    client_turn_id: str | None = Field(default=None, alias="clientTurnId", min_length=1, max_length=96)
+    client_turn_id: str = Field(alias="clientTurnId", min_length=1, max_length=96)
     model_id: str | None = Field(default=None, alias="modelId", min_length=1, max_length=300)
     task_type: TaskType = Field(default="CHAT", alias="taskType")
     task_payload: dict[str, Any] = Field(default_factory=dict, alias="taskPayload")
@@ -210,6 +217,7 @@ class ToolExecution(ApiModel):
 
 class AgentMessageResponse(ApiModel):
     thread_id: str = Field(alias="threadId")
+    client_turn_id: str = Field(alias="clientTurnId")
     task_type: TaskType = Field(default="CHAT", alias="taskType")
     answer: str
     status: Literal["completed", "degraded", "incomplete"]
@@ -243,10 +251,49 @@ class StoredMessage(ApiModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class AgentActionResponse(ApiModel):
+    action_id: str = Field(alias="actionId")
+    client_turn_id: str = Field(alias="clientTurnId")
+    thread_id: str = Field(alias="threadId")
+    tool_name: str = Field(alias="toolName")
+    title: str
+    summary: str
+    arguments: dict[str, Any] = Field(default_factory=dict)
+    risk_level: Literal["LOW", "HIGH"] = Field(alias="riskLevel")
+    status: ActionStatus
+    expires_at: datetime = Field(alias="expiresAt")
+    result_summary: str | None = Field(default=None, alias="resultSummary")
+    resource_reference: str | None = Field(default=None, alias="resourceReference")
+    error_code: str | None = Field(default=None, alias="errorCode")
+
+
+class AgentActionDecisionRequest(ApiModel):
+    owner_id: str = Field(alias="ownerId", min_length=1, max_length=160)
+    scope_type: Literal["SCHOOL", "REGION", "RESOURCE"] = Field(alias="scopeType")
+    scope_id: str | int = Field(alias="scopeId")
+    decision: Literal["approve", "reject"]
+
+
 class TurnRecoveryResponse(ApiModel):
     found: bool
+    client_turn_id: str = Field(alias="clientTurnId")
     thread_id: str | None = Field(default=None, alias="threadId")
     message: StoredMessage | None = None
+    turn_status: TurnStatus | None = Field(default=None, alias="turnStatus")
+    retryable: bool = False
+    partial_message: StoredMessage | None = Field(
+        default=None, alias="partialMessage"
+    )
+    pending_action: AgentActionResponse | None = Field(
+        default=None, alias="pendingAction"
+    )
+
+
+class TurnCancelResponse(ApiModel):
+    client_turn_id: str = Field(alias="clientTurnId")
+    thread_id: str = Field(alias="threadId")
+    turn_status: TurnStatus = Field(alias="turnStatus")
+    cancellation_requested: bool = Field(alias="cancellationRequested")
 
 
 class ThreadResponse(ApiModel):

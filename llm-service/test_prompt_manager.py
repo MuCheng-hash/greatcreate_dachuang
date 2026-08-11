@@ -1,24 +1,27 @@
+import uuid
 from pathlib import Path
 
 from fastapi.testclient import TestClient
 
 from llm_service.api import create_app
-from llm_service.prompt_manager import PromptManager
-from llm_service.settings import Settings
+from postgres_test_support import (
+    prompt_manager as make_prompt_manager,
+    settings_for_database,
+)
 
 
 PROMPT_ROOT = Path(__file__).resolve().parent / "prompts"
 
 
 def test_versions_are_persistent_and_active_version_is_rendered(tmp_path: Path):
-    database = tmp_path / "prompts.sqlite3"
-    manager = PromptManager(database, PROMPT_ROOT)
+    settings = settings_for_database(tmp_path)
+    manager = make_prompt_manager(settings, PROMPT_ROOT)
 
     assert manager.list_versions("teaching-plan")[0]["version"] == "v1"
     manager.create_version("teaching-plan", "v2", "新版模板\n{{context_json}}", notes="test")
     manager.activate_version("teaching-plan", "v2")
 
-    restarted = PromptManager(database, PROMPT_ROOT)
+    restarted = make_prompt_manager(settings, PROMPT_ROOT)
     selected = restarted.resolve("teaching-plan", "school:1", {"theme": "家乡文化"})
 
     assert selected.version == "v2"
@@ -26,7 +29,7 @@ def test_versions_are_persistent_and_active_version_is_rendered(tmp_path: Path):
 
 
 def test_agent_prompt_is_seeded_and_active_content_can_be_switched(tmp_path: Path):
-    manager = PromptManager(tmp_path / "prompts.sqlite3", PROMPT_ROOT)
+    manager = make_prompt_manager(settings_for_database(tmp_path), PROMPT_ROOT)
 
     assert manager.list_versions("agent")[0]["version"] == "v1"
     assert "工具" in manager.active_content("agent")
@@ -38,7 +41,7 @@ def test_agent_prompt_is_seeded_and_active_content_can_be_switched(tmp_path: Pat
 
 
 def test_experiment_assignment_is_stable_and_metrics_accept_feedback(tmp_path: Path):
-    manager = PromptManager(tmp_path / "prompts.sqlite3", PROMPT_ROOT)
+    manager = make_prompt_manager(settings_for_database(tmp_path), PROMPT_ROOT)
     manager.create_version("teaching-plan", "v2", "实验模板\n{{context_json}}")
     manager.configure_experiment(
         "teaching-plan",
@@ -62,8 +65,8 @@ def test_experiment_assignment_is_stable_and_metrics_accept_feedback(tmp_path: P
 
 
 def test_teaching_plan_stream_and_prompt_admin_api(tmp_path: Path):
-    settings = Settings(
-        database_path=tmp_path / "service.sqlite3",
+    settings = settings_for_database(
+        tmp_path,
         prompt_root=PROMPT_ROOT,
         prompt_admin_token="admin-secret",
         internal_service_token="agent-secret",
@@ -91,6 +94,7 @@ def test_teaching_plan_stream_and_prompt_admin_api(tmp_path: Path):
                 "ownerId": "account:1",
                 "scopeType": "SCHOOL",
                 "scopeId": 1,
+                "clientTurnId": str(uuid.uuid4()),
                 "taskType": "TEACHING_PLAN",
                 "taskPayload": {"schoolId": 1, "theme": "家乡文化", "grade": "四年级"},
                 "message": "请生成结构化教学方案。",

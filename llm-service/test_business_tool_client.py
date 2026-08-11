@@ -6,10 +6,10 @@ from pathlib import Path
 import httpx
 import pytest
 
-from llm_service.business_tool_client import BusinessToolClient
-from llm_service.repository import ConversationRepository
+from llm_service.business_tool_client import BusinessToolClient, BusinessToolError
 from llm_service.schemas import TrustedContext
 from llm_service.tools import ToolRuntimeContext, bind_tool_runtime, query_graph_relations, reset_tool_runtime
+from postgres_test_support import conversation_repository, run_async, settings_for_database
 
 
 def test_business_tool_client_sends_authenticated_relation_query() -> None:
@@ -26,13 +26,17 @@ def test_business_tool_client_sends_authenticated_relation_query() -> None:
             }},
         )
 
+    http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     client = BusinessToolClient(
         "http://business-service",
         "secret",
-        client=httpx.Client(transport=httpx.MockTransport(handler)),
+        client=http_client,
     )
 
-    result = client.query_graph_relations({"scope": {"scopeId": 1}, "query": "关系"})
+    result = run_async(
+        client.query_graph_relations({"scope": {"scopeId": 1}, "query": "关系"})
+    )
+    run_async(http_client.aclose())
 
     assert received["url"].endswith("/internal/agent/tools/relation-query")
     assert received["token"] == "secret"
@@ -60,13 +64,14 @@ def test_business_tool_client_sends_authenticated_knowledge_query() -> None:
             },
         )
 
+    http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     client = BusinessToolClient(
         "http://business-service",
         "secret",
-        client=httpx.Client(transport=httpx.MockTransport(handler)),
+        client=http_client,
     )
 
-    result = client.query_knowledge(
+    result = run_async(client.query_knowledge(
         {
             "actor": {"accountId": 1},
             "scope": {"scopeType": "SCHOOL", "scopeId": 1},
@@ -75,7 +80,8 @@ def test_business_tool_client_sends_authenticated_knowledge_query() -> None:
             "theme": "家乡文化",
             "topK": 5,
         }
-    )
+    ))
+    run_async(http_client.aclose())
 
     assert received["url"].endswith("/internal/agent/tools/knowledge-retrieve")
     assert received["token"] == "secret"
@@ -91,19 +97,75 @@ def test_business_tool_client_reads_internal_web_source_domains() -> None:
         received["token"] = request.headers.get("X-Agent-Service-Token")
         return httpx.Response(200, json={"code": 200, "data": {"domains": ["www.gov.cn"]}})
 
+    http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     client = BusinessToolClient(
         "http://business-service",
         "secret",
-        client=httpx.Client(transport=httpx.MockTransport(handler)),
+        client=http_client,
     )
 
-    assert client.web_source_domains() == ["www.gov.cn"]
+    assert run_async(client.web_source_domains()) == ["www.gov.cn"]
+    run_async(http_client.aclose())
     assert received["url"].endswith("/internal/agent/tools/web-source-domains")
     assert received["token"] == "secret"
 
 
+def test_write_client_forwards_stable_end_to_end_idempotency_headers() -> None:
+    received = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        received["idempotency_key"] = request.headers.get("Idempotency-Key")
+        received["turn_id"] = request.headers.get("X-Agent-Turn-Id")
+        received["body"] = json.loads(request.content)
+        return httpx.Response(
+            200, json={"code": 200, "data": {"resourceId": 7}}
+        )
+
+    http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = BusinessToolClient(
+        "http://business-service",
+        "secret",
+        write_tools_enabled=True,
+        client=http_client,
+    )
+    result = run_async(client.execute_write(
+        "/internal/agent/actions/resources/update",
+        {"resourceId": 7},
+        action_id="stable-action-1",
+        turn_id="turn-1",
+    ))
+    run_async(http_client.aclose())
+
+    assert result == {"resourceId": 7}
+    assert received == {
+        "idempotency_key": "stable-action-1",
+        "turn_id": "turn-1",
+        "body": {"resourceId": 7},
+    }
+
+
+def test_write_client_keeps_action_in_progress_distinct_from_payload_conflict() -> None:
+    http_client = httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda _request: httpx.Response(
+            409,
+            json={"code": 409, "data": {"code": "action_in_progress"}},
+        )
+    ))
+    client = BusinessToolClient(
+        "http://business-service", "secret",
+        write_tools_enabled=True, client=http_client,
+    )
+
+    with pytest.raises(BusinessToolError, match="action_in_progress"):
+        run_async(client.execute_write(
+            "/internal/agent/actions/resources/update", {},
+            action_id="stable-action-1", turn_id="turn-1",
+        ))
+    run_async(http_client.aclose())
+
+
 def test_graph_tool_keeps_explicit_degraded_fallback_and_audit(tmp_path: Path) -> None:
-    repository = ConversationRepository(tmp_path / "agent.sqlite3")
+    repository = conversation_repository(settings_for_database(tmp_path))
     thread = repository.create_thread("account:1", "SCHOOL", 1)
     runtime = ToolRuntimeContext(
         thread.thread_id,
@@ -112,13 +174,15 @@ def test_graph_tool_keeps_explicit_degraded_fallback_and_audit(tmp_path: Path) -
             scope={"scopeType": "SCHOOL", "scopeId": 1},
             retrieval={"graphFacts": [{"fact": "可信关系"}]},
         ),
-        repository,
+        repository.async_target,
         2000,
         business_tool_client=BusinessToolClient("", ""),
     )
     token = bind_tool_runtime(runtime)
     try:
-        output = query_graph_relations.invoke({"query": "关系", "limit": 5})
+        output = run_async(
+            query_graph_relations.ainvoke({"query": "关系", "limit": 5})
+        )
     finally:
         reset_tool_runtime(token)
 
@@ -131,7 +195,7 @@ def test_graph_tool_keeps_explicit_degraded_fallback_and_audit(tmp_path: Path) -
 
 
 def test_graph_tool_merges_remote_graph_facts_and_citations(tmp_path: Path) -> None:
-    repository = ConversationRepository(tmp_path / "agent.sqlite3")
+    repository = conversation_repository(settings_for_database(tmp_path))
     thread = repository.create_thread("account:1", "SCHOOL", 1)
 
     def handler(_request: httpx.Request) -> httpx.Response:
@@ -147,42 +211,48 @@ def test_graph_tool_merges_remote_graph_facts_and_citations(tmp_path: Path) -> N
             },
         )
 
+    http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     runtime = ToolRuntimeContext(
         thread.thread_id,
         TrustedContext(
             actor={"accountId": 1, "roleCode": "school_admin", "schoolId": 1},
             scope={"scopeType": "SCHOOL", "scopeId": 1},
         ),
-        repository,
+        repository.async_target,
         2000,
         business_tool_client=BusinessToolClient(
             "http://business-service",
             "secret",
-            client=httpx.Client(transport=httpx.MockTransport(handler)),
+            client=http_client,
         ),
     )
     token = bind_tool_runtime(runtime)
     try:
-        output = query_graph_relations.invoke({"query": "关联", "limit": 5})
+        output = run_async(
+            query_graph_relations.ainvoke({"query": "关联", "limit": 5})
+        )
     finally:
         reset_tool_runtime(token)
 
     assert json.loads(output)["retrievalStatus"] == "OK"
     assert runtime.trusted_context.retrieval["graphFacts"][0]["citationId"] == "graph:1"
     assert runtime.trusted_context.citation_candidates[0]["citationId"] == "graph:1"
+    run_async(http_client.aclose())
 
 
 @pytest.mark.parametrize("status", [401, 500])
 def test_business_tool_client_classifies_upstream_failure(status: int) -> None:
+    http_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _request: httpx.Response(status))
+    )
     client = BusinessToolClient(
         "http://business-service",
         "secret",
-        client=httpx.Client(
-            transport=httpx.MockTransport(lambda _request: httpx.Response(status))
-        ),
+        client=http_client,
     )
 
     with pytest.raises(RuntimeError) as error:
-        client.query_graph_relations({})
+        run_async(client.query_graph_relations({}))
 
     assert "business_tool_" in str(error.value)
+    run_async(http_client.aclose())

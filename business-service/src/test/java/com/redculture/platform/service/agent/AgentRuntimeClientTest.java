@@ -64,6 +64,8 @@ class AgentRuntimeClientTest {
             assertEquals(List.of("run.started", "token", "final", "done"),
                     events.stream().map(AgentRuntimeClient.StreamEvent::event).toList());
             assertEquals("你好", events.get(1).safeData().get("delta"));
+            assertTrue(request.getClientTurnId() != null
+                    && !request.getClientTurnId().isBlank());
         } finally {
             server.stop(0);
         }
@@ -117,6 +119,17 @@ class AgentRuntimeClientTest {
                 output.write(body);
             }
         });
+        server.createContext("/agent/turns/turn-client-1/cancel", exchange -> {
+            receivedTokens.add(exchange.getRequestHeaders().getFirst("X-Agent-Service-Token"));
+            byte[] body = ("{\"clientTurnId\":\"turn-client-1\","
+                    + "\"threadId\":\"thread-1\",\"turnStatus\":\"running\","
+                    + "\"cancellationRequested\":true}").getBytes(StandardCharsets.UTF_8);
+            exchange.getResponseHeaders().set("Content-Type", "application/json");
+            exchange.sendResponseHeaders(200, body.length);
+            try (OutputStream output = exchange.getResponseBody()) {
+                output.write(body);
+            }
+        });
         server.start();
         try {
             AppMapProperties mapProperties = new AppMapProperties();
@@ -146,6 +159,9 @@ class AgentRuntimeClientTest {
             List<AgentRuntimeClient.StreamEvent> events = new ArrayList<>();
             client.streamStateful(request, user, context, events::add);
             var models = client.listModels();
+            var cancellation = client.cancelConversationTurn(
+                    "turn-client-1", "account:1", "SCHOOL", 1L
+            );
 
             assertEquals("状态回答", result.getAnswer().getAnswer());
             assertEquals("memory-1", result.getMemoryCandidates().get(0).getId());
@@ -153,7 +169,9 @@ class AgentRuntimeClientTest {
             assertEquals(List.of("run.started", "token", "final", "done"),
                     events.stream().map(AgentRuntimeClient.StreamEvent::event).toList());
             assertEquals("deepseek-chat", models.get(0).getModel());
-            assertEquals(List.of("internal-secret", "internal-secret", "internal-secret"), receivedTokens);
+            assertTrue(cancellation.isCancellationRequested());
+            assertEquals("thread-1", cancellation.getThreadId());
+            assertEquals(List.of("internal-secret", "internal-secret", "internal-secret", "internal-secret"), receivedTokens);
             assertTrue(requestBodies.stream().allMatch(body -> body.contains("\"ownerId\":\"account:1\"")));
             assertTrue(requestBodies.stream().allMatch(body -> body.contains("\"threadId\":\"thread-1\"")));
             assertTrue(requestBodies.stream().allMatch(body -> body.contains("\"clientTurnId\":\"turn-client-1\"")));

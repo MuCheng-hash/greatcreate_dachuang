@@ -15,7 +15,9 @@ import com.redculture.platform.vo.ai.AgentMemoryConflictPreview;
 import com.redculture.platform.vo.ai.AgentMemorySetting;
 import com.redculture.platform.vo.ai.LlmModelOption;
 import com.redculture.platform.vo.ai.AssistantConversationDetail;
+import com.redculture.platform.vo.ai.AssistantConversationTurnCancellation;
 import com.redculture.platform.vo.ai.AssistantConversationTurnRecovery;
+import com.redculture.platform.vo.ai.AgentActionVO;
 import com.redculture.platform.vo.ai.AssistantConversationSummary;
 import com.redculture.platform.vo.request.AgentQaRequest;
 import com.redculture.platform.vo.request.AgentMemoryCreateRequest;
@@ -46,6 +48,7 @@ import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 import java.util.function.Consumer;
 
 @Component
@@ -91,42 +94,35 @@ public class AgentRuntimeClient {
             return null;
         }
         StatefulAgentRequest body = chatRequest(request, user, context);
-        try {
-            StatefulAgentResponse response = send(body);
-            if (response == null || !StringUtils.hasText(response.getAnswer())) {
-                return null;
-            }
-            List<String> citationIds = response.getCitations() == null ? new ArrayList<>()
-                    : response.getCitations().stream()
-                    .map(item -> item.getCitationId())
-                    .filter(StringUtils::hasText)
-                    .toList();
-            List<String> followUps = response.getFollowUpQuestions() == null ? new ArrayList<>()
-                    : response.getFollowUpQuestions();
-            List<String> toolNames = response.getToolExecutions() == null ? new ArrayList<>()
-                    : response.getToolExecutions().stream()
-                    .map(StatefulAgentResponse.ToolExecutionResponse::getName)
-                    .filter(StringUtils::hasText)
-                    .toList();
-            AgentGenerationStatus generationStatus = generationStatus(response);
-            return new AgentRuntimeResult(
-                    new GeneratedAnswer(response.getAnswer(), citationIds, followUps, generationStatus),
-                    response.getThreadId(),
-                    response.getStatus(),
-                    toolNames,
-                    response.getDegradedReason(),
-                    response.getMemoryCandidates() == null
-                            ? new ArrayList<>() : response.getMemoryCandidates(),
-                    response.getMemoryApplied(),
-                    response.getRetrievalMethods() == null
-                            ? new ArrayList<>() : response.getRetrievalMethods(),
-                    response.getProvider(),
-                    response.getModel(),
-                    response.getFallbackLevel()
-            );
-        } catch (RuntimeException ignored) {
-            return null;
-        }
+        StatefulAgentResponse response = send(body);
+        List<String> citationIds = response.getCitations() == null ? new ArrayList<>()
+                : response.getCitations().stream()
+                .map(item -> item.getCitationId())
+                .filter(StringUtils::hasText)
+                .toList();
+        List<String> followUps = response.getFollowUpQuestions() == null ? new ArrayList<>()
+                : response.getFollowUpQuestions();
+        List<String> toolNames = response.getToolExecutions() == null ? new ArrayList<>()
+                : response.getToolExecutions().stream()
+                .map(StatefulAgentResponse.ToolExecutionResponse::getName)
+                .filter(StringUtils::hasText)
+                .toList();
+        AgentGenerationStatus generationStatus = generationStatus(response);
+        return new AgentRuntimeResult(
+                new GeneratedAnswer(response.getAnswer(), citationIds, followUps, generationStatus),
+                response.getThreadId(),
+                response.getStatus(),
+                toolNames,
+                response.getDegradedReason(),
+                response.getMemoryCandidates() == null
+                        ? new ArrayList<>() : response.getMemoryCandidates(),
+                response.getMemoryApplied(),
+                response.getRetrievalMethods() == null
+                        ? new ArrayList<>() : response.getRetrievalMethods(),
+                response.getProvider(),
+                response.getModel(),
+                response.getFallbackLevel()
+        );
     }
 
     /** Calls the stateful SSE endpoint after Java has resolved authorization and trusted context. */
@@ -138,6 +134,7 @@ public class AgentRuntimeClient {
     }
 
     public StatefulAgentResponse send(StatefulAgentRequest request) {
+        ensureClientTurnId(request);
         StatefulAgentResponse response = restClient.post()
                 .uri("/agent/messages")
                 .headers(this::applyInternalServiceToken)
@@ -402,6 +399,64 @@ public class AgentRuntimeClient {
         return response;
     }
 
+    public AssistantConversationTurnCancellation cancelConversationTurn(
+            String clientTurnId, String ownerId, String scopeType, Long scopeId) {
+        AssistantConversationTurnCancellation response = restClient.post()
+                .uri(uriBuilder -> uriBuilder.path("/agent/turns/{clientTurnId}/cancel")
+                        .queryParam("ownerId", ownerId)
+                        .queryParam("scopeType", scopeType)
+                        .queryParam("scopeId", scopeId)
+                        .build(clientTurnId))
+                .headers(this::applyInternalServiceToken)
+                .accept(MediaType.APPLICATION_JSON)
+                .retrieve()
+                .body(AssistantConversationTurnCancellation.class);
+        if (response == null) {
+            throw new IllegalStateException("agent turn cancellation response is empty");
+        }
+        return response;
+    }
+
+    public AgentActionVO getAction(
+            String actionId, String ownerId, String scopeType, Long scopeId) {
+        AgentActionVO response = restClient.get()
+                .uri(uriBuilder -> uriBuilder.path("/agent/actions/{actionId}")
+                        .queryParam("ownerId", ownerId)
+                        .queryParam("scopeType", scopeType)
+                        .queryParam("scopeId", scopeId)
+                        .build(actionId))
+                .headers(this::applyInternalServiceToken)
+                .accept(MediaType.APPLICATION_JSON)
+                .retrieve()
+                .body(AgentActionVO.class);
+        if (response == null) {
+            throw new IllegalStateException("agent action response is empty");
+        }
+        return response;
+    }
+
+    public AgentActionVO decideAction(
+            String actionId,
+            String decision,
+            String ownerId,
+            String scopeType,
+            Long scopeId) {
+        Map<String, Object> body = scopeBody(ownerId, scopeType, scopeId);
+        body.put("decision", decision);
+        AgentActionVO response = restClient.post()
+                .uri("/agent/actions/{actionId}/decision", actionId)
+                .headers(this::applyInternalServiceToken)
+                .contentType(MediaType.APPLICATION_JSON)
+                .accept(MediaType.APPLICATION_JSON)
+                .body(body)
+                .retrieve()
+                .body(AgentActionVO.class);
+        if (response == null) {
+            throw new IllegalStateException("agent action decision response is empty");
+        }
+        return response;
+    }
+
     public void archiveConversation(String threadId, String ownerId, String scopeType, Long scopeId) {
         restClient.post()
                 .uri(uriBuilder -> uriBuilder.path("/agent/threads/{threadId}/archive")
@@ -427,6 +482,7 @@ public class AgentRuntimeClient {
     }
 
     public void stream(StatefulAgentRequest request, Consumer<StreamEvent> consumer) {
+        ensureClientTurnId(request);
         restClient.post()
                 .uri("/agent/messages/stream")
                 .headers(this::applyInternalServiceToken)
@@ -475,6 +531,9 @@ public class AgentRuntimeClient {
         body.setScopeType(context.getScopeType().name());
         body.setScopeId(context.getScopeId());
         body.setThreadId(request.getThreadId());
+        if (!StringUtils.hasText(request.getClientTurnId())) {
+            request.setClientTurnId(UUID.randomUUID().toString());
+        }
         body.setClientTurnId(request.getClientTurnId());
         body.setModelId(request.getModelId());
         body.setTaskType("CHAT");
@@ -500,11 +559,21 @@ public class AgentRuntimeClient {
         request.setScopeType(scopeType);
         request.setScopeId(scopeId);
         request.setThreadId(threadId);
+        request.setClientTurnId(UUID.randomUUID().toString());
         request.setTaskType(taskType);
         request.setMessage(message);
         request.setTaskPayload(taskPayload == null ? new LinkedHashMap<>() : taskPayload);
         request.setContext(context == null ? new LinkedHashMap<>() : context);
         return request;
+    }
+
+    private void ensureClientTurnId(StatefulAgentRequest request) {
+        if (request == null) {
+            throw new IllegalArgumentException("agent request is required");
+        }
+        if (!StringUtils.hasText(request.getClientTurnId())) {
+            request.setClientTurnId(UUID.randomUUID().toString());
+        }
     }
 
     private Map<String, Object> scopeBody(

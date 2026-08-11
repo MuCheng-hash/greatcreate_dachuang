@@ -772,9 +772,10 @@ describe("assistant view", () => {
 
     releaseFinal();
     await submitPromise;
-    await flushPromises();
-    expect(wrapper.text()).toContain("第一段回答");
-    expect(wrapper.find(".stream-cursor").exists()).toBe(false);
+    await vi.waitFor(() => {
+      expect(wrapper.text()).toContain("第一段回答");
+      expect(wrapper.find(".stream-cursor").exists()).toBe(false);
+    });
   });
 
   it("recovers the exact persisted response when the stream ends before final", async () => {
@@ -834,7 +835,9 @@ describe("assistant view", () => {
 
   it("stops streaming and ignores late token events", async () => {
     let rejectStream;
-    apiMock.stream = vi.fn(async (_path, _body, options) => {
+    let clientTurnId = "";
+    apiMock.stream = vi.fn(async (_path, body, options) => {
+      clientTurnId = body.clientTurnId;
       options.onEvent("token", { delta: "已经显示" });
       await new Promise((_resolve, reject) => {
         rejectStream = reject;
@@ -867,6 +870,9 @@ describe("assistant view", () => {
     expect(wrapper.text()).not.toContain("不应继续显示");
     expect(wrapper.find(".stream-cursor").exists()).toBe(false);
     expect(apiMock.get.mock.calls.some(([path]) => String(path).includes("/history/recovery/"))).toBe(false);
+    expect(apiMock.post).toHaveBeenCalledWith(
+      `/api/ai/qa/turns/${encodeURIComponent(clientTurnId)}/cancel`,
+    );
   });
 
   it("keeps a completed greeting conversation in history after starting a new conversation", async () => {
@@ -912,7 +918,9 @@ describe("assistant view", () => {
     apiMock.get.mockImplementation(async (path) => {
       if (path === "/api/ai/models") return [];
       if (path === "/api/ai/qa/history") return [];
-      if (path.startsWith("/api/ai/qa/history/recovery/")) return { found: false };
+      if (path.startsWith("/api/ai/qa/history/recovery/")) {
+        return { found: false, clientTurnId: path.split("/").at(-1), retryable: false };
+      }
       return [];
     });
     apiMock.stream = vi.fn(async (_path, body, options) => {
@@ -922,6 +930,11 @@ describe("assistant view", () => {
         options.onEvent("token", { delta: "已显示片段" });
         return;
       }
+      options.onEvent("run.started", {
+        clientTurnId: body.clientTurnId, resumed: true, attempt: 2,
+      });
+      options.onEvent("response.reset", { clientTurnId: body.clientTurnId });
+      options.onEvent("token", { delta: "恢复后的片段" });
       options.onEvent("final", {
         response: { answer: "重新生成后的完整回答", citations: [], followUpQuestions: [], generationStatus: "completed" },
       });
@@ -945,14 +958,194 @@ describe("assistant view", () => {
     expect(wrapper.text()).toContain("未找到可恢复的完整回答");
     expect(apiMock.post).not.toHaveBeenCalled();
     expect(apiMock.get.mock.calls.filter(([path]) => String(path).includes("/history/recovery/"))).toHaveLength(3);
-    expect(wrapper.get(".stream-retry-button").text()).toContain("重新生成");
+    expect(wrapper.get(".stream-retry-button").text()).toContain("继续本轮");
 
     await wrapper.get(".stream-retry-button").trigger("click");
     await flushPromises();
 
     expect(apiMock.stream).toHaveBeenCalledTimes(2);
-    expect(turnIds[1]).not.toBe(turnIds[0]);
+    expect(turnIds[1]).toBe(turnIds[0]);
+    expect(wrapper.text()).not.toContain("已显示片段");
     expect(wrapper.text()).toContain("重新生成后的完整回答");
+  });
+
+  it("shows a cancelled partial response without offering automatic recovery", async () => {
+    apiMock.get.mockImplementation(async (path) => {
+      if (path === "/api/ai/models" || path === "/api/ai/qa/history") return [];
+      if (path.startsWith("/api/ai/qa/history/recovery/")) {
+        const clientTurnId = path.split("/").at(-1);
+        return {
+          found: false,
+          clientTurnId,
+          threadId: "cancelled-thread",
+          turnStatus: "cancelled",
+          retryable: false,
+          partialMessage: {
+            id: 9,
+            role: "assistant",
+            content: "已保存的部分回答",
+            createdAt: "2026-08-10T00:00:00Z",
+            metadata: { clientTurnId, incomplete: true, turnStatus: "cancelled" },
+          },
+        };
+      }
+      return [];
+    });
+    apiMock.stream = vi.fn(async (_path, _body, options) => {
+      options.onEvent("token", { delta: "浏览器收到的片段" });
+    });
+    const wrapper = mount(AssistantView, {
+      global: {
+        stubs: {
+          AppShell: { template: "<div><slot /></div>" },
+          InlineNotice: { template: "<div><slot /></div>" },
+        },
+      },
+    });
+    await flushPromises();
+    await wrapper.get("textarea").setValue("需要停止的问题");
+    await wrapper.get("form").trigger("submit.prevent");
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("已保存的部分回答");
+    expect(wrapper.text()).toContain("已停止生成");
+    expect(wrapper.find(".stream-retry-button").exists()).toBe(false);
+  });
+
+  it("requires confirmation for a high-risk action and resumes with the same turn id", async () => {
+    let streamCalls = 0;
+    const turnIds = [];
+    const action = {
+      actionId: "action-1",
+      clientTurnId: "",
+      threadId: "thread-1",
+      toolName: "future_write_tool",
+      title: "确认修改资源",
+      summary: "该操作会修改业务数据，请确认是否继续。",
+      arguments: { resourceId: "7" },
+      riskLevel: "HIGH",
+      status: "pending_confirmation",
+      expiresAt: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
+    };
+    apiMock.get.mockImplementation(async (path) => {
+      if (path === "/api/ai/models" || path === "/api/ai/qa/history") return [];
+      return [];
+    });
+    apiMock.post.mockImplementation(async (path, body) => {
+      if (path === "/api/ai/qa/actions/action-1/decision") {
+        expect(body).toEqual({ decision: "approve" });
+        return { ...action, status: "approved" };
+      }
+      return {};
+    });
+    apiMock.stream = vi.fn(async (_path, body, options) => {
+      streamCalls += 1;
+      turnIds.push(body.clientTurnId);
+      if (streamCalls === 1) {
+        action.clientTurnId = body.clientTurnId;
+        options.onEvent("action.required", { action });
+        options.onEvent("done", {});
+        return;
+      }
+      options.onEvent("run.started", {
+        clientTurnId: body.clientTurnId, resumed: true, attempt: 2,
+      });
+      options.onEvent("response.reset", { clientTurnId: body.clientTurnId });
+      options.onEvent("action.started", { actionId: action.actionId });
+      options.onEvent("action.completed", { actionId: action.actionId });
+      options.onEvent("final", {
+        response: { answer: "写操作完成后的回答", generationStatus: "completed" },
+      });
+      options.onEvent("done", {});
+    });
+    const wrapper = mount(AssistantView, {
+      global: {
+        stubs: {
+          AppShell: { template: "<div><slot /></div>" },
+          InlineNotice: { template: "<div><slot /></div>" },
+        },
+      },
+    });
+    await flushPromises();
+    await wrapper.get("textarea").setValue("请修改资源");
+    await wrapper.get("form").trigger("submit.prevent");
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("确认修改资源");
+    expect(wrapper.text()).toContain("高风险写操作");
+    await wrapper.get(".action-dialog .approve").trigger("click");
+    await flushPromises();
+
+    expect(apiMock.post).toHaveBeenCalledWith(
+      "/api/ai/qa/actions/action-1/decision", { decision: "approve" },
+    );
+    expect(apiMock.stream).toHaveBeenCalledTimes(2);
+    expect(turnIds[1]).toBe(turnIds[0]);
+    expect(wrapper.text()).toContain("写操作完成后的回答");
+    wrapper.unmount();
+  });
+
+  it("restores a pending action after refresh without replacing its turn id", async () => {
+    const expiresAt = new Date(Date.now() + 15 * 60 * 1000).toISOString();
+    sessionStorage.setItem("school-portal-assistant-thread:1", "thread-refresh");
+    sessionStorage.setItem("school-portal-assistant-session:1", JSON.stringify([
+      { role: "user", text: "刷新前的写操作" },
+      {
+        role: "assistant",
+        answer: "",
+        clientTurnId: "turn-refresh-action",
+        isStreaming: false,
+        streamStatus: "等待确认高风险操作",
+      },
+    ]));
+    apiMock.get.mockImplementation(async (path) => {
+      if (path === "/api/ai/models" || path === "/api/ai/qa/history") return [];
+      if (path === "/api/ai/qa/history/thread-refresh") {
+        return {
+          threadId: "thread-refresh", status: "active", messages: [],
+          createdAt: "2026-08-11T00:00:00Z", updatedAt: "2026-08-11T00:00:00Z",
+        };
+      }
+      if (path === "/api/ai/qa/history/recovery/turn-refresh-action") {
+        return {
+          found: false,
+          clientTurnId: "turn-refresh-action",
+          threadId: "thread-refresh",
+          turnStatus: "awaiting_confirmation",
+          retryable: true,
+          pendingAction: {
+            actionId: "action-refresh",
+            clientTurnId: "turn-refresh-action",
+            threadId: "thread-refresh",
+            toolName: "future_write_tool",
+            title: "确认刷新后的写操作",
+            summary: "该操作会修改业务数据，请确认是否继续。",
+            arguments: { resourceId: "11" },
+            riskLevel: "HIGH",
+            status: "pending_confirmation",
+            expiresAt,
+          },
+        };
+      }
+      return [];
+    });
+
+    const wrapper = mount(AssistantView, {
+      global: {
+        stubs: {
+          AppShell: { template: "<div><slot /></div>" },
+          InlineNotice: { template: "<div><slot /></div>" },
+        },
+      },
+    });
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("确认刷新后的写操作");
+    expect(wrapper.text()).toContain("刷新前的写操作");
+    expect(apiMock.get).toHaveBeenCalledWith(
+      "/api/ai/qa/history/recovery/turn-refresh-action",
+    );
+    wrapper.unmount();
   });
 
   it.each([

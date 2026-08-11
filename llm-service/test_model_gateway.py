@@ -34,6 +34,7 @@ class FakeModel:
 def router_settings() -> Settings:
     return Settings(
         _env_file=None,
+        database_url="postgresql://test:test@127.0.0.1/test",
         llm_api_url="https://primary.example/v1",
         llm_api_key="primary-key",
         llm_model="gpt-4",
@@ -49,6 +50,7 @@ class ModelGatewayFallbackTest(unittest.IsolatedAsyncioTestCase):
     async def test_arbitrary_deepseek_and_ernie_models_form_selectable_chain(self) -> None:
         settings = Settings(
             _env_file=None,
+            database_url="postgresql://test:test@127.0.0.1/test",
             llm_models=[
                 {"id": "deepseek", "provider": "deepseek", "model": "deepseek-chat", "apiUrl": "https://deepseek.test/v1", "apiKey": "key-a"},
                 {"id": "ernie", "provider": "qianfan", "model": "ernie-test", "apiUrl": "https://qianfan.test/v2", "apiKey": "key-b"},

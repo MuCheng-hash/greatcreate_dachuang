@@ -29,6 +29,16 @@ class RoleAuthorizationInterceptorTest {
     }
 
     @Test
+    void teacherCanUseSchoolApisButCannotUseAdminApiAndMustHaveSchool() throws Exception {
+        assertTrue(call("/api/school-map/schools/1/detail", user("teacher", 1L)).allowed());
+        assertTrue(call("/api/ai/qa/stream", user("teacher", 1L)).allowed());
+        Result admin = call("/api/admin/schools", user("teacher", 1L));
+        assertFalse(admin.allowed());
+        assertEquals(403, admin.response().getStatus());
+        assertFalse(call("/api/school-map/schools/1/detail", user("teacher", null)).allowed());
+    }
+
+    @Test
     void unknownRoleIsRejected() throws Exception {
         assertFalse(call("/api/ai/qa/stream", user("guest", null)).allowed());
     }

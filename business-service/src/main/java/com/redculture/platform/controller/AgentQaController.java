@@ -5,15 +5,22 @@ import com.redculture.platform.service.AgentQaService;
 import com.redculture.platform.config.AuthContext;
 import com.redculture.platform.vo.AgentQaResponse;
 import com.redculture.platform.vo.AuthCurrentUserVO;
+import com.redculture.platform.vo.ai.AssistantConversationTurnCancellation;
+import com.redculture.platform.vo.ai.AgentActionVO;
+import com.redculture.platform.vo.request.AgentActionDecisionRequest;
 import com.redculture.platform.vo.request.AgentQaRequest;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.client.RestClientResponseException;
 
 import java.io.IOException;
 import java.util.Map;
@@ -60,6 +67,64 @@ public class AgentQaController {
             return agentQaService.stream(request, currentUser);
         } catch (IllegalArgumentException exception) {
             return errorEmitter("REQUEST_INVALID", exception.getMessage());
+        }
+    }
+
+    @PostMapping("/turns/{clientTurnId}/cancel")
+    public ApiResponse<AssistantConversationTurnCancellation> cancelTurn(
+            @PathVariable String clientTurnId, HttpServletRequest servletRequest) {
+        AuthCurrentUserVO currentUser = AuthContext.currentUser(servletRequest);
+        if (currentUser == null) {
+            return ApiResponse.fail(401, "school account is required");
+        }
+        try {
+            return ApiResponse.success(agentQaService.cancelTurn(clientTurnId, currentUser));
+        } catch (IllegalArgumentException exception) {
+            return ApiResponse.fail(exception.getMessage());
+        }
+    }
+
+    @GetMapping("/actions/{actionId}")
+    public ResponseEntity<ApiResponse<AgentActionVO>> getAction(
+            @PathVariable String actionId, HttpServletRequest servletRequest) {
+        AuthCurrentUserVO currentUser = AuthContext.currentUser(servletRequest);
+        if (currentUser == null) {
+            return ResponseEntity.status(401).body(
+                    ApiResponse.fail(401, "school account is required"));
+        }
+        try {
+            return ResponseEntity.ok(
+                    ApiResponse.success(agentQaService.getAction(actionId, currentUser)));
+        } catch (IllegalArgumentException exception) {
+            return ResponseEntity.badRequest().body(
+                    ApiResponse.fail(400, exception.getMessage()));
+        } catch (RestClientResponseException exception) {
+            return ResponseEntity.status(exception.getStatusCode()).body(
+                    ApiResponse.fail(exception.getStatusCode().value(),
+                            "action request was rejected"));
+        }
+    }
+
+    @PostMapping("/actions/{actionId}/decision")
+    public ResponseEntity<ApiResponse<AgentActionVO>> decideAction(
+            @PathVariable String actionId,
+            @RequestBody AgentActionDecisionRequest request,
+            HttpServletRequest servletRequest) {
+        AuthCurrentUserVO currentUser = AuthContext.currentUser(servletRequest);
+        if (currentUser == null) {
+            return ResponseEntity.status(401).body(
+                    ApiResponse.fail(401, "school account is required"));
+        }
+        try {
+            return ResponseEntity.ok(ApiResponse.success(agentQaService.decideAction(
+                    actionId, request == null ? null : request.getDecision(), currentUser)));
+        } catch (IllegalArgumentException exception) {
+            return ResponseEntity.badRequest().body(
+                    ApiResponse.fail(400, exception.getMessage()));
+        } catch (RestClientResponseException exception) {
+            return ResponseEntity.status(exception.getStatusCode()).body(
+                    ApiResponse.fail(exception.getStatusCode().value(),
+                            "action decision was rejected"));
         }
     }
 

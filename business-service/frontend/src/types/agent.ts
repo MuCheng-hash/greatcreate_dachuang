@@ -95,7 +95,35 @@ export interface AssistantConversationDetail {
 export interface AssistantConversationTurnRecovery {
   found: boolean;
   threadId?: string | null;
+  clientTurnId: string;
+  turnStatus?: "running" | "awaiting_confirmation" | "completed" | "interrupted" | "failed" | "cancelled" | null;
+  retryable: boolean;
+  partialMessage?: AssistantConversationStoredMessage | null;
   message?: AssistantConversationStoredMessage | null;
+  pendingAction?: AgentAction | null;
+}
+
+export interface AssistantConversationTurnCancellation {
+  clientTurnId: string;
+  threadId: string;
+  turnStatus: "running" | "awaiting_confirmation" | "completed" | "interrupted" | "failed" | "cancelled";
+  cancellationRequested: boolean;
+}
+
+export interface AgentAction {
+  actionId: string;
+  clientTurnId: string;
+  threadId: string;
+  toolName: string;
+  title: string;
+  summary: string;
+  arguments: Record<string, unknown>;
+  riskLevel: "LOW" | "HIGH";
+  status: "pending_confirmation" | "approved" | "executing" | "succeeded" | "rejected" | "failed" | "expired";
+  expiresAt: string;
+  resultSummary?: string | null;
+  resourceReference?: string | null;
+  errorCode?: string | null;
 }
 
 export interface AgentCitation {
@@ -172,6 +200,7 @@ export interface AgentQaResponse {
   clarificationOptions?: string[];
   conversationId?: string | null;
   threadId?: string | null;
+  clientTurnId?: string | null;
   runId?: string | null;
   status?: string | null;
   toolExecutions?: AgentToolExecution[];
@@ -211,6 +240,7 @@ export interface StatefulAgentRequest {
   scopeType: string;
   scopeId: number | null;
   threadId?: string | null;
+  clientTurnId: string;
   message: string;
   context?: Record<string, unknown>;
 }
@@ -267,8 +297,14 @@ export type AgentSseEventName =
   | "model.started"
   | "model.completed"
   | "model.failed"
+  | "model.fallback"
+  | "response.reset"
   | "tool.started"
   | "tool.completed"
+  | "action.required"
+  | "action.started"
+  | "action.completed"
+  | "action.failed"
   | "token"
   | "plan.patch"
   | "final"
@@ -279,6 +315,11 @@ export type AgentSseEventName =
 export interface AgentSseEventData {
   runId?: string;
   threadId?: string;
+  clientTurnId?: string;
+  resumed?: boolean;
+  attempt?: number;
+  retryable?: boolean;
+  reset?: boolean;
   conversationId?: string;
   delta?: string;
   patch?: Partial<TeachingPlanResponse>;
@@ -296,6 +337,10 @@ export interface AgentSseEventData {
   provider?: string;
   model?: string;
   response?: AgentQaResponse;
+  action?: AgentAction;
+  actionId?: string;
+  riskLevel?: "LOW" | "HIGH";
+  expiresAt?: string;
   [key: string]: unknown;
 }
 

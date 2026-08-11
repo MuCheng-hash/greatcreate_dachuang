@@ -12,7 +12,9 @@ public class RoleAuthorizationInterceptor implements org.springframework.web.ser
 
     private static final String PLATFORM_ADMIN = "platform_admin";
     private static final String SCHOOL_ADMIN = "school_admin";
-    private static final Set<String> COMMON_ROLES = Set.of(PLATFORM_ADMIN, SCHOOL_ADMIN);
+    private static final String TEACHER = "teacher";
+    private static final Set<String> COMMON_ROLES = Set.of(PLATFORM_ADMIN, SCHOOL_ADMIN, TEACHER);
+    private static final Set<String> SCHOOL_SCOPED_ROLES = Set.of(SCHOOL_ADMIN, TEACHER);
 
     @Override
     public boolean preHandle(HttpServletRequest request, HttpServletResponse response, Object handler) throws Exception {
@@ -27,7 +29,7 @@ public class RoleAuthorizationInterceptor implements org.springframework.web.ser
         if (request.getRequestURI().startsWith("/api/admin/") && !PLATFORM_ADMIN.equals(role)) {
             return forbidden(response, "当前角色没有后台管理权限");
         }
-        if (SCHOOL_ADMIN.equals(role) && user.getSchoolId() == null) {
+        if (SCHOOL_SCOPED_ROLES.contains(role) && user.getSchoolId() == null) {
             return forbidden(response, "学校账号尚未绑定学校");
         }
         return true;

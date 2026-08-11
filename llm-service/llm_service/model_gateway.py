@@ -164,8 +164,8 @@ class ModelGateway:
             except Exception as exc:
                 error_type = classify_llm_error(exc)
             attempts.append(self._attempt(target, error_type))
-            self._fallback(context, target, index, error_type, attempts_chain)
-        self.alerts.exhausted(context, attempts or [{"status": "not_configured"}])
+            await self._fallback(context, target, index, error_type, attempts_chain)
+        await self.alerts.exhausted(context, attempts or [{"status": "not_configured"}])
         return None, {}
 
     async def stream_text(self, prompt: str, trace_context: LlmTraceContext | None = None, model_id: str | None = None):
@@ -208,7 +208,7 @@ class ModelGateway:
             attempts.append(self._attempt(target, error_type))
             next_target = self._next_target(index, attempts_chain)
             if next_target is not None:
-                self.alerts.fallback(
+                await self.alerts.fallback(
                     context, target.model, next_target.model, error_type,
                     next_target.fallback_level,
                 )
@@ -218,7 +218,7 @@ class ModelGateway:
                     "errorType": error_type,
                     "fallbackLevel": next_target.fallback_level,
                 }
-        self.alerts.exhausted(context, attempts or [{"status": "not_configured"}])
+        await self.alerts.exhausted(context, attempts or [{"status": "not_configured"}])
         yield "exhausted", {"attempts": attempts}
 
     @staticmethod
@@ -262,13 +262,13 @@ class ModelGateway:
             "fallbackLevel": target.fallback_level,
         })
 
-    def _fallback(
+    async def _fallback(
         self, context: LlmTraceContext, target: LlmModelTarget, index: int, error_type: str,
         chain: list[tuple[LlmModelTarget, ChatOpenAI]],
     ) -> None:
         next_target = self._next_target(index, chain)
         if next_target is not None:
-            self.alerts.fallback(
+            await self.alerts.fallback(
                 context, target.model, next_target.model, error_type,
                 next_target.fallback_level,
             )

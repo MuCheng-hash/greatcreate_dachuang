@@ -57,6 +57,8 @@ class AgentQaServiceImplTest {
         assertEquals("chunk:1", response.getCitations().get(0).getCitationId());
         assertEquals(List.of("dense", "lexical", "rrf"), response.getRetrievalMethods());
         assertFalse(response.getRelatedResources().isEmpty());
+        assertTrue(response.getClientTurnId() != null
+                && !response.getClientTurnId().isBlank());
         verify(retriever).retrieve(any(KnowledgeRetrieveRequest.class));
     }
 
