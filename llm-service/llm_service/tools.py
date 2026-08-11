@@ -34,6 +34,7 @@ class ToolRuntimeContext:
     repository: ConversationRepository
     output_character_limit: int
     turn_id: str | None = None
+    action_id: str | None = None
     call_namespace: str = "graph"
     executions: list[ToolExecution] = field(default_factory=list)
     event_sink: Callable[[str, dict[str, Any]], None] | None = None
@@ -133,6 +134,33 @@ class ToolRuntimeContext:
         )
         return bounded
 
+    async def run_write(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        *,
+        path: str,
+        payload: dict[str, Any],
+    ) -> str:
+        """写工具的唯一运行入口：风险注册、确认动作和下游幂等键缺一不可。"""
+        policy = TOOL_POLICIES.get(name)
+        if policy is None or policy.effect != "WRITE":
+            raise BusinessToolError("write_tool_policy_required")
+        if not self.action_id or not self.turn_id:
+            raise BusinessToolError("write_tool_confirmation_required")
+        if self.business_tool_client is None:
+            raise BusinessToolError("business_tool_unconfigured")
+        return await self.run(
+            name,
+            arguments,
+            lambda: self.business_tool_client.execute_write(
+                path,
+                payload,
+                action_id=self.action_id or "",
+                turn_id=self.turn_id or "",
+            ),
+        )
+
     def _tool_call_id(
         self, name: str, arguments: dict[str, Any]
     ) -> str | None:
@@ -151,6 +179,50 @@ class ToolRuntimeContext:
             f"{self.turn_id}:{identity}:{sequence}".encode("utf-8")
         ).hexdigest()
         return f"tool-{digest}"
+
+
+@dataclass(frozen=True, slots=True)
+class ToolPolicy:
+    effect: str
+    risk_level: str
+    requires_confirmation: bool
+
+
+# 风险级别只允许由服务端代码定义；模型参数不能覆盖该注册表。
+TOOL_POLICIES: dict[str, ToolPolicy] = {
+    "get_scope_context": ToolPolicy("READ", "LOW", False),
+    "search_approved_resources": ToolPolicy("READ", "LOW", False),
+    "retrieve_knowledge": ToolPolicy("READ", "LOW", False),
+    "query_graph_relations": ToolPolicy("READ", "LOW", False),
+}
+
+
+def write_tool_interrupts(enabled: bool) -> dict[str, dict[str, Any]]:
+    if not enabled:
+        return {}
+    return {
+        name: {"allowed_decisions": ["approve", "reject"]}
+        for name, policy in TOOL_POLICIES.items()
+        if policy.effect == "WRITE" and policy.requires_confirmation
+    }
+
+
+def validate_tool_policies() -> None:
+    registered = {str(item.name) for item in AGENT_TOOLS}
+    missing = registered - TOOL_POLICIES.keys()
+    if missing:
+        raise RuntimeError(
+            "tools without an explicit server-side policy: " + ", ".join(sorted(missing))
+        )
+    unsafe = [
+        name
+        for name, policy in TOOL_POLICIES.items()
+        if policy.effect == "WRITE"
+        and policy.risk_level == "HIGH"
+        and not policy.requires_confirmation
+    ]
+    if unsafe:
+        raise RuntimeError("high-risk write tools must require confirmation")
 
 
 def _sanitize(arguments: dict[str, Any]) -> dict[str, Any]:
@@ -381,3 +453,5 @@ AGENT_TOOLS = [
     retrieve_knowledge,
     query_graph_relations,
 ]
+
+validate_tool_policies()

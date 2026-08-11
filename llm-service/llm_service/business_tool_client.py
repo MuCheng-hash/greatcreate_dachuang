@@ -26,6 +26,7 @@ class BusinessToolClient:
         service_token: str,
         timeout_seconds: float = 5.0,
         client: httpx.AsyncClient | None = None,
+        write_tools_enabled: bool = False,
     ):
         self.base_url = base_url.strip().rstrip("/")
         self.service_token = service_token.strip()
@@ -34,6 +35,7 @@ class BusinessToolClient:
             timeout=self.timeout_seconds, trust_env=False
         )
         self._owns_client = client is None
+        self.write_tools_enabled = bool(write_tools_enabled)
 
     @property
     def configured(self) -> bool:
@@ -52,6 +54,60 @@ class BusinessToolClient:
         self, payload: Mapping[str, Any]
     ) -> dict[str, Any]:
         return await self._post_retrieval(self.RELATION_QUERY_PATH, payload)
+
+    async def execute_write(
+        self,
+        path: str,
+        payload: Mapping[str, Any],
+        *,
+        action_id: str,
+        turn_id: str,
+    ) -> dict[str, Any]:
+        """未来写工具的唯一 HTTP 出口；默认关闭且强制端到端幂等键。"""
+        if not self.write_tools_enabled:
+            raise BusinessToolError("write_tools_disabled")
+        if not action_id.strip() or not turn_id.strip():
+            raise BusinessToolError("write_tool_idempotency_required")
+        normalized_path = path.strip()
+        if not normalized_path.startswith("/internal/agent/actions/"):
+            raise BusinessToolError("write_tool_path_rejected")
+        try:
+            response = await self._client.post(
+                f"{self.base_url}{normalized_path}",
+                headers={
+                    **self._headers(),
+                    "Idempotency-Key": action_id,
+                    "X-Agent-Turn-Id": turn_id,
+                },
+                json=dict(payload),
+            )
+        except httpx.TimeoutException as exc:
+            raise BusinessToolError("business_tool_timeout") from exc
+        except httpx.HTTPError as exc:
+            raise BusinessToolError("business_tool_transport_error") from exc
+        if response.status_code == 409:
+            conflict_code = "idempotency_conflict"
+            try:
+                envelope = response.json()
+                data = envelope.get("data") if isinstance(envelope, dict) else None
+                candidate = data.get("code") if isinstance(data, dict) else None
+                if candidate in {"idempotency_conflict", "action_in_progress"}:
+                    conflict_code = candidate
+            except ValueError:
+                pass
+            raise BusinessToolError(conflict_code)
+        if response.status_code == 202:
+            raise BusinessToolError("action_in_progress")
+        if response.status_code != 200:
+            raise BusinessToolError(f"business_tool_http_{response.status_code}")
+        try:
+            envelope = response.json()
+        except ValueError as exc:
+            raise BusinessToolError("business_tool_invalid_json") from exc
+        if not isinstance(envelope, dict) or envelope.get("code") != 200:
+            raise BusinessToolError("business_tool_rejected")
+        data = envelope.get("data")
+        return dict(data) if isinstance(data, dict) else {}
 
     async def web_source_domains(self) -> list[str]:
         if not self.configured:

@@ -16,8 +16,11 @@ import httpx
 
 from fastapi.encoders import jsonable_encoder
 from langchain.agents import create_agent
+from langchain.agents.middleware import HumanInTheLoopMiddleware
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, SystemMessage
+from langgraph.types import Command
 
+from .actions import AgentActionRecord, AgentActionRepository
 from .checkpointing import CheckpointManager
 from .memory import ContextWindow, ContextWindowManager
 from .model_gateway import ModelGateway, message_text
@@ -76,12 +79,19 @@ from .tools import (
     query_graph_relations,
     reset_tool_runtime,
     retrieve_knowledge,
+    write_tool_interrupts,
     _merge_retrieval,
 )
 
 
 LOGGER = logging.getLogger("llm.stateful_agent")
 EventSink = Callable[[str, dict[str, Any]], None]
+
+
+class ActionConfirmationRequired(RuntimeError):
+    def __init__(self, action: AgentActionRecord):
+        self.action = action
+        super().__init__("action confirmation is required")
 
 
 @dataclass(slots=True)
@@ -152,6 +162,7 @@ class AgentRuntime:
         memory_repository: MemoryRepository | None = None,
         turn_repository: AgentTurnRepository | None = None,
         checkpoints: CheckpointManager | None = None,
+        action_repository: AgentActionRepository | None = None,
     ):
         self.settings = settings
         self.repository = repository
@@ -173,6 +184,9 @@ class AgentRuntime:
             repository.database
         )
         self.checkpoints = checkpoints or CheckpointManager(repository.database)
+        self.action_repository = action_repository or AgentActionRepository(
+            repository.database, settings.agent_action_confirmation_minutes
+        )
         self.instance_id = str(uuid.uuid4())
         self.explicit_memory_extractor = ExplicitMemoryExtractor()
         self.context_manager = ContextWindowManager(
@@ -220,6 +234,8 @@ class AgentRuntime:
             await self._finish_cancelled_or_interrupted(
                 request, prepared.registration.turn, writer, "request_cancelled"
             )
+            raise
+        except ActionConfirmationRequired:
             raise
         except (TurnConflictError, TurnLeaseLostError):
             raise
@@ -318,6 +334,12 @@ class AgentRuntime:
                     "stream_disconnected",
                 )
                 raise
+            except ActionConfirmationRequired as exc:
+                publish("action.required", {"action": self._action_event(exc.action)})
+                publish("done", {
+                    "clientTurnId": request.client_turn_id,
+                    "turnStatus": "awaiting_confirmation",
+                })
             except TurnConflictError as exc:
                 publish("error", {"code": exc.code, "message": str(exc)})
                 publish("done")
@@ -722,12 +744,20 @@ class AgentRuntime:
             raise RuntimeError("model_unavailable")
         key = (config.model, config.fallback_level, checkpoint_namespace)
         if key not in self._agents:
+            interrupt_on = write_tool_interrupts(
+                self.settings.agent_write_tools_enabled
+            )
             self._agents[key] = create_agent(
                 self.model.build_model(config),
                 tools=AGENT_TOOLS,
                 system_prompt=await self._load_prompt(),
                 checkpointer=self.checkpoints.scoped_saver(
                     checkpoint_namespace
+                ),
+                middleware=(
+                    [HumanInTheLoopMiddleware(interrupt_on=interrupt_on)]
+                    if interrupt_on
+                    else []
                 ),
             )
         return self._agents[key]
@@ -882,10 +912,12 @@ class AgentRuntime:
                     resumed=registration.resumed,
                 )
                 return self._with_model_metadata(result, config)
-            except (TurnConflictError, TurnLeaseLostError):
+            except (ActionConfirmationRequired, TurnConflictError, TurnLeaseLostError):
                 raise
             except Exception as exc:
                 executions.extend(runtime.executions[len(prefetched_executions):])
+                if await self._has_executing_action(registration.turn.turn_id):
+                    raise
                 error_type = classify_llm_error(exc)
                 LOGGER.warning(
                     "stateful_agent_model_failed",
@@ -1086,10 +1118,12 @@ class AgentRuntime:
                 )
                 emit("phase.completed", {"phase": "response", "label": "回答生成完成"})
                 return result
-            except (TurnConflictError, TurnLeaseLostError):
+            except (ActionConfirmationRequired, TurnConflictError, TurnLeaseLostError):
                 raise
             except Exception as exc:
                 executions.extend(runtime.executions[len(prefetched_executions):])
+                if await self._has_executing_action(registration.turn.turn_id):
+                    raise
                 LOGGER.warning(
                     "stateful_agent_stream_model_failed",
                     extra={
@@ -1783,8 +1817,26 @@ class AgentRuntime:
                 turn.turn_id, checkpoint_namespace
             )
         )
+        resume_action = (
+            await self.action_repository.resumable_for_turn(turn.turn_id)
+            if durable_resume and turn is not None
+            else None
+        )
+        graph_input: Any = None if durable_resume else {"messages": lc_messages}
+        if resume_action is not None and resume_action.status in {
+            "approved", "rejected", "executing"
+        }:
+            decision = "approve" if resume_action.status == "approved" else "reject"
+            if decision == "approve":
+                resume_action = await self.action_repository.mark_executing(
+                    resume_action.action_id
+                )
+            elif resume_action.status == "executing":
+                decision = "approve"
+            runtime.action_id = resume_action.action_id
+            graph_input = Command(resume={"decisions": [{"type": decision}]})
         result = await target_agent.ainvoke(
-            None if durable_resume else {"messages": lc_messages},
+            graph_input,
             config=self._agent_invoke_config(
                 request,
                 thread,
@@ -1794,6 +1846,16 @@ class AgentRuntime:
                 checkpoint_namespace,
             ),
         )
+        await self._raise_for_pending_action(
+            target_agent,
+            turn,
+            request,
+            thread,
+            model_config,
+            plan,
+            checkpoint_namespace,
+        )
+        await self._finalize_resumed_action(resume_action, runtime.executions)
         return await self._response_from_model_result(
             result,
             trusted,
@@ -1846,9 +1908,32 @@ class AgentRuntime:
                 turn.turn_id, checkpoint_namespace
             )
         )
+        resume_action = (
+            await self.action_repository.resumable_for_turn(turn.turn_id)
+            if durable_resume and turn is not None
+            else None
+        )
+        graph_input: Any = None if durable_resume else {"messages": lc_messages}
+        if resume_action is not None and resume_action.status in {
+            "approved", "rejected", "executing"
+        }:
+            decision = "approve" if resume_action.status == "approved" else "reject"
+            if decision == "approve":
+                resume_action = await self.action_repository.mark_executing(
+                    resume_action.action_id
+                )
+                emit("action.started", {"actionId": resume_action.action_id})
+            elif resume_action.status == "executing":
+                decision = "approve"
+                emit(
+                    "action.started",
+                    {"actionId": resume_action.action_id, "resumed": True},
+                )
+            runtime.action_id = resume_action.action_id
+            graph_input = Command(resume={"decisions": [{"type": decision}]})
         if hasattr(target_agent, "astream"):
             async for chunk in target_agent.astream(
-                None if durable_resume else {"messages": lc_messages},
+                graph_input,
                 config=self._agent_invoke_config(
                     request,
                     thread,
@@ -1889,9 +1974,18 @@ class AgentRuntime:
                 if isinstance(values, dict):
                     model_messages = list(values.get("messages") or [])
                     model_buffer = self._last_ai_message_text(model_messages)
+            await self._raise_for_pending_action(
+                target_agent,
+                turn,
+                request,
+                thread,
+                model_config,
+                plan,
+                checkpoint_namespace,
+            )
         else:
             result = await target_agent.ainvoke(
-                None if durable_resume else {"messages": lc_messages},
+                graph_input,
                 config=self._agent_invoke_config(
                     request,
                     thread,
@@ -1903,6 +1997,15 @@ class AgentRuntime:
             )
             model_messages = result.get("messages", []) if isinstance(result, dict) else []
             model_buffer = self._last_ai_message_text(model_messages)
+            await self._raise_for_pending_action(
+                target_agent,
+                turn,
+                request,
+                thread,
+                model_config,
+                plan,
+                checkpoint_namespace,
+            )
 
         parse_messages = [AIMessage(content=model_buffer)] if model_buffer else model_messages
         response = await self._response_from_model_result(
@@ -1915,7 +2018,117 @@ class AgentRuntime:
             await self._emit_answer_chunks(response.answer[emitted_answer_length:], emit)
         if partial_writer is not None:
             await partial_writer.update(response.answer, force=True)
+        await self._finalize_resumed_action(resume_action, runtime.executions, emit)
         return response
+
+    async def _raise_for_pending_action(
+        self,
+        agent: Any,
+        turn: AgentTurnRecord | None,
+        request: AgentMessageRequest,
+        thread: ThreadRecord,
+        model_config: ModelConfig | None,
+        plan: AgentPlan,
+        checkpoint_namespace: str | None,
+    ) -> None:
+        if turn is None or not hasattr(agent, "aget_state"):
+            return
+        snapshot = await agent.aget_state(
+            self._agent_invoke_config(
+                request,
+                thread,
+                model_config or self._primary_model_config(),
+                plan,
+                turn,
+                checkpoint_namespace,
+            )
+        )
+        pending: list[tuple[str, dict[str, Any]]] = []
+        for task in getattr(snapshot, "tasks", ()) or ():
+            for interrupt in getattr(task, "interrupts", ()) or ():
+                value = getattr(interrupt, "value", None)
+                if not isinstance(value, dict):
+                    continue
+                requests = value.get("action_requests")
+                if not isinstance(requests, list):
+                    continue
+                for item in requests:
+                    if isinstance(item, dict):
+                        pending.append((str(getattr(interrupt, "id", "") or ""), item))
+        if not pending:
+            return
+        if len(pending) != 1:
+            raise RuntimeError("multiple write actions in one model step are not allowed")
+        interrupt_id, action_request = pending[0]
+        tool_name = str(action_request.get("name") or "").strip()
+        arguments = action_request.get("args")
+        if not tool_name or not isinstance(arguments, dict):
+            raise RuntimeError("invalid write action interrupt")
+        logical_call_id = interrupt_id or hashlib.sha256(
+            json.dumps(action_request, sort_keys=True, default=str).encode("utf-8")
+        ).hexdigest()
+        action = await self.action_repository.create_or_get(
+            turn_id=turn.turn_id,
+            logical_call_id=logical_call_id,
+            tool_name=tool_name,
+            arguments=arguments,
+            sanitized_arguments={
+                key: str(value)[:500]
+                for key, value in arguments.items()
+                if "key" not in key.lower() and "token" not in key.lower()
+            },
+            risk_level="HIGH",
+            requires_confirmation=True,
+        )
+        raise ActionConfirmationRequired(action)
+
+    async def _has_executing_action(self, turn_id: str) -> bool:
+        action = await self.action_repository.resumable_for_turn(turn_id)
+        return action is not None and action.status == "executing"
+
+    async def _finalize_resumed_action(
+        self,
+        action: AgentActionRecord | None,
+        executions: list[ToolExecution],
+        emit: EventSink | None = None,
+    ) -> None:
+        if action is None or action.status != "executing":
+            return
+        execution = next(
+            (item for item in reversed(executions) if item.name == action.tool_name), None
+        )
+        if execution is None:
+            return
+        if execution.status == "completed":
+            completed = await self.action_repository.mark_succeeded(
+                action.action_id, result_summary="写操作已完成"
+            )
+            if emit is not None:
+                emit("action.completed", {"actionId": completed.action_id})
+        elif execution.status == "failed":
+            failed = await self.action_repository.mark_failed(
+                action.action_id, "write_tool_failed"
+            )
+            if emit is not None:
+                emit(
+                    "action.failed",
+                    {"actionId": failed.action_id, "errorCode": failed.error_code},
+                )
+
+    @staticmethod
+    def _action_event(action: AgentActionRecord) -> dict[str, Any]:
+        return {
+            "actionId": action.action_id,
+            "clientTurnId": action.client_turn_id,
+            "threadId": action.thread_id,
+            "toolName": action.tool_name,
+            "title": f"确认执行 {action.tool_name}",
+            "summary": "该操作会修改业务数据，请确认是否继续。",
+            "arguments": action.sanitized_arguments,
+            "riskLevel": action.risk_level,
+            "status": action.status,
+            "expiresAt": action.expires_at.isoformat(),
+        }
 
     def _build_messages(
         self, messages: list[dict[str, str]], summary: str, plan: AgentPlan,

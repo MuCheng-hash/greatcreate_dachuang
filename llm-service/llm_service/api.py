@@ -17,6 +17,7 @@ from psycopg import InterfaceError, OperationalError
 from psycopg_pool import PoolTimeout
 
 from .container import AppContainer, build_container
+from .actions import ActionConflictError, AgentActionRecord
 from .legacy import (
     build_map_answer,
     build_structured_teaching_plan,
@@ -27,10 +28,12 @@ from .model_gateway import message_text
 from .prompt_manager import PromptVersionExistsError
 from .repository import ThreadNotFoundError, ThreadScopeError
 from .routes import health_router
-from .runtime import AgentRuntime
+from .runtime import ActionConfirmationRequired, AgentRuntime
 from .schemas import (
     AgentMessageRequest,
     AgentMessageResponse,
+    AgentActionDecisionRequest,
+    AgentActionResponse,
     MemoryConflictPreviewResponse,
     MemoryCreateRequest,
     MemoryItem,
@@ -145,6 +148,26 @@ def create_app(
     migrator = container.migrator
     checkpoints = container.checkpoints
     turn_repository = container.turn_repository
+    action_repository = container.action_repository
+
+    def action_response(action: AgentActionRecord) -> AgentActionResponse:
+        title = f"确认执行 {action.tool_name}"
+        summary = "该操作会修改业务数据，请确认是否继续。"
+        return AgentActionResponse(
+            actionId=action.action_id,
+            clientTurnId=action.client_turn_id,
+            threadId=action.thread_id,
+            toolName=action.tool_name,
+            title=title,
+            summary=summary,
+            arguments=action.sanitized_arguments,
+            riskLevel=action.risk_level,
+            status=action.status,
+            expiresAt=action.expires_at,
+            resultSummary=action.result_summary,
+            resourceReference=action.resource_reference,
+            errorCode=action.error_code,
+        )
 
     async def memory_cleanup_loop() -> None:
         interval = max(1, settings.agent_memory_cleanup_interval_seconds)
@@ -186,10 +209,27 @@ def create_app(
             except Exception:
                 LOGGER.exception("agent_checkpoint_cleanup_loop_failed")
 
+    async def action_cleanup_once() -> None:
+        await action_repository.expire_pending()
+        await action_repository.redact_finished(
+            settings.agent_action_payload_retention_days,
+            settings.agent_action_cleanup_batch_size,
+        )
+
+    async def action_cleanup_loop() -> None:
+        interval = max(60, settings.agent_action_cleanup_interval_seconds)
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                await action_cleanup_once()
+            except Exception:
+                LOGGER.exception("agent_action_cleanup_failed")
+
     @asynccontextmanager
     async def lifespan(application: FastAPI):
         cleanup_task: asyncio.Task[None] | None = None
         checkpoint_cleanup_task: asyncio.Task[None] | None = None
+        action_cleanup_task: asyncio.Task[None] | None = None
         database_open = False
         try:
             await database.open()
@@ -204,6 +244,7 @@ def create_app(
             await alerts.start()
             await memory_repository.cleanup_expired()
             await checkpoint_cleanup_once()
+            await action_cleanup_once()
             cleanup_task = asyncio.create_task(
                 memory_cleanup_loop(), name="agent-memory-cleanup"
             )
@@ -212,8 +253,16 @@ def create_app(
                 checkpoint_cleanup_loop(), name="agent-checkpoint-cleanup"
             )
             application.state.checkpoint_cleanup_task = checkpoint_cleanup_task
+            action_cleanup_task = asyncio.create_task(
+                action_cleanup_loop(), name="agent-action-cleanup"
+            )
+            application.state.action_cleanup_task = action_cleanup_task
             yield
         finally:
+            if action_cleanup_task is not None:
+                action_cleanup_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await action_cleanup_task
             if checkpoint_cleanup_task is not None:
                 checkpoint_cleanup_task.cancel()
                 with suppress(asyncio.CancelledError):
@@ -719,6 +768,7 @@ def create_app(
                 found=False, clientTurnId=client_turn_id
             )
         messages = await repository.list_messages_for_turn(turn.turn_id)
+        pending_action = await action_repository.pending_for_turn(turn.turn_id)
         assistant = next(
             (item for item in messages if item["role"] == "assistant"), None
         )
@@ -741,7 +791,56 @@ def create_app(
             turnStatus=turn.status,
             retryable=turn.retryable,
             partialMessage=stored if turn.status != "completed" else None,
+            pendingAction=(
+                action_response(pending_action) if pending_action is not None else None
+            ),
         )
+
+    @app.get(
+        "/agent/actions/{action_id}",
+        response_model=AgentActionResponse,
+        dependencies=[Depends(require_internal_agent_token)],
+    )
+    async def get_agent_action(
+        action_id: str,
+        owner_id: str = Query(alias="ownerId"),
+        scope_type: str = Query(alias="scopeType"),
+        scope_id: str | int = Query(alias="scopeId"),
+    ) -> AgentActionResponse:
+        try:
+            action = await action_repository.get_for_scope(
+                action_id, owner_id, scope_type, scope_id
+            )
+        except PermissionError as exc:
+            raise HTTPException(status_code=404, detail="action not found") from exc
+        if action is None:
+            raise HTTPException(status_code=404, detail="action not found")
+        return action_response(action)
+
+    @app.post(
+        "/agent/actions/{action_id}/decision",
+        response_model=AgentActionResponse,
+        dependencies=[Depends(require_internal_agent_token)],
+    )
+    async def decide_agent_action(
+        action_id: str, request: AgentActionDecisionRequest
+    ) -> AgentActionResponse:
+        try:
+            action = await action_repository.decide(
+                action_id=action_id,
+                decision=request.decision,
+                owner_id=request.owner_id,
+                scope_type=request.scope_type,
+                scope_id=request.scope_id,
+            )
+        except (LookupError, PermissionError) as exc:
+            raise HTTPException(status_code=404, detail="action not found") from exc
+        except ActionConflictError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": exc.code, "message": str(exc)},
+            ) from exc
+        return action_response(action)
 
     @app.post(
         "/agent/turns/{client_turn_id}/cancel",
@@ -755,6 +854,22 @@ def create_app(
         scope_id: str | int = Query(alias="scopeId"),
     ) -> TurnCancelResponse:
         try:
+            existing = await turn_repository.get(
+                client_turn_id,
+                owner_id=owner_id,
+                scope_type=scope_type,
+                scope_id=scope_id,
+            )
+            if existing is not None:
+                pending = await action_repository.pending_for_turn(existing.turn_id)
+                if pending is not None:
+                    await action_repository.decide(
+                        action_id=pending.action_id,
+                        decision="reject",
+                        owner_id=owner_id,
+                        scope_type=scope_type,
+                        scope_id=scope_id,
+                    )
             turn = await runtime.cancel_turn(
                 client_turn_id, owner_id, scope_type, scope_id
             )
@@ -799,6 +914,16 @@ def create_app(
         request.thread_id = thread_id
         try:
             return await runtime.handle(request)
+        except ActionConfirmationRequired as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "action_confirmation_required",
+                    "pendingAction": action_response(exc.action).model_dump(
+                        by_alias=True, mode="json"
+                    ),
+                },
+            ) from exc
         except TurnConflictError as exc:
             raise_turn_conflict(exc)
         except TurnLeaseLostError as exc:
@@ -819,6 +944,16 @@ def create_app(
         validate_model_selection(request)
         try:
             return await runtime.handle(request)
+        except ActionConfirmationRequired as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "action_confirmation_required",
+                    "pendingAction": action_response(exc.action).model_dump(
+                        by_alias=True, mode="json"
+                    ),
+                },
+            ) from exc
         except TurnConflictError as exc:
             raise_turn_conflict(exc)
         except TurnLeaseLostError as exc:

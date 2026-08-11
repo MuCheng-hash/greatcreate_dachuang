@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from fastapi import Request
 
 from .business_tool_client import BusinessToolClient
+from .actions import AgentActionRepository
 from .checkpointing import CheckpointManager
 from .database import Database, SchemaMigrator
 from .health import HealthService
@@ -25,6 +26,7 @@ class AppContainer:
     migrator: SchemaMigrator
     repository: ConversationRepository
     turn_repository: AgentTurnRepository
+    action_repository: AgentActionRepository
     checkpoints: CheckpointManager
     memory_repository: MemoryRepository
     observability: LlmObservability
@@ -45,6 +47,9 @@ def build_container(
     migrator = SchemaMigrator(database, settings.migration_dsn)
     repository = ConversationRepository(database)
     turn_repository = AgentTurnRepository(database)
+    action_repository = AgentActionRepository(
+        database, settings.agent_action_confirmation_minutes
+    )
     checkpoints = CheckpointManager(database)
     memory_repository = MemoryRepository(
         database,
@@ -67,6 +72,7 @@ def build_container(
         settings.internal_business_base_url,
         settings.internal_service_token,
         settings.agent_tool_timeout_seconds,
+        write_tools_enabled=settings.agent_write_tools_enabled,
     )
     runtime = AgentRuntime(
         settings,
@@ -79,6 +85,7 @@ def build_container(
         memory_repository,
         turn_repository,
         checkpoints,
+        action_repository,
     )
     health = HealthService(
         settings,
@@ -94,6 +101,7 @@ def build_container(
         migrator=migrator,
         repository=repository,
         turn_repository=turn_repository,
+        action_repository=action_repository,
         checkpoints=checkpoints,
         memory_repository=memory_repository,
         observability=observability,

@@ -6,7 +6,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from llm_service.business_tool_client import BusinessToolClient
+from llm_service.business_tool_client import BusinessToolClient, BusinessToolError
 from llm_service.schemas import TrustedContext
 from llm_service.tools import ToolRuntimeContext, bind_tool_runtime, query_graph_relations, reset_tool_runtime
 from postgres_test_support import conversation_repository, run_async, settings_for_database
@@ -108,6 +108,60 @@ def test_business_tool_client_reads_internal_web_source_domains() -> None:
     run_async(http_client.aclose())
     assert received["url"].endswith("/internal/agent/tools/web-source-domains")
     assert received["token"] == "secret"
+
+
+def test_write_client_forwards_stable_end_to_end_idempotency_headers() -> None:
+    received = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        received["idempotency_key"] = request.headers.get("Idempotency-Key")
+        received["turn_id"] = request.headers.get("X-Agent-Turn-Id")
+        received["body"] = json.loads(request.content)
+        return httpx.Response(
+            200, json={"code": 200, "data": {"resourceId": 7}}
+        )
+
+    http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = BusinessToolClient(
+        "http://business-service",
+        "secret",
+        write_tools_enabled=True,
+        client=http_client,
+    )
+    result = run_async(client.execute_write(
+        "/internal/agent/actions/resources/update",
+        {"resourceId": 7},
+        action_id="stable-action-1",
+        turn_id="turn-1",
+    ))
+    run_async(http_client.aclose())
+
+    assert result == {"resourceId": 7}
+    assert received == {
+        "idempotency_key": "stable-action-1",
+        "turn_id": "turn-1",
+        "body": {"resourceId": 7},
+    }
+
+
+def test_write_client_keeps_action_in_progress_distinct_from_payload_conflict() -> None:
+    http_client = httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda _request: httpx.Response(
+            409,
+            json={"code": 409, "data": {"code": "action_in_progress"}},
+        )
+    ))
+    client = BusinessToolClient(
+        "http://business-service", "secret",
+        write_tools_enabled=True, client=http_client,
+    )
+
+    with pytest.raises(BusinessToolError, match="action_in_progress"):
+        run_async(client.execute_write(
+            "/internal/agent/actions/resources/update", {},
+            action_id="stable-action-1", turn_id="turn-1",
+        ))
+    run_async(http_client.aclose())
 
 
 def test_graph_tool_keeps_explicit_degraded_fallback_and_audit(tmp_path: Path) -> None:

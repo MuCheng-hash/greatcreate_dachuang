@@ -103,6 +103,11 @@ class AgentTurnRepository:
                 status = str(existing["status"])
                 if status == "completed":
                     return TurnRegistration(self._from_row(existing), resumed=True)
+                if status == "awaiting_confirmation":
+                    raise TurnConflictError(
+                        "action_confirmation_required",
+                        "the requested turn is waiting for action confirmation",
+                    )
                 if (
                     status == "running"
                     and existing.get("cancel_requested_at")
@@ -136,7 +141,7 @@ class AgentTurnRepository:
                         WHERE thread_id = %s
                           AND client_turn_id <> %s
                           AND (
-                              status IN ('running', 'interrupted')
+                              status IN ('running', 'awaiting_confirmation', 'interrupted')
                               OR (status = 'failed' AND retryable)
                           )
                         LIMIT 1
@@ -217,7 +222,7 @@ class AgentTurnRepository:
                     FROM agent_turn
                     WHERE thread_id = %s
                       AND (
-                          status IN ('running', 'interrupted')
+                          status IN ('running', 'awaiting_confirmation', 'interrupted')
                           OR (status = 'failed' AND retryable)
                       )
                     LIMIT 1

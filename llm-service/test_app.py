@@ -478,6 +478,7 @@ def test_client_turn_id_persists_and_recovers_only_within_owner_scope(tmp_path: 
         "turnStatus": None,
         "retryable": False,
         "partialMessage": None,
+        "pendingAction": None,
     }
     assert cross_owner.json()["found"] is False
     assert cross_scope.json()["found"] is False

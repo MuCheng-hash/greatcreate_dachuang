@@ -54,6 +54,10 @@ business service, set the same environment variable before starting this service
 | `AGENT_CHECKPOINT_RETENTION_DAYS` | `7` | Retention for terminal single-turn graph checkpoints |
 | `AGENT_CHECKPOINT_CLEANUP_BATCH_SIZE` | `50` | Maximum checkpoint threads claimed per cleanup batch |
 | `AGENT_CHECKPOINT_CLEANUP_INTERVAL_SECONDS` | `3600` | Lifespan-managed checkpoint cleanup interval |
+| `AGENT_WRITE_TOOLS_ENABLED` | `false` | Global fail-closed switch for all Agent write tools and the Java Outbox worker |
+| `AGENT_ACTION_CONFIRMATION_MINUTES` | `15` | Approval window for a pending write action |
+| `AGENT_ACTION_PAYLOAD_RETENTION_DAYS` | `30` | Retention before completed action payloads are redacted |
+| `AGENT_ACTION_CLEANUP_INTERVAL_SECONDS` | `3600` | Lifespan-managed action expiry and redaction interval |
 | `PROMPT_ADMIN_TOKEN` | empty | Required token for prompt-management APIs |
 | `OBSERVABILITY_ADMIN_TOKEN` | empty | Required token for observability APIs |
 | `AGENT_INTERNAL_SERVICE_TOKEN` | empty | Required internal token for Agent thread/message APIs; missing configuration returns `503` |

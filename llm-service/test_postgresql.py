@@ -4,6 +4,7 @@ import asyncio
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import TypedDict
 from unittest.mock import AsyncMock
 
@@ -15,10 +16,11 @@ import pytest
 from langgraph.graph import END, START, StateGraph
 
 from llm_service.api import create_app
+from llm_service.actions import AgentActionRepository, ActionConflictError
 from llm_service.checkpointing import CheckpointManager
 from llm_service.database import SchemaMigrator
 from llm_service.repository import ConversationRepository
-from llm_service.runtime import AgentRuntime
+from llm_service.runtime import ActionConfirmationRequired, AgentRuntime
 from llm_service.schemas import AgentMessageRequest, TrustedContext
 from llm_service.sqlite_import import (
     SqliteImporter,
@@ -213,9 +215,9 @@ def test_empty_schema_migration_is_repeatable_and_uses_postgresql_types(
 
     async def exercise() -> None:
         assert await migrator.current_version() == 0
-        assert await migrator.migrate() == 2
-        assert await migrator.migrate() == 2
-        assert await migrator.validate() == 2
+        assert await migrator.migrate() == 3
+        assert await migrator.migrate() == 3
+        assert await migrator.validate() == 3
         async with database.connection() as connection:
             rows = await (
                 await connection.execute(
@@ -588,6 +590,277 @@ def test_turn_registration_is_idempotent_and_thread_scoped(
 
     thread = None
     run_async(exercise())
+
+
+def test_agent_action_confirmation_is_scoped_idempotent_and_expiring(
+    tmp_path: Path,
+) -> None:
+    settings = settings_for_database(tmp_path)
+    database = open_database(settings)
+    conversations = ConversationRepository(database)
+    turns = AgentTurnRepository(database)
+    actions = AgentActionRepository(database, confirmation_minutes=15)
+
+    async def exercise() -> None:
+        thread = await conversations.create_thread("account:1", "SCHOOL", "1")
+        registration = await turns.register(
+            client_turn_id="action-client-turn",
+            requested_thread_id=thread.thread_id,
+            owner_id="account:1",
+            scope_type="SCHOOL",
+            scope_id="1",
+            task_type="CHAT",
+            request_hash="d" * 64,
+            request_summary={"message": "执行高风险操作", "taskType": "CHAT"},
+            lease_owner="instance-a",
+            lease_seconds=30,
+        )
+        created = await actions.create_or_get(
+            turn_id=registration.turn.turn_id,
+            logical_call_id="logical-write-1",
+            tool_name="future_write_tool",
+            arguments={"resourceId": 7, "enabled": True},
+            sanitized_arguments={"resourceId": "7", "enabled": "True"},
+        )
+        duplicate = await actions.create_or_get(
+            turn_id=registration.turn.turn_id,
+            logical_call_id="logical-write-1",
+            tool_name="future_write_tool",
+            arguments={"enabled": True, "resourceId": 7},
+            sanitized_arguments={"resourceId": "7", "enabled": "True"},
+        )
+        assert duplicate.action_id == created.action_id
+        assert created.status == "pending_confirmation"
+
+        waiting = await turns.get("action-client-turn")
+        assert waiting is not None and waiting.status == "awaiting_confirmation"
+        with pytest.raises(TurnConflictError) as confirmation_required:
+            await turns.register(
+                client_turn_id="action-client-turn",
+                requested_thread_id=thread.thread_id,
+                owner_id="account:1",
+                scope_type="SCHOOL",
+                scope_id="1",
+                task_type="CHAT",
+                request_hash="d" * 64,
+                request_summary={"message": "执行高风险操作", "taskType": "CHAT"},
+                lease_owner="instance-b",
+                lease_seconds=30,
+            )
+        assert confirmation_required.value.code == "action_confirmation_required"
+
+        with pytest.raises(PermissionError):
+            await actions.get_for_scope(created.action_id, "account:2", "SCHOOL", "1")
+        approved = await actions.decide(
+            action_id=created.action_id,
+            decision="approve",
+            owner_id="account:1",
+            scope_type="SCHOOL",
+            scope_id="1",
+        )
+        approved_again = await actions.decide(
+            action_id=created.action_id,
+            decision="approve",
+            owner_id="account:1",
+            scope_type="SCHOOL",
+            scope_id="1",
+        )
+        assert approved.status == approved_again.status == "approved"
+
+        resumed = await turns.register(
+            client_turn_id="action-client-turn",
+            requested_thread_id=thread.thread_id,
+            owner_id="account:1",
+            scope_type="SCHOOL",
+            scope_id="1",
+            task_type="CHAT",
+            request_hash="d" * 64,
+            request_summary={"message": "执行高风险操作", "taskType": "CHAT"},
+            lease_owner="instance-c",
+            lease_seconds=30,
+        )
+        assert resumed.resumed is True and resumed.turn.status == "running"
+        executing = await actions.mark_executing(created.action_id)
+        succeeded = await actions.mark_succeeded(
+            executing.action_id,
+            result={"resourceId": 7},
+            result_summary="已更新",
+            resource_reference="resource:7",
+        )
+        assert succeeded.status == "succeeded"
+        assert succeeded.resource_reference == "resource:7"
+
+        expiring = await actions.create_or_get(
+            turn_id=registration.turn.turn_id,
+            logical_call_id="logical-write-2",
+            tool_name="future_write_tool",
+            arguments={"resourceId": 8},
+            sanitized_arguments={"resourceId": "8"},
+        )
+        async with database.transaction() as connection:
+            await connection.execute(
+                "UPDATE agent_action SET expires_at = CURRENT_TIMESTAMP - INTERVAL '1 second' WHERE action_id = %s",
+                (expiring.action_id,),
+            )
+        expired = await actions.get_for_scope(
+            expiring.action_id, "account:1", "SCHOOL", "1"
+        )
+        assert expired is not None and expired.status == "expired"
+
+    run_async(exercise())
+
+
+def test_hitl_interrupt_persists_stable_action_before_any_write(
+    tmp_path: Path,
+) -> None:
+    settings = settings_for_database(tmp_path)
+    database = open_database(settings)
+    conversations = ConversationRepository(database)
+    turns = AgentTurnRepository(database)
+    actions = AgentActionRepository(database)
+    runtime = AgentRuntime(
+        settings,
+        conversations,
+        turn_repository=turns,
+        action_repository=actions,
+    )
+    request = AgentMessageRequest.model_validate(
+        {
+            "ownerId": "account:1",
+            "scopeType": "SCHOOL",
+            "scopeId": 1,
+            "clientTurnId": "hitl-client-turn",
+            "message": "执行未来写工具",
+            "context": {},
+        }
+    )
+
+    class InterruptedAgent:
+        async def aget_state(self, _config):
+            interrupt = SimpleNamespace(
+                id="stable-graph-interrupt-1",
+                value={
+                    "action_requests": [
+                        {
+                            "name": "future_write_tool",
+                            "args": {"resourceId": 7, "secretToken": "hidden"},
+                        }
+                    ]
+                },
+            )
+            return SimpleNamespace(
+                tasks=(SimpleNamespace(interrupts=(interrupt,)),)
+            )
+
+    async def exercise() -> None:
+        thread = await conversations.create_thread("account:1", "SCHOOL", "1")
+        registration = await turns.register(
+            client_turn_id=request.client_turn_id,
+            requested_thread_id=thread.thread_id,
+            owner_id=request.owner_id,
+            scope_type=request.scope_type,
+            scope_id=request.scope_id,
+            task_type="CHAT",
+            request_hash="f" * 64,
+            request_summary={"message": request.message, "taskType": "CHAT"},
+            lease_owner=runtime.instance_id,
+            lease_seconds=30,
+        )
+        plan = runtime.planner.plan(request.message)
+        with pytest.raises(ActionConfirmationRequired) as interrupted:
+            await runtime._raise_for_pending_action(
+                InterruptedAgent(),
+                registration.turn,
+                request,
+                thread,
+                None,
+                plan,
+                "chat-v1/model-attempt-1",
+            )
+        action = interrupted.value.action
+        assert action.logical_call_id == "stable-graph-interrupt-1"
+        assert action.status == "pending_confirmation"
+        assert action.sanitized_arguments == {"resourceId": "7"}
+        assert await conversations.list_tool_audits(limit=10) == []
+        waiting = await turns.get(request.client_turn_id)
+        assert waiting is not None and waiting.status == "awaiting_confirmation"
+
+        with pytest.raises(ActionConfirmationRequired) as repeated:
+            await runtime._raise_for_pending_action(
+                InterruptedAgent(),
+                registration.turn,
+                request,
+                thread,
+                None,
+                plan,
+                "chat-v1/model-attempt-1",
+            )
+        assert repeated.value.action.action_id == action.action_id
+
+    run_async(exercise())
+
+
+def test_action_api_enforces_scope_and_idempotent_decision(tmp_path: Path) -> None:
+    settings = settings_for_database(
+        tmp_path,
+        internal_service_token="postgres-test-token",
+        internal_business_base_url="",
+        business_health_required=False,
+    )
+    database = open_database(settings)
+    conversations = ConversationRepository(database)
+    turns = AgentTurnRepository(database)
+    actions = AgentActionRepository(database)
+
+    async def seed() -> str:
+        thread = await conversations.create_thread("account:1", "SCHOOL", "1")
+        registration = await turns.register(
+            client_turn_id="action-api-turn",
+            requested_thread_id=thread.thread_id,
+            owner_id="account:1",
+            scope_type="SCHOOL",
+            scope_id="1",
+            task_type="CHAT",
+            request_hash="a" * 64,
+            request_summary={"message": "待确认", "taskType": "CHAT"},
+            lease_owner="seed-instance",
+            lease_seconds=30,
+        )
+        action = await actions.create_or_get(
+            turn_id=registration.turn.turn_id,
+            logical_call_id="api-write-1",
+            tool_name="future_write_tool",
+            arguments={"resourceId": 9},
+            sanitized_arguments={"resourceId": "9"},
+        )
+        return action.action_id
+
+    action_id = run_async(seed())
+    application = create_app(settings)
+    headers = {"X-Agent-Service-Token": settings.internal_service_token}
+    with TestClient(application, headers=headers) as client:
+        hidden = client.get(
+            f"/agent/actions/{action_id}",
+            params={"ownerId": "account:2", "scopeType": "SCHOOL", "scopeId": 1},
+        )
+        assert hidden.status_code == 404
+        visible = client.get(
+            f"/agent/actions/{action_id}",
+            params={"ownerId": "account:1", "scopeType": "SCHOOL", "scopeId": 1},
+        )
+        assert visible.status_code == 200
+        assert visible.json()["status"] == "pending_confirmation"
+
+        payload = {
+            "ownerId": "account:1",
+            "scopeType": "SCHOOL",
+            "scopeId": 1,
+            "decision": "approve",
+        }
+        first = client.post(f"/agent/actions/{action_id}/decision", json=payload)
+        repeated = client.post(f"/agent/actions/{action_id}/decision", json=payload)
+        assert first.status_code == repeated.status_code == 200
+        assert first.json()["status"] == repeated.json()["status"] == "approved"
 
 
 def test_expired_cancel_preserves_partial_but_excludes_it_from_context(

@@ -170,6 +170,16 @@ class Settings(BaseSettings):
     agent_checkpoint_retention_days: int = Field(default=7, ge=1, le=365)
     agent_checkpoint_cleanup_batch_size: int = Field(default=50, ge=1, le=500)
     agent_checkpoint_cleanup_interval_seconds: int = Field(default=3600, ge=60, le=86400)
+    agent_write_tools_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices(
+            "agent_write_tools_enabled", "AGENT_WRITE_TOOLS_ENABLED"
+        ),
+    )
+    agent_action_confirmation_minutes: int = Field(default=15, ge=1, le=1440)
+    agent_action_payload_retention_days: int = Field(default=30, ge=1, le=3650)
+    agent_action_cleanup_batch_size: int = Field(default=100, ge=1, le=500)
+    agent_action_cleanup_interval_seconds: int = Field(default=3600, ge=60, le=86400)
 
     @classmethod
     def settings_customise_sources(
