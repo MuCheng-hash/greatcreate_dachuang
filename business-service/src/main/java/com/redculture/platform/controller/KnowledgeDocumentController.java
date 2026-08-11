@@ -16,6 +16,7 @@ import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.multipart.MultipartFile;
 
@@ -52,7 +53,9 @@ public class KnowledgeDocumentController {
     }
     //重新执行失败的导入任务。
     @PostMapping("/{id}/retry")
-    public ApiResponse<Void> retry(@PathVariable Long id, HttpServletRequest request) { service.retry(id, current(request)); return ApiResponse.success(null); }
+    public ApiResponse<Void> retry(@PathVariable Long id, @RequestParam(required = false) String restartFrom, HttpServletRequest request) { service.retry(id, restartFrom, current(request)); return ApiResponse.success(null); }
+    @GetMapping(value = "/{id}/markdown", produces = MediaType.TEXT_MARKDOWN_VALUE)
+    public String markdown(@PathVariable Long id, HttpServletRequest request) { return service.markdown(id, current(request)); }
     //删除指定文档。
     @DeleteMapping("/{id}")
     public ApiResponse<Void> delete(@PathVariable Long id, HttpServletRequest request) { service.delete(id, current(request)); return ApiResponse.success(null); }

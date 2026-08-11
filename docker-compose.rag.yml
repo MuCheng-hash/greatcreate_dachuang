@@ -36,6 +36,10 @@ services:
       MINIO_SECRET_KEY: minioadmin
       MINIO_KNOWLEDGE_BUCKET: knowledge
       QDRANT_URL: http://qdrant:6333
+      QDRANT_COLLECTION: ${RAG_QDRANT_COLLECTION:-red_culture_content_chunks}
+      RAG_INDEX_VERSION: ${RAG_INDEX_VERSION:-v2}
+      MINERU_URL: ${MINERU_URL:-}
+      INGEST_CHUNK_CHARS: ${INGEST_CHUNK_CHARS:-1800}
       MYSQL_HOST: host.docker.internal
       MYSQL_PORT: 3306
       MYSQL_USER: root

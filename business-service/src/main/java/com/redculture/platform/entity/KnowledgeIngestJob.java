@@ -19,6 +19,8 @@ public class KnowledgeIngestJob extends BaseAuditEntity {
     private String currentNode;
     private Integer retryCount;
     private String errorSummary;
+    private String metadataJson;
+    private String restartFrom;
     private LocalDateTime startedAt;
     private LocalDateTime finishedAt;
 }

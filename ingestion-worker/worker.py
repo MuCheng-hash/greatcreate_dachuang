@@ -29,6 +29,9 @@ MINIO = Minio(os.getenv("MINIO_ENDPOINT", "minio:9000"), access_key=os.getenv("M
 BUCKET, QUEUE = os.getenv("MINIO_KNOWLEDGE_BUCKET", "knowledge"), "knowledge:ingest"
 QDRANT = os.getenv("QDRANT_URL", "http://qdrant:6333").rstrip("/")
 COLLECTION = os.getenv("QDRANT_COLLECTION", "knowledge_documents")
+INDEX_VERSION = os.getenv("RAG_INDEX_VERSION", "v2")
+MINERU_URL = os.getenv("MINERU_URL", "").rstrip("/")
+MAX_CHUNK_CHARS = int(os.getenv("INGEST_CHUNK_CHARS", "1800"))
 EMBEDDING_URL = os.getenv("EMBEDDING_URL", "").rstrip("/")
 EMBEDDING_KEY = os.getenv("EMBEDDING_API_KEY", "")
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-v3")
@@ -51,6 +54,11 @@ def execute(sql, args=()):
 def checkpoint(state, node):
     execute("UPDATE knowledge_ingest_job SET status='RUNNING', current_node=%s, started_at=COALESCE(started_at,NOW()) WHERE id=%s", (node, state['job']['id']))
 
+def degrade(state, node, reason):
+    values = state.setdefault('degradations', [])
+    values.append({'node': node, 'reason': str(reason)[:300]})
+    return state
+
 def validate(state):
     checkpoint(state, "VALIDATE")
     document = state['document']
@@ -72,7 +80,14 @@ def convert(state):
     elif name.endswith('.docx'):
         doc = DocxDocument(io.BytesIO(state['data'])); markdown = '\n\n'.join(p.text for p in doc.paragraphs if p.text.strip())
     elif name.endswith('.pdf'):
-        markdown = '\n\n'.join(page.extract_text() or '' for page in PdfReader(io.BytesIO(state['data'])).pages)
+        try:
+            if not MINERU_URL: raise RuntimeError('MinerU is not configured')
+            response = requests.post(MINERU_URL + '/parse', files={'file': ('document.pdf', state['data'], 'application/pdf')}, timeout=120)
+            response.raise_for_status(); markdown = response.json().get('markdown', '')
+            if not markdown.strip(): raise ValueError('MinerU returned no markdown')
+        except Exception as error:
+            degrade(state, 'CONVERT', 'MinerU fallback: ' + str(error))
+            markdown = '\n\n'.join(page.extract_text() or '' for page in PdfReader(io.BytesIO(state['data'])).pages)
     else: raise ValueError('unsupported document type')
     if not markdown.strip(): raise ValueError('document contains no extractable text')
     key = 'markdown/%s/%s.md' % (state['document']['school_id'] or 'public', state['document']['id'])
@@ -102,12 +117,14 @@ def understand_images(state):
             if VISION_URL and VISION_KEY and VISION_MODEL:
                 encoded = base64.b64encode(data).decode()
                 response = requests.post(VISION_URL + '/internal/vision/analyze', headers={'X-Model-Gateway-Key': VISION_KEY}, json={'model':VISION_MODEL,'imageBase64':encoded}, timeout=90); response.raise_for_status(); description = response.json().get('description','')
-            execute('INSERT INTO knowledge_document_image(document_id,sha256,object_key,description,status,model) VALUES(%s,%s,%s,%s,\'SUCCESS\',%s)', (state['document']['id'],digest,key,description,VISION_MODEL or None))
+            status = 'SUCCESS' if description else 'SKIPPED'
+            if not description: degrade(state, 'IMAGE_VISION', 'vision model is unavailable or returned no description')
+            execute('INSERT INTO knowledge_document_image(document_id,sha256,object_key,description,status,model) VALUES(%s,%s,%s,%s,%s,%s)', (state['document']['id'],digest,key,description,status,VISION_MODEL or None))
         else: key, description = cached['object_key'], cached['description'] or ''
         images.append({'name': name, 'description': description, 'object_key': key})
     markdown = state['markdown']
     for image in images:
-        markdown += '\n\n[图片描述: %s](%s)' % (image['description'] or image['name'], image['object_key'])
+        markdown += '\n\n![%s](%s)' % (image['description'] or image['name'], image['object_key'])
     return {**state, 'markdown': markdown, 'image_refs': images}
 
 def split(state):
@@ -117,11 +134,15 @@ def split(state):
         nonlocal buffer
         text = '\n'.join(buffer).strip()
         while text:
-            words, part = text.split(), None
-            take = min(800, len(words)); part = ' '.join(words[:take])
+            if len(text) > MAX_CHUNK_CHARS:
+                boundary = max(text.rfind(mark, 0, MAX_CHUNK_CHARS) for mark in '。！？；\n')
+                take = boundary + 1 if boundary >= MAX_CHUNK_CHARS // 2 else MAX_CHUNK_CHARS
+                part, text = text[:take].strip(), text[take:].strip()
+            else:
+                part, text = text, ''
             prefix = (' > '.join(path) + '\n\n') if path else ''
-            chunks.append({'title_path': ' > '.join(path), 'content': prefix + part, 'token_count': len((prefix + part).split())})
-            text = ' '.join(words[max(0, take - 100):]) if len(words) > take else ''
+            content = prefix + part
+            chunks.append({'title_path': ' > '.join(path), 'content': content, 'token_count': max(1, len(content) // 3)})
         buffer = []
     for line in state['markdown'].splitlines():
         match = re.match(r'^(#{1,6})\s+(.+)', line)
@@ -139,9 +160,12 @@ def metadata(state):
     if MODEL_URL and MODEL_KEY and MODEL_NAME:
         try:
             prompt = 'Extract JSON only: {"subject":string|null,"subjectType":string|null,"tags":[string]}. Text:\n' + state['markdown'][:30000]
-            response = requests.post(MODEL_URL + '/chat/completions', headers={'Authorization': 'Bearer ' + MODEL_KEY}, json={'model': MODEL_NAME, 'messages': [{'role':'user','content':prompt}], 'temperature':0}, timeout=45)
-            content = response.json()['choices'][0]['message']['content']; value = json.loads(re.search(r'\{.*\}', content, re.S).group())
-        except Exception: pass
+            response = requests.post(MODEL_URL + '/chat/completions', headers={'Authorization': 'Bearer ' + MODEL_KEY}, json={'model': MODEL_NAME, 'messages': [{'role':'user','content':prompt}], 'temperature':0, 'response_format': {'type':'json_object'}}, timeout=45)
+            value = json.loads(response.json()['choices'][0]['message']['content'])
+        except Exception as error:
+            degrade(state, 'METADATA', 'metadata fallback: ' + str(error))
+            value['subject'] = state['document'].get('title') or state['document'].get('original_filename')
+            value['tags'] = [state['document'].get('original_filename', '').rsplit('.', 1)[0]][:1]
     return {**state, 'metadata': value}
 
 def embed(texts):
@@ -167,12 +191,12 @@ def index(state):
         for offset, (chunk, vector) in enumerate(zip(batch, vectors)):
             point_id = str(uuid.uuid5(uuid.NAMESPACE_URL, 'knowledge:' + str(doc['id']) + ':' + str(i + offset)))
             execute('INSERT INTO knowledge_chunk(document_id,chunk_order,title_path,content,token_count,subject,subject_type,tags,qdrant_point_id) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s)', (doc['id'],i+offset,chunk['title_path'],chunk['content'],chunk['token_count'],meta.get('subject'),meta.get('subjectType'),json.dumps(meta.get('tags', []), ensure_ascii=False),point_id))
-            points.append({'id':point_id,'vector':{'dense':vector['dense'], 'sparse': vector['sparse']},'payload':{'documentId':doc['id'],'chunkId':point_id,'schoolId':doc['school_id'],'titlePath':chunk['title_path'],'subject':meta.get('subject'),'subjectType':meta.get('subjectType'),'tags':meta.get('tags', []),'publishedAt':doc['published_at'].isoformat() if doc['published_at'] else None,'documentTitle':doc['title'],'imageRefs':state.get('image_refs',[])}})
+            points.append({'id':point_id,'vector':{'dense':vector['dense'], 'sparse': vector['sparse']},'payload':{'documentId':doc['id'],'chunk_id':point_id,'entity_key':'knowledge-document:'+str(doc['id']),'schoolId':doc['school_id'],'titlePath':chunk['title_path'],'subject':meta.get('subject'),'subjectType':meta.get('subjectType'),'tags':meta.get('tags', []),'index_version':INDEX_VERSION,'documentTitle':doc['title'],'imageRefs':state.get('image_refs',[])}})
     r = requests.put(QDRANT + '/collections/' + COLLECTION + '/points?wait=true', json={'points':points}, timeout=90); r.raise_for_status()
     return state
 
 def complete(state):
-    checkpoint(state, "DONE"); execute("UPDATE knowledge_document SET status='SUCCESS', indexed_at=NOW(), published_at=COALESCE(published_at,NOW()) WHERE id=%s", (state['document']['id'],)); execute("UPDATE knowledge_ingest_job SET status='SUCCESS', current_node='DONE', finished_at=NOW() WHERE id=%s", (state['job']['id'],)); return state
+    checkpoint(state, "DONE"); status = 'DEGRADED' if state.get('degradations') else 'SUCCESS'; metadata = json.dumps({'degradations':state.get('degradations', []),'chunkCount':len(state.get('chunks', []))}, ensure_ascii=False); execute("UPDATE knowledge_document SET status=%s, indexed_at=NOW(), published_at=COALESCE(published_at,NOW()) WHERE id=%s", (status,state['document']['id'])); execute("UPDATE knowledge_ingest_job SET status=%s, current_node='DONE', metadata_json=%s, finished_at=NOW() WHERE id=%s", (status,metadata,state['job']['id'])); return state
 
 graph = StateGraph(State)
 for name, fn in [('validate',validate),('convert',convert),('image_vision',understand_images),('split',split),('metadata',metadata),('index',index),('complete',complete)]: graph.add_node(name, fn)

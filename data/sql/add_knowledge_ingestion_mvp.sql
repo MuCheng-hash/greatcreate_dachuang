@@ -26,6 +26,8 @@ CREATE TABLE IF NOT EXISTS knowledge_ingest_job (
     current_node VARCHAR(40) NOT NULL DEFAULT 'VALIDATE',
     retry_count INT NOT NULL DEFAULT 0,
     error_summary VARCHAR(1000) NULL,
+    metadata_json JSON NULL,
+    restart_from VARCHAR(40) NULL,
     started_at DATETIME NULL,
     finished_at DATETIME NULL,
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
