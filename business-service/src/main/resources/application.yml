@@ -62,6 +62,11 @@ app:
     read-timeout-ms: ${AGENT_READ_TIMEOUT_MS:30000}
     stream-timeout-ms: ${AGENT_STREAM_TIMEOUT_MS:65000}
     agent-runtime-enabled: ${AGENT_RUNTIME_ENABLED:true}
+    write-tools-enabled: ${AGENT_WRITE_TOOLS_ENABLED:false}
+    outbox-batch-size: ${AGENT_OUTBOX_BATCH_SIZE:20}
+    outbox-lease-seconds: ${AGENT_OUTBOX_LEASE_SECONDS:30}
+    outbox-retry-seconds: ${AGENT_OUTBOX_RETRY_SECONDS:15}
+    action-payload-retention-days: ${AGENT_ACTION_PAYLOAD_RETENTION_DAYS:30}
   rag:
     enabled: ${RAG_ENABLED:false}
     sync-on-startup: ${RAG_SYNC_ON_STARTUP:true}

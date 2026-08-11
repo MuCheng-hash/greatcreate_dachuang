@@ -7,6 +7,7 @@ import com.redculture.platform.vo.AgentQaResponse;
 import com.redculture.platform.vo.AuthCurrentUserVO;
 import com.redculture.platform.vo.ai.AssistantConversationTurnCancellation;
 import com.redculture.platform.vo.ai.KnowledgeRetrievalStatus;
+import com.redculture.platform.vo.ai.AgentActionVO;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.servlet.MockMvc;
@@ -18,6 +19,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
@@ -94,6 +96,33 @@ class AgentQaControllerTest {
                 .andExpect(jsonPath("$.data.clientTurnId").value("turn-client-1"))
                 .andExpect(jsonPath("$.data.threadId").value("thread-1"))
                 .andExpect(jsonPath("$.data.cancellationRequested").value(true));
+    }
+
+    @Test
+    void exposesScopedActionQueryAndDecision() throws Exception {
+        AgentQaService service = mock(AgentQaService.class);
+        AuthCurrentUserVO user = new AuthCurrentUserVO();
+        user.setSchoolId(1L);
+        AgentActionVO action = new AgentActionVO();
+        action.setActionId("action-1");
+        action.setStatus("pending_confirmation");
+        when(service.getAction("action-1", user)).thenReturn(action);
+        when(service.decideAction("action-1", "approve", user)).thenAnswer(invocation -> {
+            action.setStatus("approved");
+            return action;
+        });
+        MockMvc mvc = MockMvcBuilders.standaloneSetup(new AgentQaController(service)).build();
+
+        mvc.perform(get("/api/ai/qa/actions/action-1")
+                        .requestAttr(AuthContext.CURRENT_USER_ATTRIBUTE, user))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.status").value("pending_confirmation"));
+        mvc.perform(post("/api/ai/qa/actions/action-1/decision")
+                        .requestAttr(AuthContext.CURRENT_USER_ATTRIBUTE, user)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"decision\":\"approve\"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.status").value("approved"));
     }
 
 }

@@ -165,6 +165,46 @@ public class AgentQaServiceImpl implements AgentQaService {
     }
 
     @Override
+    public com.redculture.platform.vo.ai.AgentActionVO getAction(
+            String actionId, AuthCurrentUserVO currentUser) {
+        validateActionRequest(actionId, currentUser);
+        return agentRuntimeClient.getAction(
+                actionId,
+                agentRuntimeClient.ownerIdFor(currentUser),
+                "SCHOOL",
+                currentUser.getSchoolId()
+        );
+    }
+
+    @Override
+    public com.redculture.platform.vo.ai.AgentActionVO decideAction(
+            String actionId, String decision, AuthCurrentUserVO currentUser) {
+        validateActionRequest(actionId, currentUser);
+        if (!"approve".equals(decision) && !"reject".equals(decision)) {
+            throw new IllegalArgumentException("decision must be approve or reject");
+        }
+        return agentRuntimeClient.decideAction(
+                actionId,
+                decision,
+                agentRuntimeClient.ownerIdFor(currentUser),
+                "SCHOOL",
+                currentUser.getSchoolId()
+        );
+    }
+
+    private void validateActionRequest(String actionId, AuthCurrentUserVO currentUser) {
+        if (!StringUtils.hasText(actionId)) {
+            throw new IllegalArgumentException("actionId is required");
+        }
+        if (currentUser == null || currentUser.getSchoolId() == null) {
+            throw new IllegalArgumentException("school account is required");
+        }
+        if (agentRuntimeClient == null) {
+            throw new IllegalStateException("stateful agent runtime is unavailable");
+        }
+    }
+
+    @Override
     public SseEmitter stream(AgentQaRequest request, AuthCurrentUserVO currentUser) {
         validateRequest(request);
         if (currentUser == null) {

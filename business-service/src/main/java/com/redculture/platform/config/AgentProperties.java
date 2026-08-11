@@ -25,4 +25,15 @@ public class AgentProperties {
 
     private long streamTimeoutMs = 65000L;
 
+    /** 写工具总开关。完成数据库迁移和具体工具安全评审前必须保持关闭。 */
+    private boolean writeToolsEnabled = false;
+
+    private int outboxBatchSize = 20;
+
+    private int outboxLeaseSeconds = 30;
+
+    private int outboxRetrySeconds = 15;
+
+    private int actionPayloadRetentionDays = 30;
+
 }

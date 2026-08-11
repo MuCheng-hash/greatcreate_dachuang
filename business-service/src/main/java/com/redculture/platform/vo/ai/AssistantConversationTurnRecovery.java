@@ -18,4 +18,6 @@ public class AssistantConversationTurnRecovery {
     private AssistantConversationMessage partialMessage;
 
     private AssistantConversationMessage message;
+
+    private AgentActionVO pendingAction;
 }

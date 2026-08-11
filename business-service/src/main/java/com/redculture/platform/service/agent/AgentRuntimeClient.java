@@ -17,6 +17,7 @@ import com.redculture.platform.vo.ai.LlmModelOption;
 import com.redculture.platform.vo.ai.AssistantConversationDetail;
 import com.redculture.platform.vo.ai.AssistantConversationTurnCancellation;
 import com.redculture.platform.vo.ai.AssistantConversationTurnRecovery;
+import com.redculture.platform.vo.ai.AgentActionVO;
 import com.redculture.platform.vo.ai.AssistantConversationSummary;
 import com.redculture.platform.vo.request.AgentQaRequest;
 import com.redculture.platform.vo.request.AgentMemoryCreateRequest;
@@ -412,6 +413,46 @@ public class AgentRuntimeClient {
                 .body(AssistantConversationTurnCancellation.class);
         if (response == null) {
             throw new IllegalStateException("agent turn cancellation response is empty");
+        }
+        return response;
+    }
+
+    public AgentActionVO getAction(
+            String actionId, String ownerId, String scopeType, Long scopeId) {
+        AgentActionVO response = restClient.get()
+                .uri(uriBuilder -> uriBuilder.path("/agent/actions/{actionId}")
+                        .queryParam("ownerId", ownerId)
+                        .queryParam("scopeType", scopeType)
+                        .queryParam("scopeId", scopeId)
+                        .build(actionId))
+                .headers(this::applyInternalServiceToken)
+                .accept(MediaType.APPLICATION_JSON)
+                .retrieve()
+                .body(AgentActionVO.class);
+        if (response == null) {
+            throw new IllegalStateException("agent action response is empty");
+        }
+        return response;
+    }
+
+    public AgentActionVO decideAction(
+            String actionId,
+            String decision,
+            String ownerId,
+            String scopeType,
+            Long scopeId) {
+        Map<String, Object> body = scopeBody(ownerId, scopeType, scopeId);
+        body.put("decision", decision);
+        AgentActionVO response = restClient.post()
+                .uri("/agent/actions/{actionId}/decision", actionId)
+                .headers(this::applyInternalServiceToken)
+                .contentType(MediaType.APPLICATION_JSON)
+                .accept(MediaType.APPLICATION_JSON)
+                .body(body)
+                .retrieve()
+                .body(AgentActionVO.class);
+        if (response == null) {
+            throw new IllegalStateException("agent action decision response is empty");
         }
         return response;
     }
