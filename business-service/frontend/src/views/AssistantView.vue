@@ -6,6 +6,7 @@ import { marked } from "marked";
 import AppShell from "@/components/AppShell.vue";
 import InlineNotice from "@/components/InlineNotice.vue";
 import MemoryConflictDialog from "@/components/MemoryConflictDialog.vue";
+import AgentActionDialog from "@/components/AgentActionDialog.vue";
 import { api } from "@/services/api";
 import { memoryApi } from "@/services/memory";
 import { useSchoolStore } from "@/stores/school";
@@ -27,6 +28,7 @@ import type {
   AssistantConversationTurnCancellation,
   AssistantConversationTurnRecovery,
   AssistantResponseSnapshot,
+  AgentAction,
   AssistantConversationSummary,
 } from "@/types/agent";
 
@@ -128,6 +130,10 @@ const memoryConflict = ref<PendingMemoryConflict | null>(null);
 const memoryConflictBusy = ref(false);
 const memoryConflictError = ref("");
 const interruptedRequest = ref<PendingAssistantRetry | null>(null);
+const pendingAction = ref<AgentAction | null>(null);
+const pendingActionRetry = ref<PendingAssistantRetry | null>(null);
+const pendingActionBusy = ref(false);
+const pendingActionError = ref("");
 const recognition = ref<SpeechRecognitionLike | null>(null);
 const streamRenderStates = new WeakMap<object, StreamRenderState>();
 const composerMemoryFeedback = reactive<{
@@ -181,9 +187,11 @@ function citationDetail(citation: AgentCitation | string): string {
 }
 
 onMounted(async () => {
+  const recoveryCandidate = latestStoredRecoveryCandidate();
   await Promise.all([schoolStore.load(), loadModels()]);
   await loadHistory();
   if (threadId.value) await openConversation(threadId.value, false);
+  if (recoveryCandidate) await restorePendingActionAfterReload(recoveryCandidate);
   if (readOnlyConversation.value) {
     historyMode.value = "archived";
     await loadHistory("archived");
@@ -224,6 +232,7 @@ async function switchHistoryMode(mode: HistoryMode): Promise<void> {
 
 async function openConversation(selectedThreadId: string, showError = true): Promise<void> {
   if (!selectedThreadId || historyBusyId.value) return;
+  if (threadId.value && threadId.value !== selectedThreadId) clearPendingAction();
   historyBusyId.value = selectedThreadId;
   clearComposerMemoryFeedback();
   try {
@@ -260,6 +269,7 @@ function startNewConversation(): void {
   question.value = "";
   error.value = "";
   interruptedRequest.value = null;
+  clearPendingAction();
   clearComposerMemoryFeedback();
   if (wasArchivedMode) {
     history.value = [];
@@ -419,6 +429,49 @@ async function explain() {
   await requestAssistant("请介绍本校周边可用于思政教学的资源。");
 }
 
+function latestStoredRecoveryCandidate(): PendingAssistantRetry | null {
+  for (let index = messages.value.length - 1; index >= 0; index -= 1) {
+    const candidate = messages.value[index];
+    if (candidate.role !== "assistant" || !candidate.clientTurnId) continue;
+    if (candidate.generationStatus === "completed" || candidate.status === "completed") continue;
+    const user = [...messages.value.slice(0, index)].reverse()
+      .find((item) => item.role === "user");
+    return {
+      userText: user?.text || "",
+      attachments: [],
+      clientTurnId: candidate.clientTurnId,
+      assistantMessage: candidate,
+    };
+  }
+  return null;
+}
+
+async function restorePendingActionAfterReload(
+  candidate: PendingAssistantRetry,
+): Promise<void> {
+  const outcome = await recoverPersistedAssistantMessage(
+    candidate.clientTurnId,
+    candidate.assistantMessage,
+    candidate.userText,
+  );
+  if (outcome !== "retryable" || !pendingAction.value) return;
+  const alreadyVisible = messages.value.some(
+    (item) => item.role === "assistant" && item.clientTurnId === candidate.clientTurnId,
+  );
+  if (!alreadyVisible) {
+    messages.value.push({ role: "user", text: candidate.userText });
+    messages.value.push(candidate.assistantMessage);
+  }
+  pendingActionRetry.value = candidate;
+}
+
+function clearPendingAction(): void {
+  pendingAction.value = null;
+  pendingActionRetry.value = null;
+  pendingActionBusy.value = false;
+  pendingActionError.value = "";
+}
+
 async function ask(text: string = question.value): Promise<void> {
   if (readOnlyConversation.value) return;
   const clean = text.trim();
@@ -477,6 +530,7 @@ async function requestAssistant(
     if (selectedModelId.value) requestBody.modelId = selectedModelId.value;
     if (!threadId.value) requestBody.conversationId = conversationId.value;
     let finalReceived = false;
+    let actionRequired = false;
     let streamError: Error | null = null;
 
     if (typeof api.stream !== "function") {
@@ -533,6 +587,27 @@ async function requestAssistant(
               durationMs: data.durationMs, status: data.status === "ok" ? "completed" : "failed"
             });
             assistantMessage.streamStatus = data.status === "ok" ? "工具结果已返回，正在整理回答" : "部分工具不可用，正在降级处理";
+          } else if (eventName === "action.required" && data.action) {
+            actionRequired = true;
+            pendingAction.value = data.action;
+            pendingActionRetry.value = {
+              userText,
+              attachments: [...attachments],
+              clientTurnId,
+              assistantMessage,
+            };
+            finishStreamRendering(assistantMessage);
+            assistantMessage.isStreaming = false;
+            assistantMessage.streamStatus = "等待确认高风险操作";
+            updateTrace(assistantMessage, `action:${data.action.actionId}`, {
+              kind: "tool", title: data.action.title, detail: "等待用户确认", status: "running",
+            });
+          } else if (eventName === "action.started") {
+            assistantMessage.streamStatus = "已确认，正在执行写操作";
+          } else if (eventName === "action.completed") {
+            assistantMessage.streamStatus = "写操作已完成，正在整理回答";
+          } else if (eventName === "action.failed") {
+            assistantMessage.streamStatus = "写操作执行失败";
           } else if (eventName === "response.reset") {
             resetStreamRendering(assistantMessage);
             assistantMessage.answer = "";
@@ -563,7 +638,7 @@ async function requestAssistant(
         }
       });
       if (streamError && !finalReceived) throw streamError;
-      if (!finalReceived) throw new Error("流式服务未返回最终结果");
+      if (!finalReceived && !actionRequired) throw new Error("流式服务未返回最终结果");
       await loadHistory();
     }
   } catch (requestError) {
@@ -635,6 +710,18 @@ async function recoverPersistedAssistantMessage(
       );
       if (recovery.clientTurnId && recovery.clientTurnId !== clientTurnId) continue;
       if (recovery.threadId) threadId.value = recovery.threadId;
+      if (recovery.pendingAction?.status === "pending_confirmation") {
+        pendingAction.value = recovery.pendingAction;
+        pendingActionRetry.value = {
+          userText,
+          attachments: [],
+          clientTurnId,
+          assistantMessage,
+        };
+        assistantMessage.streamStatus = "等待确认高风险操作";
+        assistantMessage.isStreaming = false;
+        return "retryable";
+      }
       if (recovery.found && recovery.message?.role === "assistant") {
         const storedTurnId = textValue(recovery.message.metadata?.clientTurnId);
         if (storedTurnId && storedTurnId !== clientTurnId) continue;
@@ -672,6 +759,28 @@ async function retryInterruptedRequest(): Promise<void> {
   if (!retry || loading.value || readOnlyConversation.value) return;
   interruptedRequest.value = null;
   await requestAssistant(retry.userText, [...retry.attachments], retry);
+}
+
+async function decidePendingAction(decision: "approve" | "reject"): Promise<void> {
+  const action = pendingAction.value;
+  const retry = pendingActionRetry.value;
+  if (!action || pendingActionBusy.value) return;
+  pendingActionBusy.value = true;
+  pendingActionError.value = "";
+  try {
+    await api.post<AgentAction>(
+      `/api/ai/qa/actions/${encodeURIComponent(action.actionId)}/decision`,
+      { decision },
+    );
+    pendingAction.value = null;
+    pendingActionRetry.value = null;
+    if (retry) await requestAssistant(retry.userText, retry.attachments, retry);
+  } catch (decisionError) {
+    pendingActionError.value = decisionError instanceof Error
+      ? decisionError.message : "动作确认失败";
+  } finally {
+    pendingActionBusy.value = false;
+  }
 }
 
 function applyAssistantResult(message: AssistantMessage, result: Partial<AgentQaResponse>, userText = ""): void {
@@ -1391,6 +1500,8 @@ async function stopGeneration(): Promise<void> {
   streamMessage.status = "incomplete";
   streamMessage.generationStatus = "incomplete";
   interruptedRequest.value = null;
+  pendingAction.value = null;
+  pendingActionRetry.value = null;
   activeAbortController.value?.abort();
 }
 
@@ -1621,6 +1732,14 @@ function clearChat(): void {
     @cancel="closeMemoryConflict"
     @keep="keepExistingMemoryConflict"
     @replace="replaceMemoryConflict"
+  />
+  <AgentActionDialog
+    :open="Boolean(pendingAction)"
+    :action="pendingAction"
+    :busy="pendingActionBusy"
+    :error-message="pendingActionError"
+    @approve="decidePendingAction('approve')"
+    @reject="decidePendingAction('reject')"
   />
 </template>
 

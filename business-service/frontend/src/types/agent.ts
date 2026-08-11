@@ -96,17 +96,34 @@ export interface AssistantConversationTurnRecovery {
   found: boolean;
   threadId?: string | null;
   clientTurnId: string;
-  turnStatus?: "running" | "completed" | "interrupted" | "failed" | "cancelled" | null;
+  turnStatus?: "running" | "awaiting_confirmation" | "completed" | "interrupted" | "failed" | "cancelled" | null;
   retryable: boolean;
   partialMessage?: AssistantConversationStoredMessage | null;
   message?: AssistantConversationStoredMessage | null;
+  pendingAction?: AgentAction | null;
 }
 
 export interface AssistantConversationTurnCancellation {
   clientTurnId: string;
   threadId: string;
-  turnStatus: "running" | "completed" | "interrupted" | "failed" | "cancelled";
+  turnStatus: "running" | "awaiting_confirmation" | "completed" | "interrupted" | "failed" | "cancelled";
   cancellationRequested: boolean;
+}
+
+export interface AgentAction {
+  actionId: string;
+  clientTurnId: string;
+  threadId: string;
+  toolName: string;
+  title: string;
+  summary: string;
+  arguments: Record<string, unknown>;
+  riskLevel: "LOW" | "HIGH";
+  status: "pending_confirmation" | "approved" | "executing" | "succeeded" | "rejected" | "failed" | "expired";
+  expiresAt: string;
+  resultSummary?: string | null;
+  resourceReference?: string | null;
+  errorCode?: string | null;
 }
 
 export interface AgentCitation {
@@ -284,6 +301,10 @@ export type AgentSseEventName =
   | "response.reset"
   | "tool.started"
   | "tool.completed"
+  | "action.required"
+  | "action.started"
+  | "action.completed"
+  | "action.failed"
   | "token"
   | "plan.patch"
   | "final"
@@ -316,6 +337,10 @@ export interface AgentSseEventData {
   provider?: string;
   model?: string;
   response?: AgentQaResponse;
+  action?: AgentAction;
+  actionId?: string;
+  riskLevel?: "LOW" | "HIGH";
+  expiresAt?: string;
   [key: string]: unknown;
 }
 
