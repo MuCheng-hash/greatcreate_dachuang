@@ -23,6 +23,18 @@ public class RoleAuthorizationInterceptor implements org.springframework.web.ser
             return forbidden(response, "登录状态无效");
         }
         String role = user.getRoleCode();
+        String uri = request.getRequestURI();
+        if (uri.startsWith("/api/teacher/") && !Set.of(PLATFORM_ADMIN, SCHOOL_ADMIN, "teacher").contains(role)) {
+            return forbidden(response, "teacher access required");
+        }
+        boolean teacherAttachmentDownload = uri.startsWith("/api/student/attachments/") && "teacher".equals(role);
+        if (uri.startsWith("/api/student/") && !"student".equals(role) && !teacherAttachmentDownload) {
+            return forbidden(response, "student access required");
+        }
+        if (uri.startsWith("/api/teacher/") || uri.startsWith("/api/student/")) {
+            if (user.getSchoolId() == null) return forbidden(response, "school account is required");
+            return true;
+        }
         if (!COMMON_ROLES.contains(role)) {
             return forbidden(response, "当前角色没有接口访问权限");
         }

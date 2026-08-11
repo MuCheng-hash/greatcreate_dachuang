@@ -43,6 +43,14 @@ class RoleAuthorizationInterceptorTest {
         assertFalse(call("/api/ai/qa/stream", user("guest", null)).allowed());
     }
 
+    @Test
+    void teacherAndStudentCanOnlyUseTheirDedicatedApis() throws Exception {
+        assertTrue(call("/api/teacher/classes/mine", user("teacher", 8L)).allowed());
+        assertFalse(call("/api/student/class-tasks", user("teacher", 8L)).allowed());
+        assertTrue(call("/api/student/class-tasks", user("student", 8L)).allowed());
+        assertFalse(call("/api/teacher/classes/mine", user("student", 8L)).allowed());
+    }
+
     private Result call(String path, AuthCurrentUserVO user) throws Exception {
         MockHttpServletRequest request = new MockHttpServletRequest("GET", path);
         request.setAttribute(AuthContext.CURRENT_USER_ATTRIBUTE, user);

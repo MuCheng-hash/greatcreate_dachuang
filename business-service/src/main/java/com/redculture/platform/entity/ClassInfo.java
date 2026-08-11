@@ -27,6 +27,9 @@ public class ClassInfo extends BaseAuditEntity {
     @TableField("class_type")
     private String classType;
 
+    @TableField("invite_code")
+    private String inviteCode;
+
     @TableField("status")
     private String status;
 }
