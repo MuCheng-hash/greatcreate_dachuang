@@ -8,7 +8,7 @@ import {
   MessageSquare, Search, LoaderCircle,
   AlertTriangle, Clock, User, Bot, ExternalLink,
 } from "@lucide/vue";
-import { get, RequestError } from "@/services/request";
+import { api, ApiError, withQuery } from "@/services/api";
 
 // ---- 类型 ----
 interface AgentTrace {
@@ -47,10 +47,13 @@ async function fetchTraces(): Promise<void> {
   error.value = "";
   try {
     // 后端 AgentAdminController 的 traces 接口接受 filters Map
-    const result = await get<AgentTrace[]>("/api/admin/agent/observability/traces", filters.value);
+    const result = await api.get<AgentTrace[]>(withQuery(
+      "/api/admin/agent/observability/traces",
+      filters.value,
+    ));
     traces.value = Array.isArray(result) ? result : [];
   } catch (err) {
-    error.value = err instanceof RequestError ? err.message : "加载会话记录失败";
+    error.value = err instanceof ApiError ? err.message : "加载会话记录失败";
     traces.value = [];
   } finally {
     loading.value = false;

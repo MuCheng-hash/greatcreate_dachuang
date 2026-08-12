@@ -10,7 +10,7 @@ import {
   LoaderCircle, AlertTriangle, BookOpen,
   Search, Eye,
 } from "@lucide/vue";
-import { get, RequestError } from "@/services/request";
+import { api, ApiError, withQuery } from "@/services/api";
 
 // ---- 类型 ----
 interface KnowledgeDoc {
@@ -66,17 +66,19 @@ async function fetchDocs(): Promise<void> {
   loading.value = true;
   error.value = "";
   try {
-    const params: Record<string, unknown> = {
+    const params: Record<string, string | number> = {
       pageNum: pageNum.value,
       pageSize,
       resourceCategory: "KNOWLEDGE_BASE",
     };
     if (keyword.value.trim()) params.keyword = keyword.value.trim();
-    const result = await get<PageResult<KnowledgeDoc>>("/api/admin/resources", params);
+    const result = await api.get<PageResult<KnowledgeDoc>>(
+      withQuery("/api/admin/resources", params),
+    );
     docs.value = result.records ?? [];
     total.value = result.total ?? 0;
   } catch (err) {
-    error.value = err instanceof RequestError ? err.message : "加载文档失败";
+    error.value = err instanceof ApiError ? err.message : "加载文档失败";
   } finally {
     loading.value = false;
   }
@@ -97,12 +99,14 @@ async function selectDoc(doc: KnowledgeDoc): Promise<void> {
   detailLoading.value = true;
   chunks.value = [];
   try {
-    const detail = await get<KnowledgeDoc>(`/api/admin/resources/${doc.resourceId}`);
+    const detail = await api.get<KnowledgeDoc>(
+      `/api/admin/resources/${doc.resourceId}`,
+    );
     selectedDoc.value = detail;
     // 模拟分段：将 intro 和 educationValue 按段落拆分展示
     buildChunks(detail);
   } catch (err) {
-    error.value = err instanceof RequestError ? err.message : "加载文档详情失败";
+    error.value = err instanceof ApiError ? err.message : "加载文档详情失败";
   } finally {
     detailLoading.value = false;
   }

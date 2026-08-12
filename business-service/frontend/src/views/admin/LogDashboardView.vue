@@ -11,7 +11,7 @@ import {
   CheckCircle2, XCircle, Clock, Activity,
   RefreshCw, Zap,
 } from "@lucide/vue";
-import { get, RequestError } from "@/services/request";
+import { api, ApiError, withQuery } from "@/services/api";
 
 // ---- 类型 ----
 interface ObservabilitySummary {
@@ -77,7 +77,9 @@ async function loadAll(): Promise<void> {
 
 async function loadSummary(): Promise<void> {
   try {
-    summary.value = await get<ObservabilitySummary>("/api/admin/agent/observability/summary");
+    summary.value = await api.get<ObservabilitySummary>(
+      "/api/admin/agent/observability/summary",
+    );
   } catch {
     summary.value = null;
   }
@@ -85,11 +87,14 @@ async function loadSummary(): Promise<void> {
 
 async function loadTraces(): Promise<void> {
   try {
-    const result = await get<AgentTrace[]>("/api/admin/agent/observability/traces", { limit: "100" });
+    const result = await api.get<AgentTrace[]>(withQuery(
+      "/api/admin/agent/observability/traces",
+      { limit: "100" },
+    ));
     traces.value = Array.isArray(result) ? result : [];
   } catch (err) {
     if (!error.value) {
-      error.value = err instanceof RequestError ? err.message : "加载日志失败";
+    error.value = err instanceof ApiError ? err.message : "加载日志失败";
     }
     traces.value = [];
   }

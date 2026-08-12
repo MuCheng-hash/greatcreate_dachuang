@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ApiError, api } from "@/services/api";
+import { ApiError, api, withQuery } from "@/services/api";
 
 function jsonResponse(payload: unknown, status = 200): Response {
   return new Response(JSON.stringify(payload), {
@@ -33,6 +33,20 @@ describe("typed api client", () => {
     expect(init?.credentials).toBe("include");
     expect(headers.get("X-CSRF-TOKEN")).toBe("csrf-value");
     expect(headers.get("Content-Type")).toBe("application/json");
+  });
+
+  it("encodes query values and omits empty optional filters", () => {
+    expect(withQuery("/api/admin/resources", {
+      pageNum: 2,
+      keyword: "红色 教育",
+      approved: true,
+      category: "",
+      optional: null,
+    })).toBe(
+      "/api/admin/resources?pageNum=2&keyword=%E7%BA%A2%E8%89%B2+%E6%95%99%E8%82%B2&approved=true",
+    );
+    expect(withQuery("/api/admin/resources?scope=SCHOOL", { limit: 50 }))
+      .toBe("/api/admin/resources?scope=SCHOOL&limit=50");
   });
 
   it("refreshes once after 401 and retries the original request", async () => {

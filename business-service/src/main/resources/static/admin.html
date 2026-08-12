@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>后台管理台 | 乡村学校思政资源地图</title>
     <meta name="description" content="乡村学校周边思政教育资源数字地图平台后台管理台。">
-    <link rel="stylesheet" href="/admin.css?v=20260808-merge-admin-style">
+    <link rel="stylesheet" href="/admin.css?v=20260811-unified-admin-nav">
 </head>
 <body>
 <div class="admin-shell">
@@ -19,9 +19,10 @@
             </div>
         </div>
 
-        <nav class="tab-strip" aria-label="后台模块">
+        <nav class="tab-strip" id="adminModuleNav" aria-label="后台模块">
+            <button class="tab-chip is-active" data-tab="dashboard" type="button">平台驾驶舱</button>
             <button class="tab-chip" data-tab="registrations" type="button">注册审核</button>
-            <button class="tab-chip is-active" data-tab="schools" type="button">学校管理</button>
+            <button class="tab-chip" data-tab="schools" type="button">学校管理</button>
             <button class="tab-chip" data-tab="resources" type="button">资源管理</button>
             <button class="tab-chip" data-tab="school-map" type="button">学校地图</button>
             <button class="tab-chip" data-tab="plans" type="button">活动方案</button>
@@ -69,16 +70,6 @@
                     <small id="globalStatusHint">准备连接后台接口。</small>
                 </article>
             </section>
-
-    <section class="tab-strip" aria-label="后台模块">
-        <button class="tab-chip is-active" data-tab="dashboard" type="button">平台驾驶舱</button>
-        <button class="tab-chip" data-tab="registrations" type="button">注册审核</button>
-        <button class="tab-chip" data-tab="schools" type="button">学校管理</button>
-        <button class="tab-chip" data-tab="resources" type="button">资源管理</button>
-        <button class="tab-chip" data-tab="school-map" type="button">学校地图</button>
-        <button class="tab-chip" data-tab="plans" type="button">活动方案</button>
-        <button class="tab-chip" data-tab="agent-ops" type="button">Agent 运维</button>
-    </section>
 
     <main class="workspace-stack">
         <section class="workspace-panel is-active dashboard-panel" data-panel="dashboard">
@@ -873,6 +864,6 @@
     </div>
 </div>
 
-<script src="/admin.js?v=20260808-multichannel-retrieval"></script>
+<script src="/admin.js?v=20260811-unified-admin-nav"></script>
 </body>
 </html>
