@@ -35,6 +35,23 @@ export interface StreamRequestOptions {
   onEvent?: (eventName: AgentSseEventName, data: AgentSseEventData) => void;
 }
 
+export type ApiQueryValue = string | number | boolean | null | undefined;
+
+export function withQuery(
+  path: string,
+  params: Record<string, ApiQueryValue>,
+): string {
+  const search = new URLSearchParams();
+  Object.entries(params).forEach(([key, value]) => {
+    if (value !== null && value !== undefined && value !== "") {
+      search.set(key, String(value));
+    }
+  });
+  const query = search.toString();
+  if (!query) return path;
+  return `${path}${path.includes("?") ? "&" : "?"}${query}`;
+}
+
 function isBrowser(): boolean {
   return typeof window !== "undefined" && typeof document !== "undefined";
 }

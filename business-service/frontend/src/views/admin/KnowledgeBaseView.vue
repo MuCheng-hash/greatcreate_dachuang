@@ -8,7 +8,7 @@ import {
   FileText, Upload, Trash2, RefreshCw, Search,
   LoaderCircle, AlertTriangle, CheckCircle2,
 } from "@lucide/vue";
-import { get, post, del, RequestError } from "@/services/request";
+import { api, ApiError, withQuery } from "@/services/api";
 
 // ---- 类型定义 ----
 interface KnowledgeDoc {
@@ -72,18 +72,20 @@ async function fetchDocs(): Promise<void> {
   loading.value = true;
   notice.text = "";
   try {
-    const params: Record<string, unknown> = {
+    const params: Record<string, string | number> = {
       pageNum: pageNum.value,
       pageSize,
       resourceCategory: "KNOWLEDGE_BASE",
     };
     if (keyword.value.trim()) params.keyword = keyword.value.trim();
-    const result = await get<PageResult<KnowledgeDoc>>("/api/admin/resources", params);
+    const result = await api.get<PageResult<KnowledgeDoc>>(
+      withQuery("/api/admin/resources", params),
+    );
     docs.value = result.records ?? [];
     total.value = result.total ?? 0;
   } catch (err) {
     notice.tone = "error";
-    notice.text = err instanceof RequestError ? err.message : "加载文档列表失败";
+    notice.text = err instanceof ApiError ? err.message : "加载文档列表失败";
   } finally {
     loading.value = false;
   }
@@ -109,7 +111,7 @@ async function createDoc(): Promise<void> {
   saving.value = true;
   notice.text = "";
   try {
-    await post("/api/admin/resources", {
+    await api.post("/api/admin/resources", {
       resourceName: form.resourceName.trim(),
       resourceCategory: form.resourceCategory,
       intro: form.intro.trim() || null,
@@ -127,7 +129,7 @@ async function createDoc(): Promise<void> {
     await fetchDocs();
   } catch (err) {
     notice.tone = "error";
-    notice.text = err instanceof RequestError ? err.message : "创建失败";
+    notice.text = err instanceof ApiError ? err.message : "创建失败";
   } finally {
     saving.value = false;
   }
@@ -137,13 +139,13 @@ async function deleteDoc(id: number): Promise<void> {
   if (!confirm("确定要删除此文档？删除后不可恢复。")) return;
   notice.text = "";
   try {
-    await del(`/api/admin/resources/${id}`);
+    await api.delete(`/api/admin/resources/${id}`);
     notice.tone = "success";
     notice.text = "已删除";
     await fetchDocs();
   } catch (err) {
     notice.tone = "error";
-    notice.text = err instanceof RequestError ? err.message : "删除失败";
+    notice.text = err instanceof ApiError ? err.message : "删除失败";
   }
 }
 
@@ -152,12 +154,12 @@ async function reindex(): Promise<void> {
   reindexing.value = true;
   notice.text = "";
   try {
-    await post("/api/admin/rag/reindex");
+    await api.post("/api/admin/rag/reindex");
     notice.tone = "success";
     notice.text = "RAG 索引重建已触发";
   } catch (err) {
     notice.tone = "error";
-    notice.text = err instanceof RequestError ? err.message : "索引重建失败";
+    notice.text = err instanceof ApiError ? err.message : "索引重建失败";
   } finally {
     reindexing.value = false;
   }
