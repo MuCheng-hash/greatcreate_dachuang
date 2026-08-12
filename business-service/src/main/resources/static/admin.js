@@ -81,7 +81,7 @@ const adminElements = {
     dashboardProjectionFailed: document.querySelector("#dashboardProjectionFailed"),
     dashboardProjectionTotal: document.querySelector("#dashboardProjectionTotal"),
     logoutButton: document.querySelector("#logoutButton"),
-    tabButtons: Array.from(document.querySelectorAll(".tab-strip .tab-chip[data-tab]")),
+    tabButtons: Array.from(document.querySelectorAll("#adminModuleNav .tab-chip[data-tab]")),
     panels: Array.from(document.querySelectorAll(".workspace-panel")),
 
     registrationKeywordInput: document.querySelector("#registrationKeywordInput"),
@@ -280,7 +280,7 @@ document.addEventListener("DOMContentLoaded", () => {
 });
 
 function initializeSchoolMapPanel() {
-    const tabButton = document.querySelector('.tab-chip[data-tab="relations"]');
+    const tabButton = document.querySelector('#adminModuleNav .tab-chip[data-tab="relations"]');
     if (tabButton) {
         tabButton.dataset.tab = "school-map";
         tabButton.textContent = "学校地图";
@@ -339,7 +339,7 @@ function initializeSchoolMapPanel() {
         </div>
     `;
 
-    adminElements.tabButtons = Array.from(document.querySelectorAll(".tab-strip .tab-chip[data-tab]"));
+    adminElements.tabButtons = Array.from(document.querySelectorAll("#adminModuleNav .tab-chip[data-tab]"));
     adminElements.panels = Array.from(document.querySelectorAll(".workspace-panel"));
     adminElements.schoolMapSchoolSelect = document.querySelector("#schoolMapSchoolSelect");
     adminElements.schoolMapRadiusInput = document.querySelector("#schoolMapRadiusInput");
@@ -355,8 +355,8 @@ function initializeSchoolMapPanel() {
 }
 
 function initializeUserManagementPanel() {
-    const tabStrip = document.querySelector(".tab-strip");
-    if (tabStrip && !document.querySelector('.tab-chip[data-tab="user-management"]')) {
+    const tabStrip = document.querySelector("#adminModuleNav");
+    if (tabStrip && !tabStrip.querySelector('.tab-chip[data-tab="user-management"]')) {
         const button = document.createElement("button");
         button.className = "tab-chip";
         button.dataset.tab = "user-management";
@@ -513,7 +513,7 @@ function initializeUserManagementPanel() {
     `;
     workspaceStack.appendChild(panel);
 
-    adminElements.tabButtons = Array.from(document.querySelectorAll(".tab-strip .tab-chip[data-tab]"));
+    adminElements.tabButtons = Array.from(document.querySelectorAll("#adminModuleNav .tab-chip[data-tab]"));
     adminElements.panels = Array.from(document.querySelectorAll(".workspace-panel"));
     Object.assign(adminElements, {
         userRefreshButton: document.querySelector("#userRefreshButton"),
@@ -570,8 +570,8 @@ function initializeUserManagementPanel() {
 }
 
 function initializeAgentDebugPanel() {
-    const tabStrip = document.querySelector(".tab-strip");
-    if (tabStrip && !document.querySelector('.tab-chip[data-tab="agent-debug"]')) {
+    const tabStrip = document.querySelector("#adminModuleNav");
+    if (tabStrip && !tabStrip.querySelector('.tab-chip[data-tab="agent-debug"]')) {
         const button = document.createElement("button");
         button.className = "tab-chip";
         button.dataset.tab = "agent-debug";
@@ -634,7 +634,7 @@ function initializeAgentDebugPanel() {
         </div>
     `;
     workspaceStack.insertBefore(panel, document.querySelector('.workspace-panel[data-panel="agent-ops"]'));
-    adminElements.tabButtons = Array.from(document.querySelectorAll(".tab-strip .tab-chip[data-tab]"));
+    adminElements.tabButtons = Array.from(document.querySelectorAll("#adminModuleNav .tab-chip[data-tab]"));
     adminElements.panels = Array.from(document.querySelectorAll(".workspace-panel"));
     Object.assign(adminElements, {
         agentDebugSchoolSelect: document.querySelector("#agentDebugSchoolSelect"),
@@ -658,8 +658,8 @@ function initializeAgentDebugPanel() {
 }
 
 function initializeRagKnowledgePanel() {
-    const tabStrip = document.querySelector(".tab-strip");
-    if (tabStrip && !document.querySelector('.tab-chip[data-tab="rag-knowledge"]')) {
+    const tabStrip = document.querySelector("#adminModuleNav");
+    if (tabStrip && !tabStrip.querySelector('.tab-chip[data-tab="rag-knowledge"]')) {
         const button = document.createElement("button");
         button.className = "tab-chip";
         button.dataset.tab = "rag-knowledge";
@@ -745,7 +745,7 @@ function initializeRagKnowledgePanel() {
         </article>
     `;
     workspaceStack.insertBefore(panel, document.querySelector('.workspace-panel[data-panel="agent-debug"]') || document.querySelector('.workspace-panel[data-panel="agent-ops"]'));
-    adminElements.tabButtons = Array.from(document.querySelectorAll(".tab-strip .tab-chip[data-tab]"));
+    adminElements.tabButtons = Array.from(document.querySelectorAll("#adminModuleNav .tab-chip[data-tab]"));
     adminElements.panels = Array.from(document.querySelectorAll(".workspace-panel"));
     Object.assign(adminElements, {
         ragStatusSummary: document.querySelector("#ragStatusSummary"),
@@ -3853,7 +3853,7 @@ function escapeHtml(value) {
 // 统一目录作为既有静态后台的增量模块，复用 requestJson 与 tab 切换样式。
 function mountCatalogWorkspace() {
     return mountCatalogOperations();
-    const tabs = document.querySelector(".tab-strip");
+    const tabs = document.querySelector("#adminModuleNav");
     const workspace = document.querySelector(".workspace-stack");
     if (!tabs || !workspace || document.querySelector('[data-panel="catalog"]')) return;
     const tab = document.createElement("button");
@@ -4146,7 +4146,7 @@ async function loadCatalogDirectoryRelations() { const item=catalogDirectoryStat
 async function deleteCatalogDirectoryRelation(key) { if(!window.confirm("确定删除该关联关系？"))return;const [kind,id]=key.split(":");await requestJson(`/api/admin/catalog/relations/${kind}/${id}`,{method:"DELETE"});setGlobalStatus("关系已删除","图谱关系已同步移除。");await loadCatalogDirectoryRelations(); }
 
 function mountCatalogOperations() {
-    const tabs=document.querySelector(".tab-strip"),workspace=document.querySelector(".workspace-stack");if(!tabs||!workspace||document.querySelector('[data-panel="catalog"]'))return;const tab=document.createElement("button");tab.className="tab-chip";tab.type="button";tab.dataset.tab="catalog";tab.textContent="图谱导入";tabs.appendChild(tab);const panel=document.createElement("section");panel.className="workspace-panel";panel.dataset.panel="catalog";panel.innerHTML=`<div class="panel-heading"><div><p class="eyebrow">Module 07</p><h2>图谱导入与投影任务</h2></div><div class="panel-tools"><a class="accent-button" href="/api/admin/catalog/import/template">下载 Excel 模板</a><button id="catalogPreviewImport" class="ghost-button" type="button">上传预检</button></div></div><input id="catalogImportFile" type="file" accept=".xlsx" hidden><div id="catalogImportResult" class="status-box"></div><article class="table-card"><div class="card-topline"><h3>图谱与 RAG 投影任务</h3><button id="catalogLoadTasks" class="ghost-button" type="button">刷新任务</button></div><div class="table-shell"><table><thead><tr><th>类型</th><th>状态</th><th>尝试</th><th>错误</th><th>操作</th></tr></thead><tbody id="catalogTaskTable"></tbody></table></div></article>`;workspace.appendChild(panel);tab.addEventListener("click",()=>{setActiveTab("catalog");void loadCatalogOperations();});panel.querySelector("#catalogPreviewImport").addEventListener("click",()=>panel.querySelector("#catalogImportFile").click());panel.querySelector("#catalogImportFile").addEventListener("change",()=>void previewCatalogImport());panel.querySelector("#catalogLoadTasks").addEventListener("click",()=>void loadCatalogOperations()); }
+    const tabs=document.querySelector("#adminModuleNav"),workspace=document.querySelector(".workspace-stack");if(!tabs||!workspace||document.querySelector('[data-panel="catalog"]'))return;const tab=document.createElement("button");tab.className="tab-chip";tab.type="button";tab.dataset.tab="catalog";tab.textContent="图谱导入";tabs.appendChild(tab);const panel=document.createElement("section");panel.className="workspace-panel";panel.dataset.panel="catalog";panel.innerHTML=`<div class="panel-heading"><div><p class="eyebrow">Module 07</p><h2>图谱导入与投影任务</h2></div><div class="panel-tools"><a class="accent-button" href="/api/admin/catalog/import/template">下载 Excel 模板</a><button id="catalogPreviewImport" class="ghost-button" type="button">上传预检</button></div></div><input id="catalogImportFile" type="file" accept=".xlsx" hidden><div id="catalogImportResult" class="status-box"></div><article class="table-card"><div class="card-topline"><h3>图谱与 RAG 投影任务</h3><button id="catalogLoadTasks" class="ghost-button" type="button">刷新任务</button></div><div class="table-shell"><table><thead><tr><th>类型</th><th>状态</th><th>尝试</th><th>错误</th><th>操作</th></tr></thead><tbody id="catalogTaskTable"></tbody></table></div></article>`;workspace.appendChild(panel);tab.addEventListener("click",()=>{setActiveTab("catalog");void loadCatalogOperations();});panel.querySelector("#catalogPreviewImport").addEventListener("click",()=>panel.querySelector("#catalogImportFile").click());panel.querySelector("#catalogImportFile").addEventListener("change",()=>void previewCatalogImport());panel.querySelector("#catalogLoadTasks").addEventListener("click",()=>void loadCatalogOperations()); }
 async function previewCatalogImport(){
     const input=document.querySelector("#catalogImportFile"),file=input?.files?.[0],box=document.querySelector("#catalogImportResult");
     if(!file||!box)return;
