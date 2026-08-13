@@ -37,18 +37,18 @@ class ToolRuntimeContext:
     action_id: str | None = None
     call_namespace: str = "graph"
     executions: list[ToolExecution] = field(default_factory=list)
-    event_sink: Callable[[str, dict[str, Any]], None] | None = None
+    event_sink: Callable[[str, dict[str, Any]], Awaitable[None]] | None = None
     business_tool_client: BusinessToolClient | None = None
     grade: str | None = None
     theme: str | None = None
     degraded_reasons: list[str] = field(default_factory=list)
     _call_counts: dict[str, int] = field(default_factory=dict)
 
-    def _emit(self, event_name: str, data: dict[str, Any]) -> None:
+    async def _emit(self, event_name: str, data: dict[str, Any]) -> None:
         if self.event_sink is None:
             return
         try:
-            self.event_sink(event_name, data)
+            await self.event_sink(event_name, data)
         except Exception:
             return
 
@@ -61,7 +61,7 @@ class ToolRuntimeContext:
         started = time.perf_counter()
         safe_arguments = _sanitize(arguments)
         tool_call_id = self._tool_call_id(name, safe_arguments)
-        self._emit(
+        await self._emit(
             "tool.started",
             {"toolName": name, "name": name, "arguments": safe_arguments},
         )
@@ -76,7 +76,7 @@ class ToolRuntimeContext:
                 self.executions.append(
                     ToolExecution(name=name, status=status, durationMs=duration_ms)
                 )
-                self._emit(
+                await self._emit(
                     "tool.completed",
                     {
                         "toolName": name,
@@ -120,7 +120,7 @@ class ToolRuntimeContext:
         self.executions.append(
             ToolExecution(name=name, status=status, durationMs=duration_ms)
         )
-        self._emit(
+        await self._emit(
             "tool.completed",
             {
                 "toolName": name,

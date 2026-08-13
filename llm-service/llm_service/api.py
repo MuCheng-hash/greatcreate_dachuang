@@ -6,6 +6,7 @@ import hmac
 import logging
 import secrets
 import base64
+import anyio
 import httpx
 from contextlib import asynccontextmanager, suppress
 from typing import Any, Literal
@@ -60,6 +61,38 @@ from .user_memory import (
 
 
 LOGGER = logging.getLogger("llm.stateful_agent.api")
+
+
+class DisconnectAwareStreamingResponse(StreamingResponse):
+    """Monitor ASGI disconnects even while an SSE producer is idle.
+
+    Starlette's ASGI 2.4 path discovers disconnects only on the next failed
+    response write. Agent model/tool calls can be silent for many seconds, so
+    the upstream task must also listen for ``http.disconnect`` concurrently.
+    """
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] != "http":
+            await super().__call__(scope, receive, send)
+            return
+
+        async with anyio.create_task_group() as task_group:
+            async def stream() -> None:
+                try:
+                    await self.stream_response(send)
+                except OSError:
+                    # A failed send is the transport-level equivalent of the
+                    # disconnect message handled by the sibling task.
+                    pass
+                finally:
+                    task_group.cancel_scope.cancel()
+
+            task_group.start_soon(stream)
+            await self.listen_for_disconnect(receive)
+            task_group.cancel_scope.cancel()
+
+        if self.background is not None:
+            await self.background()
 
 
 async def _thread_response(
@@ -985,7 +1018,7 @@ def create_app(
             raise_turn_conflict(exc)
         except (ThreadNotFoundError, ThreadScopeError) as exc:
             raise HTTPException(status_code=404, detail="thread not found") from exc
-        return StreamingResponse(
+        return DisconnectAwareStreamingResponse(
             event_stream,
             media_type="text/event-stream",
             headers={

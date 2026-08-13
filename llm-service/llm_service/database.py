@@ -3,12 +3,14 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import os
+import sys
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import anyio
 from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
@@ -84,18 +86,46 @@ class Database:
 
     @asynccontextmanager
     async def connection(self) -> AsyncIterator[AsyncConnection[dict[str, Any]]]:
-        async with self.pool.connection(
+        # The pool context also enters the Psycopg connection context. A task
+        # cancelled while a command is active can then attempt rollback before
+        # Psycopg has finished consuming the command. Returning the connection
+        # explicitly lets the pool discard/replace a bad connection without a
+        # second implicit commit/rollback boundary.
+        connection = await self.pool.getconn(
             timeout=self.settings.database_pool_timeout_seconds
-        ) as connection:
+        )
+        try:
             yield connection
+        finally:
+            with anyio.CancelScope(shield=True):
+                await self.pool.putconn(connection)
 
     @asynccontextmanager
     async def transaction(self) -> AsyncIterator[AsyncConnection[dict[str, Any]]]:
-        async with self.pool.connection(
+        # Do not nest ``pool.connection()``'s implicit connection transaction
+        # around Psycopg's explicit transaction context. During task
+        # cancellation both context managers otherwise try to roll back the
+        # same connection, which can return an ACTIVE connection to the pool.
+        connection = await self.pool.getconn(
             timeout=self.settings.database_pool_timeout_seconds
-        ) as connection:
-            async with connection.transaction():
+        )
+        transaction = connection.transaction()
+        try:
+            await transaction.__aenter__()
+            try:
                 yield connection
+            except BaseException:
+                exception = sys.exc_info()
+                with anyio.CancelScope(shield=True):
+                    suppressed = await transaction.__aexit__(*exception)
+                if not suppressed:
+                    raise
+            else:
+                with anyio.CancelScope(shield=True):
+                    await transaction.__aexit__(None, None, None)
+        finally:
+            with anyio.CancelScope(shield=True):
+                await self.pool.putconn(connection)
 
     async def ping(self) -> dict[str, Any]:
         async with self.connection() as connection:

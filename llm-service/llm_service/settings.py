@@ -167,6 +167,7 @@ class Settings(BaseSettings):
     agent_turn_heartbeat_seconds: int = Field(default=15, ge=1, le=300)
     agent_partial_flush_interval_seconds: float = Field(default=0.5, gt=0, le=30)
     agent_partial_flush_characters: int = Field(default=256, ge=1, le=10000)
+    agent_stream_buffer_size: int = Field(default=256, ge=1, le=4096)
     agent_checkpoint_retention_days: int = Field(default=7, ge=1, le=365)
     agent_checkpoint_cleanup_batch_size: int = Field(default=50, ge=1, le=500)
     agent_checkpoint_cleanup_interval_seconds: int = Field(default=3600, ge=60, le=86400)

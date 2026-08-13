@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Sequence
-from typing import Any
+from collections.abc import AsyncIterator, Awaitable, Sequence
+from typing import Any, TypeVar
 
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.base import (
@@ -25,6 +25,36 @@ CHECKPOINT_RELATIONS = (
     "checkpoint_blobs",
     "checkpoint_writes",
 )
+
+T = TypeVar("T")
+
+
+async def _await_checkpoint_operation(operation: Awaitable[T]) -> T:
+    """Drain a started Psycopg operation before propagating task cancellation.
+
+    Returning a pool connection while its pipeline command is still active makes
+    Psycopg discard that connection and may leave a server-side command running.
+    Checkpoint statements are short, so cancellation stops graph/model work
+    immediately but waits for the already-started database statement to settle.
+    """
+
+    task = asyncio.ensure_future(operation)
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                continue
+        if not task.cancelled():
+            try:
+                task.result()
+            except Exception:
+                # The caller is already cancelled; consuming the exception keeps
+                # the task from becoming an unobserved background failure.
+                pass
+        raise
 
 
 class CheckpointSchemaError(RuntimeError):
@@ -58,7 +88,9 @@ class NamespaceCheckpointSaver(BaseCheckpointSaver):
     async def aget_tuple(
         self, config: RunnableConfig
     ) -> CheckpointTuple | None:
-        value = await self.delegate.aget_tuple(self._scoped(config))
+        value = await _await_checkpoint_operation(
+            self.delegate.aget_tuple(self._scoped(config))
+        )
         return self._unscoped_tuple(value)
 
     async def alist(
@@ -71,12 +103,20 @@ class NamespaceCheckpointSaver(BaseCheckpointSaver):
     ) -> AsyncIterator[CheckpointTuple]:
         scoped_config = self._scoped(config or {"configurable": {}})
         scoped_before = self._scoped(before) if before is not None else None
-        async for value in self.delegate.alist(
+        iterator = self.delegate.alist(
             scoped_config, filter=filter, before=scoped_before, limit=limit
-        ):
-            unscoped = self._unscoped_tuple(value)
-            if unscoped is not None:
-                yield unscoped
+        )
+        try:
+            while True:
+                try:
+                    value = await _await_checkpoint_operation(anext(iterator))
+                except StopAsyncIteration:
+                    break
+                unscoped = self._unscoped_tuple(value)
+                if unscoped is not None:
+                    yield unscoped
+        finally:
+            await _await_checkpoint_operation(iterator.aclose())
 
     async def aput(
         self,
@@ -85,8 +125,10 @@ class NamespaceCheckpointSaver(BaseCheckpointSaver):
         metadata: CheckpointMetadata,
         new_versions: ChannelVersions,
     ) -> RunnableConfig:
-        stored = await self.delegate.aput(
-            self._scoped(config), checkpoint, metadata, new_versions
+        stored = await _await_checkpoint_operation(
+            self.delegate.aput(
+                self._scoped(config), checkpoint, metadata, new_versions
+            )
         )
         return self._unscoped(stored)
 
@@ -97,12 +139,16 @@ class NamespaceCheckpointSaver(BaseCheckpointSaver):
         task_id: str,
         task_path: str = "",
     ) -> None:
-        await self.delegate.aput_writes(
-            self._scoped(config), writes, task_id, task_path
+        await _await_checkpoint_operation(
+            self.delegate.aput_writes(
+                self._scoped(config), writes, task_id, task_path
+            )
         )
 
     async def adelete_thread(self, thread_id: str) -> None:
-        await self.delegate.adelete_thread(thread_id)
+        await _await_checkpoint_operation(
+            self.delegate.adelete_thread(thread_id)
+        )
 
     def _scoped(self, config: RunnableConfig) -> RunnableConfig:
         configurable = dict(config.get("configurable") or {})
@@ -174,9 +220,9 @@ class CheckpointManager:
             async with AsyncPostgresSaver.from_conn_string(
                 migration_dsn, serde=self.serializer
             ) as migration_saver:
-                await migration_saver.setup()
+                await _await_checkpoint_operation(migration_saver.setup())
         else:
-            await self.saver.setup()
+            await _await_checkpoint_operation(self.saver.setup())
         return await self.validate()
 
     async def validate(self) -> int:
@@ -217,8 +263,8 @@ class CheckpointManager:
         return self.latest_version
 
     async def has_checkpoint(self, thread_id: str, checkpoint_ns: str) -> bool:
-        value = await self.saver.aget_tuple(
-            self.config(thread_id, checkpoint_ns)
+        value = await _await_checkpoint_operation(
+            self.saver.aget_tuple(self.config(thread_id, checkpoint_ns))
         )
         return value is not None
 
@@ -226,7 +272,9 @@ class CheckpointManager:
         return NamespaceCheckpointSaver(self.saver, checkpoint_ns)
 
     async def delete_thread(self, thread_id: str) -> None:
-        await self.saver.adelete_thread(thread_id)
+        await _await_checkpoint_operation(
+            self.saver.adelete_thread(thread_id)
+        )
 
     @staticmethod
     def config(thread_id: str, checkpoint_ns: str) -> dict[str, Any]:

@@ -7,12 +7,13 @@ import logging
 import re
 import time
 import uuid
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlparse
 
 import httpx
+import anyio
 
 from fastapi.encoders import jsonable_encoder
 from langchain.agents import create_agent
@@ -85,7 +86,7 @@ from .tools import (
 
 
 LOGGER = logging.getLogger("llm.stateful_agent")
-EventSink = Callable[[str, dict[str, Any]], None]
+EventSink = Callable[[str, dict[str, Any]], Awaitable[None]]
 
 
 class ActionConfirmationRequired(RuntimeError):
@@ -259,120 +260,150 @@ class AgentRuntime:
         *,
         prepared: PreparedTurn | None = None,
     ) -> AsyncIterator[str]:
-        queue: asyncio.Queue[tuple[str, dict[str, Any]] | None] = asyncio.Queue()
+        send_stream, receive_stream = anyio.create_memory_object_stream[
+            tuple[str, dict[str, Any]]
+        ](self.settings.agent_stream_buffer_size)
         run_id = str(uuid.uuid4())
         prepared_turn = prepared or await self._prepare_turn(request)
         completed = self._completed_response(prepared_turn.registration.turn)
 
-        def publish(event_name: str, data: dict[str, Any] | None = None) -> None:
+        async def publish(
+            event_name: str, data: dict[str, Any] | None = None
+        ) -> None:
             payload = {"runId": run_id}
             if data:
                 payload.update(data)
-            queue.put_nowait((event_name, payload))
+            await send_stream.send((event_name, payload))
 
         async def worker() -> None:
             writer = self._partial_writer(prepared_turn.registration.turn)
             heartbeat: asyncio.Task[None] | None = None
-            try:
-                if completed is not None:
-                    publish("run.started", {
-                        "threadId": completed.thread_id,
-                        "clientTurnId": completed.client_turn_id,
-                        "resumed": True,
-                        "attempt": prepared_turn.registration.turn.attempt_count,
+            async with send_stream:
+                try:
+                    if completed is not None:
+                        await publish("run.started", {
+                            "threadId": completed.thread_id,
+                            "clientTurnId": completed.client_turn_id,
+                            "resumed": True,
+                            "attempt": prepared_turn.registration.turn.attempt_count,
+                        })
+                        await publish("final", {
+                            "threadId": completed.thread_id,
+                            "response": completed.model_dump(by_alias=True, mode="json"),
+                        })
+                        await publish("done")
+                        return
+                    heartbeat = self._start_heartbeat(
+                        prepared_turn.registration.turn
+                    )
+                    await publish("phase.started", {"phase": "context", "label": "正在准备会话上下文"})
+                    await publish("phase.completed", {
+                        "phase": "context",
+                        "label": "会话上下文已准备",
+                        "compacted": prepared_turn.window.compacted,
                     })
-                    publish("final", {
-                        "threadId": completed.thread_id,
-                        "response": completed.model_dump(by_alias=True, mode="json"),
+                    result = await self._stream_agent_turn(
+                        request,
+                        run_id,
+                        prepared_turn.thread,
+                        prepared_turn.messages,
+                        prepared_turn.window.summary,
+                        prepared_turn.window.compacted,
+                        prepared_turn.plan,
+                        prepared_turn.memory_context,
+                        publish,
+                        prepared_turn.registration,
+                        writer,
+                    )
+                    result.client_turn_id = request.client_turn_id
+                    await writer.update(result.answer, force=True)
+                    await self._persist_response(
+                        prepared_turn.thread,
+                        result,
+                        request.client_turn_id,
+                        turn=prepared_turn.registration.turn,
+                        request=request,
+                    )
+                    await publish(
+                        "final",
+                        {
+                            "threadId": result.thread_id,
+                            "response": result.model_dump(by_alias=True, mode="json"),
+                        },
+                    )
+                    await publish("done")
+                except asyncio.CancelledError:
+                    with anyio.CancelScope(shield=True):
+                        await self._finish_cancelled_or_interrupted(
+                            request,
+                            prepared_turn.registration.turn,
+                            writer,
+                            "stream_disconnected",
+                        )
+                    raise
+                except ActionConfirmationRequired as exc:
+                    await publish("action.required", {"action": self._action_event(exc.action)})
+                    await publish("done", {
+                        "clientTurnId": request.client_turn_id,
+                        "turnStatus": "awaiting_confirmation",
                     })
-                    publish("done")
-                    return
-                heartbeat = self._start_heartbeat(
-                    prepared_turn.registration.turn
-                )
-                publish("phase.started", {"phase": "context", "label": "正在准备会话上下文"})
-                publish("phase.completed", {
-                    "phase": "context",
-                    "label": "会话上下文已准备",
-                    "compacted": prepared_turn.window.compacted,
-                })
-                result = await self._stream_agent_turn(
-                    request,
-                    run_id,
-                    prepared_turn.thread,
-                    prepared_turn.messages,
-                    prepared_turn.window.summary,
-                    prepared_turn.window.compacted,
-                    prepared_turn.plan,
-                    prepared_turn.memory_context,
-                    publish,
-                    prepared_turn.registration,
-                    writer,
-                )
-                result.client_turn_id = request.client_turn_id
-                await writer.update(result.answer, force=True)
-                await self._persist_response(
-                    prepared_turn.thread,
-                    result,
-                    request.client_turn_id,
-                    turn=prepared_turn.registration.turn,
-                    request=request,
-                )
-                publish(
-                    "final",
-                    {
-                        "threadId": result.thread_id,
-                        "response": result.model_dump(by_alias=True, mode="json"),
-                    },
-                )
-                publish("done")
-            except asyncio.CancelledError:
-                await self._finish_cancelled_or_interrupted(
-                    request,
-                    prepared_turn.registration.turn,
-                    writer,
-                    "stream_disconnected",
-                )
-                raise
-            except ActionConfirmationRequired as exc:
-                publish("action.required", {"action": self._action_event(exc.action)})
-                publish("done", {
-                    "clientTurnId": request.client_turn_id,
-                    "turnStatus": "awaiting_confirmation",
-                })
-            except TurnConflictError as exc:
-                publish("error", {"code": exc.code, "message": str(exc)})
-                publish("done")
-            except Exception as exc:
-                await self._finish_failed_turn(
-                    request, prepared_turn.registration.turn, writer, exc
-                )
-                LOGGER.exception("stateful_agent_stream_failed", extra={"runId": run_id})
-                publish("error", {
-                    "errorType": type(exc).__name__,
-                    "message": "agent execution interrupted",
-                })
-                publish("done")
-            finally:
-                if heartbeat is not None:
-                    await self._stop_heartbeat(heartbeat)
-                queue.put_nowait(None)
+                except TurnConflictError as exc:
+                    await publish("error", self._stream_error_payload(
+                        request,
+                        exc.code,
+                        "the requested turn cannot continue",
+                        retryable=exc.code in {"thread_busy", "turn_in_progress"},
+                    ))
+                    await publish("done", {"clientTurnId": request.client_turn_id})
+                except Exception as exc:
+                    await self._finish_failed_turn(
+                        request, prepared_turn.registration.turn, writer, exc
+                    )
+                    LOGGER.exception("stateful_agent_stream_failed", extra={"runId": run_id})
+                    await publish("error", self._stream_error_payload(
+                        request,
+                        "agent_stream_interrupted",
+                        "agent execution interrupted",
+                        retryable=True,
+                    ))
+                    await publish("done", {"clientTurnId": request.client_turn_id})
+                finally:
+                    if heartbeat is not None:
+                        with anyio.CancelScope(shield=True):
+                            await self._stop_heartbeat(heartbeat)
 
         task = asyncio.create_task(worker())
         try:
-            while True:
-                item = await queue.get()
-                if item is None:
-                    break
-                event_name, data = item
-                yield self._format_sse(event_name, data)
+            async with receive_stream:
+                async for event_name, data in receive_stream:
+                    yield self._format_sse(event_name, data)
         finally:
             if not task.done():
                 task.cancel()
+            # A disconnect cancels the StreamingResponse task. Shield the
+            # worker's short persistence cleanup from repeated cancellation
+            # so the turn reaches interrupted/cancelled before returning.
+            with anyio.CancelScope(shield=True):
                 try:
                     await task
                 except asyncio.CancelledError:
                     pass
+
+    @staticmethod
+    def _stream_error_payload(
+        request: AgentMessageRequest,
+        code: str,
+        message: str,
+        *,
+        retryable: bool,
+    ) -> dict[str, Any]:
+        return {
+            "code": code,
+            "errorType": code,
+            "message": message,
+            "clientTurnId": request.client_turn_id,
+            "retryable": retryable,
+        }
 
     async def create_thread(
         self, owner_id: str, scope_type: str, scope_id: str | int
@@ -528,20 +559,24 @@ class AgentRuntime:
         self._active_turn_tasks[turn.turn_id] = execution_task
 
         async def heartbeat_loop() -> None:
-            while True:
-                await asyncio.sleep(self.settings.agent_turn_heartbeat_seconds)
-                try:
-                    cancellation_requested = await self.turn_repository.heartbeat(
-                        turn.turn_id,
-                        self.instance_id,
-                        self.settings.agent_turn_lease_seconds,
-                    )
-                except Exception:
-                    execution_task.cancel()
-                    return
-                if cancellation_requested:
-                    execution_task.cancel()
-                    return
+            # This raw asyncio task must not inherit repeated cancellation from
+            # the surrounding AnyIO response scope. It is stopped explicitly
+            # by ``_stop_heartbeat`` with one ordinary task cancellation.
+            with anyio.CancelScope(shield=True):
+                while True:
+                    await asyncio.sleep(self.settings.agent_turn_heartbeat_seconds)
+                    try:
+                        cancellation_requested = await self.turn_repository.heartbeat(
+                            turn.turn_id,
+                            self.instance_id,
+                            self.settings.agent_turn_lease_seconds,
+                        )
+                    except Exception:
+                        execution_task.cancel()
+                        return
+                    if cancellation_requested:
+                        execution_task.cancel()
+                        return
 
         return asyncio.create_task(
             heartbeat_loop(), name=f"agent-turn-heartbeat-{turn.turn_id}"
@@ -990,7 +1025,7 @@ class AgentRuntime:
                 registration,
             )
         primary = self._primary_model_config(request.model_id)
-        emit(
+        await emit(
             "run.started",
             {
                 "threadId": thread.thread_id,
@@ -1001,7 +1036,7 @@ class AgentRuntime:
                 "model": primary.model,
             },
         )
-        emit("phase.started", {
+        await emit("phase.started", {
             "phase": "reasoning",
             "label": "正在分析问题并规划处理步骤",
             "recommendedTools": plan.recommended_tools,
@@ -1012,7 +1047,7 @@ class AgentRuntime:
         executions: list[ToolExecution] = list(prefetched_executions)
         model_attempts = self._model_attempts(request.model_id)
         if not model_attempts:
-            emit(
+            await emit(
                 "model.started",
                 {
                     "provider": primary.provider,
@@ -1020,7 +1055,7 @@ class AgentRuntime:
                     "fallbackLevel": primary.fallback_level,
                 },
             )
-            emit(
+            await emit(
                 "model.failed",
                 {
                     "provider": primary.provider,
@@ -1044,7 +1079,7 @@ class AgentRuntime:
                 checkpoint_namespace,
             )
             if registration.resumed or attempt_index > 0:
-                emit(
+                await emit(
                     "response.reset",
                     {
                         "clientTurnId": request.client_turn_id,
@@ -1071,7 +1106,7 @@ class AgentRuntime:
                 degraded_reasons=list(prefetched_reasons),
             )
             token = bind_tool_runtime(runtime)
-            emit(
+            await emit(
                 "model.started",
                 {
                     "provider": config.provider,
@@ -1083,12 +1118,12 @@ class AgentRuntime:
                 agent = injected_agent or await self._create_agent_for(
                     config, checkpoint_namespace
                 )
-                emit("phase.completed", {
+                await emit("phase.completed", {
                     "phase": "reasoning",
                     "label": "分析完成，开始执行",
                     "recommendedTools": plan.recommended_tools,
                 })
-                emit("phase.started", {"phase": "response", "label": "正在生成回答"})
+                await emit("phase.started", {"phase": "response", "label": "正在生成回答"})
                 result = await self._invoke_agent_stream(
                     request,
                     request.context,
@@ -1108,7 +1143,7 @@ class AgentRuntime:
                     partial_writer=partial_writer,
                 )
                 result = self._with_model_metadata(result, config)
-                emit(
+                await emit(
                     "model.completed",
                     {
                         "provider": config.provider,
@@ -1116,7 +1151,7 @@ class AgentRuntime:
                         "fallbackLevel": config.fallback_level,
                     },
                 )
-                emit("phase.completed", {"phase": "response", "label": "回答生成完成"})
+                await emit("phase.completed", {"phase": "response", "label": "回答生成完成"})
                 return result
             except (ActionConfirmationRequired, TurnConflictError, TurnLeaseLostError):
                 raise
@@ -1135,7 +1170,7 @@ class AgentRuntime:
                     },
                 )
                 resume_namespace = None
-                emit(
+                await emit(
                     "model.failed",
                     {
                         "provider": config.provider,
@@ -1433,7 +1468,7 @@ class AgentRuntime:
             prompt_key, request, thread, memory_context
         )
         primary = self._primary_model_config(request.model_id)
-        emit(
+        await emit(
             "run.started",
             {
                 "threadId": thread.thread_id,
@@ -1469,20 +1504,20 @@ class AgentRuntime:
         ):
             if event_name == "attempt":
                 metadata = dict(data)
-                emit("model.started", data)
+                await emit("model.started", data)
             elif event_name == "token":
                 if teaching_plan_parser is not None:
                     for patch in teaching_plan_parser.feed(str(data.get("delta") or "")):
-                        emit("plan.patch", {"patch": patch})
+                        await emit("plan.patch", {"patch": patch})
                 # 其他结构化任务仍不向前端发送原始 JSON 分片。
                 continue
             elif event_name == "fallback":
                 error_message = str(data.get("errorType") or "model_failed")
-                emit("model.failed", data)
+                await emit("model.failed", data)
             elif event_name == "complete":
                 generated = data.get("result") if isinstance(data.get("result"), dict) else None
                 metadata = {key: value for key, value in data.items() if key != "result"}
-                emit("model.completed", metadata)
+                await emit("model.completed", metadata)
             elif event_name == "exhausted":
                 error_message = "fallback_exhausted"
 
@@ -1922,10 +1957,10 @@ class AgentRuntime:
                 resume_action = await self.action_repository.mark_executing(
                     resume_action.action_id
                 )
-                emit("action.started", {"actionId": resume_action.action_id})
+                await emit("action.started", {"actionId": resume_action.action_id})
             elif resume_action.status == "executing":
                 decision = "approve"
-                emit(
+                await emit(
                     "action.started",
                     {"actionId": resume_action.action_id, "resumed": True},
                 )
@@ -1955,7 +1990,7 @@ class AgentRuntime:
                     model_buffer, delta = self._merge_stream_text(model_buffer, content)
                     partial_answer = self._partial_answer(model_buffer)
                     if delta and partial_answer and len(partial_answer) > emitted_answer_length:
-                        emit("token", {"delta": partial_answer[emitted_answer_length:]})
+                        await emit("token", {"delta": partial_answer[emitted_answer_length:]})
                         emitted_answer_length = len(partial_answer)
                         if partial_writer is not None:
                             await partial_writer.update(partial_answer)
@@ -2104,13 +2139,13 @@ class AgentRuntime:
                 action.action_id, result_summary="写操作已完成"
             )
             if emit is not None:
-                emit("action.completed", {"actionId": completed.action_id})
+                await emit("action.completed", {"actionId": completed.action_id})
         elif execution.status == "failed":
             failed = await self.action_repository.mark_failed(
                 action.action_id, "write_tool_failed"
             )
             if emit is not None:
-                emit(
+                await emit(
                     "action.failed",
                     {"actionId": failed.action_id, "errorCode": failed.error_code},
                 )
@@ -2481,7 +2516,7 @@ class AgentRuntime:
 
     async def _emit_answer_chunks(self, answer: str, emit: EventSink, size: int = 24) -> None:
         for index in range(0, len(answer), size):
-            emit("token", {"delta": answer[index:index + size]})
+            await emit("token", {"delta": answer[index:index + size]})
             # Let the SSE consumer flush each queued chunk instead of making
             # the fallback answer appear as one large response.
             await asyncio.sleep(0)
