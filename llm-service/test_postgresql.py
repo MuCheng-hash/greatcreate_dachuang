@@ -14,10 +14,11 @@ from psycopg.types.json import Jsonb
 from psycopg_pool import PoolTimeout
 import pytest
 from langgraph.graph import END, START, StateGraph
+from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 
 from llm_service.api import create_app
 from llm_service.actions import AgentActionRepository, ActionConflictError
-from llm_service.checkpointing import CheckpointManager
+from llm_service.checkpointing import CheckpointManager, NamespaceCheckpointSaver
 from llm_service.database import SchemaMigrator
 from llm_service.repository import ConversationRepository
 from llm_service.runtime import ActionConfirmationRequired, AgentRuntime
@@ -460,6 +461,80 @@ def test_cancelled_database_request_releases_connection(tmp_path: Path) -> None:
                 await connection.execute("SELECT 1 AS value")
             ).fetchone()
         assert row["value"] == 1
+
+    run_async(exercise())
+
+
+def test_cancelled_database_transaction_returns_an_idle_connection(
+    tmp_path: Path, caplog,
+) -> None:
+    settings = settings_for_database(
+        tmp_path,
+        database_pool_min_size=1,
+        database_pool_max_size=1,
+    )
+    database = open_database(settings)
+
+    async def exercise() -> None:
+        async def slow_transaction() -> None:
+            async with database.transaction() as connection:
+                await connection.execute("SELECT pg_sleep(10)")
+
+        task = asyncio.create_task(slow_transaction())
+        await asyncio.sleep(0.1)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        async with database.connection() as connection:
+            row = await (
+                await connection.execute("SELECT 1 AS value")
+            ).fetchone()
+        assert row["value"] == 1
+
+    with caplog.at_level("WARNING"):
+        run_async(exercise())
+    messages = [record.getMessage() for record in caplog.records]
+    assert not any("error ignored in rollback" in value for value in messages)
+    assert not any("closing returned connection" in value for value in messages)
+
+
+def test_cancelled_checkpoint_write_drains_before_connection_is_released() -> None:
+    started = asyncio.Event()
+    release = asyncio.Event()
+    finished = asyncio.Event()
+
+    class SlowCheckpointSaver:
+        serde = JsonPlusSerializer(pickle_fallback=False)
+        config_specs: list = []
+
+        async def aput(self, config, _checkpoint, _metadata, _new_versions):
+            started.set()
+            await release.wait()
+            finished.set()
+            return config
+
+    async def exercise() -> None:
+        saver = NamespaceCheckpointSaver(SlowCheckpointSaver(), "chat-v1")
+        task = asyncio.create_task(saver.aput(
+            {
+                "configurable": {
+                    "thread_id": "turn-cancelled-during-checkpoint",
+                    "checkpoint_ns": "",
+                }
+            },
+            {"id": "checkpoint-1"},
+            {},
+            {},
+        ))
+        await asyncio.wait_for(started.wait(), timeout=1)
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
+
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert finished.is_set()
 
     run_async(exercise())
 

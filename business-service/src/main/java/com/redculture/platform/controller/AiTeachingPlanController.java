@@ -5,6 +5,8 @@ import com.redculture.platform.common.PageResult;
 import com.redculture.platform.config.AuthContext;
 import com.redculture.platform.service.AiTeachingPlanService;
 import com.redculture.platform.service.TeachingActivityPlanService;
+import com.redculture.platform.service.agent.AgentBusyException;
+import com.redculture.platform.service.agent.AgentUpstreamException;
 import com.redculture.platform.vo.AuthCurrentUserVO;
 import com.redculture.platform.vo.GeneratedTeachingPlanResponse;
 import com.redculture.platform.vo.TeachingActivityPlanAdminVO;
@@ -12,12 +14,18 @@ import com.redculture.platform.vo.request.GeneratedTeachingPlanSaveRequest;
 import com.redculture.platform.vo.request.TeachingPlanGenerateRequest;
 import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.http.MediaType;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.http.codec.ServerSentEvent;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
-import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
+import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
+
+import java.util.Map;
 
 @RestController
 @RequestMapping("/api/ai/teaching-plans")
@@ -39,26 +47,45 @@ public class AiTeachingPlanController {
 
     //同步生成教学方案。等待 AI 完整生成后，一次性返回结果。
     @PostMapping("/generate")
-    public ApiResponse<GeneratedTeachingPlanResponse> generate(@RequestBody TeachingPlanGenerateRequest request,
-                                                               HttpServletRequest servletRequest) {
-        try {
+    public Mono<ResponseEntity<ApiResponse<GeneratedTeachingPlanResponse>>> generate(
+            @RequestBody TeachingPlanGenerateRequest request,
+            HttpServletRequest servletRequest) {
+        return Mono.defer(() -> {
             AuthCurrentUserVO user = AuthContext.requireUser(servletRequest);
             requireSchoolAccess(request == null ? null : request.getSchoolId(), user);
-            return ApiResponse.success(aiTeachingPlanService.generatePlan(
-                    request, user.getAccountId(), request == null ? null : request.getThreadId()));
-        } catch (IllegalArgumentException exception) {
-            return ApiResponse.fail(exception.getMessage());
-        }
+            return aiTeachingPlanService.generatePlan(
+                    request,
+                    user.getAccountId(),
+                    request == null ? null : request.getThreadId()
+            );
+        }).map(value -> ResponseEntity.ok(ApiResponse.success(value)))
+                .onErrorResume(IllegalArgumentException.class, error -> Mono.just(
+                        ResponseEntity.badRequest().body(ApiResponse.fail(error.getMessage()))
+                ))
+                .onErrorResume(AgentBusyException.class, error -> Mono.just(
+                        ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
+                                .body(ApiResponse.fail(503, "agent_busy"))
+                ))
+                .onErrorResume(AgentUpstreamException.class, error -> Mono.just(
+                        ResponseEntity.status(HttpStatus.BAD_GATEWAY)
+                                .body(ApiResponse.fail(502, error.getCode()))
+                ));
     }
 
     //流式生成教学方案。AI 生成一段就推送一段，适用于前端实时展示。
     @PostMapping(value = "/generate/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
-    public SseEmitter generateStream(@RequestBody TeachingPlanGenerateRequest request,
-                                     HttpServletRequest servletRequest) {
-        AuthCurrentUserVO user = AuthContext.requireUser(servletRequest);
-        requireSchoolAccess(request == null ? null : request.getSchoolId(), user);
-        return aiTeachingPlanService.generatePlanStream(
-                request, user.getAccountId(), request == null ? null : request.getThreadId());
+    public Flux<ServerSentEvent<Map<String, Object>>> generateStream(
+            @RequestBody TeachingPlanGenerateRequest request,
+            HttpServletRequest servletRequest) {
+        return Flux.defer(() -> {
+            AuthCurrentUserVO user = AuthContext.requireUser(servletRequest);
+            requireSchoolAccess(request == null ? null : request.getSchoolId(), user);
+            return aiTeachingPlanService.generatePlanStream(
+                    request,
+                    user.getAccountId(),
+                    request == null ? null : request.getThreadId()
+            );
+        });
     }
 
     //将 AI 生成的方案保存为草稿，后续可在后台继续编辑或管理。

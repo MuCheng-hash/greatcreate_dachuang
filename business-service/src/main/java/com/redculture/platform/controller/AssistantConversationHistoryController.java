@@ -15,6 +15,7 @@ import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
+import reactor.core.publisher.Mono;
 
 import java.util.List;
 
@@ -30,50 +31,68 @@ public class AssistantConversationHistoryController {
 
     //查询会话列表，默认只查询活跃会话。
     @GetMapping
-    public ApiResponse<List<AssistantConversationSummary>> list(
+    public Mono<ApiResponse<List<AssistantConversationSummary>>> list(
             @RequestParam(name = "status", defaultValue = "active") String status,
             HttpServletRequest request) {
         AuthCurrentUserVO user = requireSchoolUser(request);
-        return ApiResponse.success(agentRuntimeClient.listConversations(
-                agentRuntimeClient.ownerIdFor(user), "SCHOOL", user.getSchoolId(), normalizeStatus(status)));
+        return agentRuntimeClient.listConversations(
+                        agentRuntimeClient.ownerIdFor(user),
+                        "SCHOOL",
+                        user.getSchoolId(),
+                        normalizeStatus(status))
+                .map(ApiResponse::success);
     }
 
     //查询某个会话的完整详情，包括历史提问和 AI 回答。
     @GetMapping("/{threadId}")
-    public ApiResponse<AssistantConversationDetail> detail(
+    public Mono<ApiResponse<AssistantConversationDetail>> detail(
             @PathVariable String threadId, HttpServletRequest request) {
         AuthCurrentUserVO user = requireSchoolUser(request);
-        return ApiResponse.success(agentRuntimeClient.getConversation(
-                threadId, agentRuntimeClient.ownerIdFor(user), "SCHOOL", user.getSchoolId()));
+        return agentRuntimeClient.getConversation(
+                        threadId,
+                        agentRuntimeClient.ownerIdFor(user),
+                        "SCHOOL",
+                        user.getSchoolId())
+                .map(ApiResponse::success);
     }
 
     //按客户端回合 ID 找回某次对话的执行结果，用于网络中断、页面刷新或前端没有及时收到最终结果时恢复内容。
     @GetMapping("/recovery/{clientTurnId}")
-    public ApiResponse<AssistantConversationTurnRecovery> recover(
+    public Mono<ApiResponse<AssistantConversationTurnRecovery>> recover(
             @PathVariable String clientTurnId, HttpServletRequest request) {
         AuthCurrentUserVO user = requireSchoolUser(request);
-        return ApiResponse.success(agentRuntimeClient.recoverConversationTurn(
-                clientTurnId, agentRuntimeClient.ownerIdFor(user), "SCHOOL", user.getSchoolId()));
+        return agentRuntimeClient.recoverConversationTurn(
+                        clientTurnId,
+                        agentRuntimeClient.ownerIdFor(user),
+                        "SCHOOL",
+                        user.getSchoolId())
+                .map(ApiResponse::success);
     }
 
     //归档会话，不是物理删除。归档后默认列表不再显示，但消息记录仍保留。
     @DeleteMapping("/{threadId}")
-    public ApiResponse<Void> archive(
+    public Mono<ApiResponse<Void>> archive(
             @PathVariable String threadId, HttpServletRequest request) {
         AuthCurrentUserVO user = requireSchoolUser(request);
-        agentRuntimeClient.archiveConversation(
-                threadId, agentRuntimeClient.ownerIdFor(user), "SCHOOL", user.getSchoolId());
-        return ApiResponse.success(null);
+        return agentRuntimeClient.archiveConversation(
+                        threadId,
+                        agentRuntimeClient.ownerIdFor(user),
+                        "SCHOOL",
+                        user.getSchoolId())
+                .thenReturn(ApiResponse.<Void>success(null));
     }
 
     //将归档会话恢复为活跃状态，使其重新出现在默认会话列表中。
     @PostMapping("/{threadId}/restore")
-    public ApiResponse<Void> restore(
+    public Mono<ApiResponse<Void>> restore(
             @PathVariable String threadId, HttpServletRequest request) {
         AuthCurrentUserVO user = requireSchoolUser(request);
-        agentRuntimeClient.restoreConversation(
-                threadId, agentRuntimeClient.ownerIdFor(user), "SCHOOL", user.getSchoolId());
-        return ApiResponse.success(null);
+        return agentRuntimeClient.restoreConversation(
+                        threadId,
+                        agentRuntimeClient.ownerIdFor(user),
+                        "SCHOOL",
+                        user.getSchoolId())
+                .thenReturn(ApiResponse.<Void>success(null));
     }
 
     //规范和校验对话状态

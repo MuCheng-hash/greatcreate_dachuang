@@ -5,7 +5,7 @@ import type {
 } from "@/types/agent";
 
 const DEFAULT_TIMEOUT_MS = 15_000;
-const DEFAULT_STREAM_TIMEOUT_MS = 90_000;
+const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 90_000;
 const GET_RETRY_LIMIT = 2;
 let refreshPromise: Promise<boolean> | null = null;
 
@@ -31,6 +31,9 @@ export interface ApiRequestOptions extends RequestInit {
 
 export interface StreamRequestOptions {
   signal?: AbortSignal;
+  connectTimeoutMs?: number;
+  idleTimeoutMs?: number;
+  /** @deprecated 使用 idleTimeoutMs；保留该字段兼容旧调用方。 */
   timeoutMs?: number;
   onEvent?: (eventName: AgentSseEventName, data: AgentSseEventData) => void;
 }
@@ -120,6 +123,52 @@ function withTimeout(signal: AbortSignal | null | undefined, timeoutMs: number):
     signal: controller.signal,
     dispose: () => {
       globalThis.clearTimeout(timeoutId);
+      signal?.removeEventListener("abort", abort);
+    },
+  };
+}
+
+function withStreamTimeout(
+  signal: AbortSignal | null | undefined,
+  connectTimeoutMs: number,
+  idleTimeoutMs: number,
+): {
+  signal: AbortSignal;
+  connected: () => void;
+  touch: () => void;
+  timedOut: () => boolean;
+  dispose: () => void;
+} {
+  const controller = new AbortController();
+  let timeoutId: ReturnType<typeof globalThis.setTimeout> | null = null;
+  let timeoutTriggered = false;
+  let connected = false;
+  const abort = () => controller.abort();
+  const arm = (delay: number): void => {
+    if (timeoutId !== null) globalThis.clearTimeout(timeoutId);
+    timeoutId = globalThis.setTimeout(() => {
+      timeoutTriggered = true;
+      controller.abort();
+    }, Math.max(1, delay));
+  };
+  if (signal) {
+    if (signal.aborted) controller.abort();
+    else signal.addEventListener("abort", abort, { once: true });
+  }
+  arm(connectTimeoutMs);
+  return {
+    signal: controller.signal,
+    connected: () => {
+      connected = true;
+      arm(idleTimeoutMs);
+    },
+    touch: () => {
+      if (connected) arm(idleTimeoutMs);
+    },
+    timedOut: () => timeoutTriggered,
+    dispose: () => {
+      if (timeoutId !== null) globalThis.clearTimeout(timeoutId);
+      timeoutId = null;
       signal?.removeEventListener("abort", abort);
     },
   };
@@ -237,7 +286,11 @@ export async function streamRequest(
       { body: JSON.stringify(body), headers: { Accept: "text/event-stream", "Content-Type": "application/json" } },
       "POST",
     );
-    const timeout = withTimeout(options.signal, options.timeoutMs || DEFAULT_STREAM_TIMEOUT_MS);
+    const timeout = withStreamTimeout(
+      options.signal,
+      options.connectTimeoutMs || DEFAULT_TIMEOUT_MS,
+      options.idleTimeoutMs || options.timeoutMs || DEFAULT_STREAM_IDLE_TIMEOUT_MS,
+    );
     let response: Response;
     try {
       response = await fetch(path, {
@@ -276,6 +329,7 @@ export async function streamRequest(
       throw new ApiError("服务没有返回流式响应", response.status);
     }
 
+    timeout.connected();
     const reader = response.body.getReader();
     const decoder = new TextDecoder("utf-8");
     let buffer = "";
@@ -302,6 +356,7 @@ export async function streamRequest(
     try {
       while (true) {
         const { value, done } = await reader.read();
+        if (value?.byteLength) timeout.touch();
         buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
         const frames = buffer.split(/\r?\n\r?\n/);
         buffer = frames.pop() || "";
@@ -310,8 +365,21 @@ export async function streamRequest(
       }
       if (buffer.trim()) dispatch(buffer);
       return lastEvent;
+    } catch (error) {
+      if (options.signal?.aborted) throw error;
+      if (timeout.timedOut()) {
+        throw new ApiError(`流式响应空闲超时：${errorMessage(error)}`, 0);
+      }
+      throw error instanceof ApiError
+        ? error
+        : new ApiError(`流式响应读取失败：${errorMessage(error)}`, 0);
     } finally {
       timeout.dispose();
+      try {
+        await reader.cancel();
+      } catch {
+        // 连接可能已由 AbortSignal 或服务端关闭。
+      }
       reader.releaseLock();
     }
   }

@@ -5,19 +5,24 @@ import com.redculture.platform.vo.AuthCurrentUserVO;
 import com.redculture.platform.vo.ai.AssistantConversationTurnCancellation;
 import com.redculture.platform.vo.ai.AgentActionVO;
 import com.redculture.platform.vo.request.AgentQaRequest;
-import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
+import org.springframework.http.codec.ServerSentEvent;
+import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
+
+import java.util.Map;
 
 public interface AgentQaService {
 
-    AgentQaResponse ask(AgentQaRequest request, AuthCurrentUserVO currentUser);
+    Mono<AgentQaResponse> ask(AgentQaRequest request, AuthCurrentUserVO currentUser);
 
-    SseEmitter stream(AgentQaRequest request, AuthCurrentUserVO currentUser);
+    Flux<ServerSentEvent<Map<String, Object>>> stream(
+            AgentQaRequest request, AuthCurrentUserVO currentUser);
 
-    AssistantConversationTurnCancellation cancelTurn(
+    Mono<AssistantConversationTurnCancellation> cancelTurn(
             String clientTurnId, AuthCurrentUserVO currentUser);
 
-    AgentActionVO getAction(String actionId, AuthCurrentUserVO currentUser);
+    Mono<AgentActionVO> getAction(String actionId, AuthCurrentUserVO currentUser);
 
-    AgentActionVO decideAction(
+    Mono<AgentActionVO> decideAction(
             String actionId, String decision, AuthCurrentUserVO currentUser);
 }

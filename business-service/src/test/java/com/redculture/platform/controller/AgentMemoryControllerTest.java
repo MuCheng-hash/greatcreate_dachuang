@@ -69,25 +69,31 @@ class AgentMemoryControllerTest {
             AgentMemoryController controller = new AgentMemoryController(client);
             MockHttpServletRequest servletRequest = schoolRequest();
 
-            controller.settings(servletRequest);
-            controller.updateSettings(new AgentMemorySettingUpdateRequest(true), servletRequest);
-            controller.list("active", "PROFILE", servletRequest);
+            controller.settings(servletRequest).block();
+            controller.updateSettings(
+                    new AgentMemorySettingUpdateRequest(true), servletRequest
+            ).block();
+            controller.list("active", "PROFILE", servletRequest).block();
 
             AgentMemoryCreateRequest createRequest = objectMapper.readValue(
                     "{\"ownerId\":\"account:attacker\",\"scopeId\":999,"
                             + "\"memoryType\":\"PROFILE\",\"fieldKey\":\"grade\","
                             + "\"content\":\"常教四年级\"}",
                     AgentMemoryCreateRequest.class);
-            controller.create(createRequest, servletRequest);
+            controller.create(createRequest, servletRequest).block();
             controller.update(
                     "memory-1",
                     new AgentMemoryUpdateRequest("PROFILE", "grade", "常教五年级"),
-                    servletRequest);
-            controller.confirmationPreview("memory-1", servletRequest);
-            controller.confirm("memory-1", new AgentMemoryResolutionRequest(true), servletRequest);
-            controller.delete("memory-1", servletRequest);
-            controller.restore("memory-1", new AgentMemoryResolutionRequest(true), servletRequest);
-            controller.permanentDelete("memory-1", servletRequest);
+                    servletRequest).block();
+            controller.confirmationPreview("memory-1", servletRequest).block();
+            controller.confirm(
+                    "memory-1", new AgentMemoryResolutionRequest(true), servletRequest
+            ).block();
+            controller.delete("memory-1", servletRequest).block();
+            controller.restore(
+                    "memory-1", new AgentMemoryResolutionRequest(true), servletRequest
+            ).block();
+            controller.permanentDelete("memory-1", servletRequest).block();
 
             assertEquals(10, requests.size());
             assertTrue(requests.stream()
@@ -158,7 +164,9 @@ class AgentMemoryControllerTest {
 
             AgentMemoryConflictException conflict = assertThrows(
                     AgentMemoryConflictException.class,
-                    () -> client.confirmMemory("candidate-1", "account:1", "SCHOOL", 7L, false));
+                    () -> client.confirmMemory(
+                            "candidate-1", "account:1", "SCHOOL", 7L, false
+                    ).block());
 
             assertEquals("candidate-1", conflict.getPreview().getCandidate().getId());
             assertEquals(1, bodies.size());

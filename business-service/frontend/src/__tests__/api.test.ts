@@ -19,6 +19,7 @@ describe("typed api client", () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     vi.unstubAllGlobals();
   });
 
@@ -121,5 +122,122 @@ describe("typed api client", () => {
     ));
 
     await expect(api.stream("/api/ai/qa/stream", {})).rejects.toBeInstanceOf(ApiError);
+  });
+
+  it("aborts an SSE request that cannot establish a connection in time", async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockImplementation((_path, init) => new Promise((_resolve, reject) => {
+      init?.signal?.addEventListener("abort", () => {
+        reject(new DOMException("aborted", "AbortError"));
+      }, { once: true });
+    }));
+
+    const request = api.stream("/api/ai/qa/stream", {}, { connectTimeoutMs: 50 });
+    const assertion = expect(request).rejects.toBeInstanceOf(ApiError);
+    await vi.advanceTimersByTimeAsync(50);
+
+    await assertion;
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("resets the SSE idle timeout whenever response data arrives", async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.mocked(fetch);
+    const streamController: {
+      current?: ReadableStreamDefaultController<Uint8Array>;
+    } = {};
+    fetchMock.mockImplementation(async (_path, init) => {
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          streamController.current = controller;
+          init?.signal?.addEventListener("abort", () => {
+            controller.error(new DOMException("aborted", "AbortError"));
+          }, { once: true });
+        },
+      });
+      return new Response(body, {
+        status: 200,
+        headers: { "Content-Type": "text/event-stream" },
+      });
+    });
+
+    let settled = false;
+    const request = api.stream("/api/ai/qa/stream", {}, {
+      connectTimeoutMs: 50,
+      idleTimeoutMs: 100,
+    });
+    void request.then(() => { settled = true; }, () => { settled = true; });
+    await vi.advanceTimersByTimeAsync(0);
+
+    streamController.current?.enqueue(new TextEncoder().encode(
+      "event: token\ndata: {\"delta\":\"第一段\"}\n\n",
+    ));
+    await vi.advanceTimersByTimeAsync(80);
+    streamController.current?.enqueue(new TextEncoder().encode(
+      "event: token\ndata: {\"delta\":\"第二段\"}\n\n",
+    ));
+    await vi.advanceTimersByTimeAsync(80);
+    expect(settled).toBe(false);
+
+    const assertion = expect(request).rejects.toBeInstanceOf(ApiError);
+    await vi.advanceTimersByTimeAsync(21);
+    await assertion;
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("releases SSE timers when the user aborts the stream", async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockImplementation(async (_path, init) => {
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          init?.signal?.addEventListener("abort", () => {
+            controller.error(new DOMException("aborted", "AbortError"));
+          }, { once: true });
+        },
+      });
+      return new Response(body, {
+        status: 200,
+        headers: { "Content-Type": "text/event-stream" },
+      });
+    });
+    const controller = new AbortController();
+    const removeListener = vi.spyOn(controller.signal, "removeEventListener");
+    const request = api.stream("/api/ai/qa/stream", {}, {
+      signal: controller.signal,
+      idleTimeoutMs: 100,
+    });
+    const assertion = expect(request).rejects.toMatchObject({ name: "AbortError" });
+    await vi.advanceTimersByTimeAsync(0);
+
+    controller.abort();
+    await assertion;
+
+    expect(removeListener).toHaveBeenCalledWith("abort", expect.any(Function));
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("cleans the first SSE attempt before retrying after a 401", async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.mocked(fetch);
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse({ code: 401, message: "expired" }, 401))
+      .mockResolvedValueOnce(jsonResponse({ code: 200, data: { refreshed: true } }))
+      .mockResolvedValueOnce(new Response(
+        "event: done\ndata: {\"runId\":\"run-1\"}\n\n",
+        { status: 200, headers: { "Content-Type": "text/event-stream" } },
+      ));
+
+    await expect(api.stream("/api/ai/qa/stream", {})).resolves.toMatchObject({
+      event: "done",
+    });
+
+    expect(fetchMock.mock.calls.map(([path]) => path)).toEqual([
+      "/api/ai/qa/stream",
+      "/api/auth/refresh",
+      "/api/ai/qa/stream",
+    ]);
+    expect(vi.getTimerCount()).toBe(0);
   });
 });

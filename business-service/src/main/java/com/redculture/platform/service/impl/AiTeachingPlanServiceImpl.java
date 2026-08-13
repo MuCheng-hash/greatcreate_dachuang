@@ -1,8 +1,6 @@
 package com.redculture.platform.service.impl;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.ObjectWriter;
-import com.fasterxml.jackson.core.json.JsonWriteFeature;
 import com.redculture.platform.config.AppMapProperties;
 import com.redculture.platform.enums.ActivityType;
 import com.redculture.platform.service.AiTeachingPlanService;
@@ -10,6 +8,8 @@ import com.redculture.platform.service.KnowledgeRetriever;
 import com.redculture.platform.service.SchoolMapService;
 import com.redculture.platform.service.TeachingActivityPlanService;
 import com.redculture.platform.service.agent.AgentRuntimeClient;
+import com.redculture.platform.service.agent.AgentBusyException;
+import com.redculture.platform.service.agent.AgentUpstreamException;
 import com.redculture.platform.vo.GeneratedTeachingPlanCitationVO;
 import com.redculture.platform.vo.GeneratedTeachingPlanResponse;
 import com.redculture.platform.vo.SchoolMapDetailVO;
@@ -32,9 +32,15 @@ import com.redculture.platform.vo.request.TeachingPlanGenerateRequest;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.http.codec.ServerSentEvent;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
-import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
+import reactor.core.Exceptions;
+import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
+import reactor.core.scheduler.Scheduler;
+import reactor.core.scheduler.Schedulers;
 
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
@@ -44,6 +50,9 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.Callable;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -74,7 +83,7 @@ public class AiTeachingPlanServiceImpl implements AiTeachingPlanService {
     private final AppMapProperties appMapProperties;
     private final AgentRuntimeClient agentRuntimeClient;
     private final ObjectMapper objectMapper;
-    private final ObjectWriter sseObjectWriter;
+    private final Scheduler agentBlockingScheduler;
 
     @Autowired
     public AiTeachingPlanServiceImpl(SchoolMapService schoolMapService,
@@ -82,14 +91,32 @@ public class AiTeachingPlanServiceImpl implements AiTeachingPlanService {
                                      KnowledgeRetriever knowledgeRetriever,
                                      AppMapProperties appMapProperties,
                                      AgentRuntimeClient agentRuntimeClient,
-                                     ObjectMapper objectMapper) {
+                                     ObjectMapper objectMapper,
+                                     @Qualifier("agentBlockingScheduler") Scheduler agentBlockingScheduler) {
         this.schoolMapService = schoolMapService;
         this.teachingActivityPlanService = teachingActivityPlanService;
         this.knowledgeRetriever = knowledgeRetriever;
         this.appMapProperties = appMapProperties;
         this.agentRuntimeClient = agentRuntimeClient;
         this.objectMapper = objectMapper;
-        this.sseObjectWriter = objectMapper.writer().with(JsonWriteFeature.ESCAPE_NON_ASCII);
+        this.agentBlockingScheduler = agentBlockingScheduler;
+    }
+
+    public AiTeachingPlanServiceImpl(SchoolMapService schoolMapService,
+                                     TeachingActivityPlanService teachingActivityPlanService,
+                                     KnowledgeRetriever knowledgeRetriever,
+                                     AppMapProperties appMapProperties,
+                                     AgentRuntimeClient agentRuntimeClient,
+                                     ObjectMapper objectMapper) {
+        this(
+                schoolMapService,
+                teachingActivityPlanService,
+                knowledgeRetriever,
+                appMapProperties,
+                agentRuntimeClient,
+                objectMapper,
+                Schedulers.immediate()
+        );
     }
 
     public AiTeachingPlanServiceImpl(SchoolMapService schoolMapService,
@@ -98,38 +125,52 @@ public class AiTeachingPlanServiceImpl implements AiTeachingPlanService {
                                      AppMapProperties appMapProperties,
                                      ObjectMapper objectMapper) {
         this(schoolMapService, teachingActivityPlanService, knowledgeRetriever,
-                appMapProperties, null, objectMapper);
+                appMapProperties, null, objectMapper, Schedulers.immediate());
     }
 
     @Override
-    public GeneratedTeachingPlanResponse generatePlan(TeachingPlanGenerateRequest request) {
+    public Mono<GeneratedTeachingPlanResponse> generatePlan(TeachingPlanGenerateRequest request) {
         return generatePlan(request, null, null);
     }
 
     @Override
-    public GeneratedTeachingPlanResponse generatePlan(TeachingPlanGenerateRequest request,
-                                                        Long accountId,
-                                                        String sessionId) {
-        validateGenerateRequest(request);
-        TeachingPlanContextVO context = buildContext(request, accountId, sessionId);
-        GeneratedTeachingPlanResponse llmResponse = callLlmService(context);
-        return finalizeResponse(llmResponse, context);
+    public Mono<GeneratedTeachingPlanResponse> generatePlan(
+            TeachingPlanGenerateRequest request,
+            Long accountId,
+            String sessionId) {
+        return Mono.defer(() -> {
+            validateGenerateRequest(request);
+            return onBlockingScheduler(() -> buildContext(request, accountId, sessionId))
+                    .flatMap(context -> callLlmService(context)
+                            .map(response -> finalizeResponse(response, context))
+                            .switchIfEmpty(onBlockingScheduler(
+                                    () -> finalizeResponse(null, context)
+                            )));
+        });
     }
 
     @Override
-    public SseEmitter generatePlanStream(TeachingPlanGenerateRequest request) {
+    public Flux<ServerSentEvent<Map<String, Object>>> generatePlanStream(
+            TeachingPlanGenerateRequest request) {
         return generatePlanStream(request, null, null);
     }
 
     @Override
-    public SseEmitter generatePlanStream(TeachingPlanGenerateRequest request,
-                                         Long accountId,
-                                         String sessionId) {
-        validateGenerateRequest(request);
-        SseEmitter emitter = new SseEmitter(120_000L);
-        Thread.ofVirtual().name("teaching-plan-stream")
-                .start(() -> streamPlan(request, accountId, sessionId, emitter));
-        return emitter;
+    public Flux<ServerSentEvent<Map<String, Object>>> generatePlanStream(
+            TeachingPlanGenerateRequest request,
+            Long accountId,
+            String sessionId) {
+        return Flux.defer(() -> {
+            validateGenerateRequest(request);
+            return Flux.concat(
+                    Flux.just(sse("stage", Map.of(
+                            "stage", "retrieval",
+                            "message", "正在检索教学依据"
+                    ))),
+                    onBlockingScheduler(() -> buildContext(request, accountId, sessionId))
+                            .flatMapMany(this::streamPlan)
+            );
+        }).onErrorResume(this::streamFailure);
     }
 
     private GeneratedTeachingPlanResponse finalizeResponse(GeneratedTeachingPlanResponse llmResponse,
@@ -267,93 +308,103 @@ public class AiTeachingPlanServiceImpl implements AiTeachingPlanService {
                 .toList());
     }
 
-    private void streamPlan(TeachingPlanGenerateRequest request,
-                            Long accountId,
-                            String sessionId,
-                            SseEmitter emitter) {
-        TeachingPlanContextVO context = null;
-        boolean resultSent = false;
-        try {
-            sendEvent(emitter, "stage", Map.of("stage", "retrieval", "message", "正在检索教学依据"));
-            context = buildContext(request, accountId, sessionId);
-            TeachingPlanContextVO taskContext = context;
-            sendEvent(emitter, "stage", Map.of("stage", "generation", "message", "正在生成教学方案"));
+    private Flux<ServerSentEvent<Map<String, Object>>> streamPlan(
+            TeachingPlanContextVO context) {
+        Flux<ServerSentEvent<Map<String, Object>>> generationStarted = Flux.just(sse(
+                "stage",
+                Map.of("stage", "generation", "message", "正在生成教学方案")
+        ));
+        if (agentRuntimeClient == null
+                || !StringUtils.hasText(appMapProperties.getLlmServiceBaseUrl())) {
+            return Flux.concat(
+                    generationStarted,
+                    Flux.just(
+                            finalEvent(finalizeResponse(null, context)),
+                            sse("done", Map.of("status", "completed"))
+                    )
+            );
+        }
 
-            if (agentRuntimeClient == null || !StringUtils.hasText(appMapProperties.getLlmServiceBaseUrl())) {
-                sendFinalEvent(emitter, finalizeResponse(null, context));
-                resultSent = true;
-            } else {
-                final boolean[] finalEventSent = {false};
-                agentRuntimeClient.stream(buildAgentTaskRequest(taskContext), event -> {
-                    try {
-                        if (forwardAgentEvent(emitter, event, taskContext)) {
-                            finalEventSent[0] = true;
-                        }
-                    } catch (Exception exception) {
-                        throw new IllegalStateException("teaching-plan SSE event forwarding failed", exception);
+        AtomicBoolean finalEventSent = new AtomicBoolean(false);
+        Flux<ServerSentEvent<Map<String, Object>>> forwarded = agentRuntimeClient
+                .stream(buildAgentTaskRequest(context))
+                .concatMap(event -> forwardAgentEvent(event, context))
+                .doOnNext(event -> {
+                    if ("final".equals(event.event())) {
+                        finalEventSent.set(true);
                     }
                 });
-                resultSent = finalEventSent[0];
+        return Flux.concat(
+                generationStarted,
+                forwarded,
+                Flux.defer(() -> finalEventSent.get()
+                        ? Flux.empty()
+                        : onBlockingScheduler(() -> finalizeResponse(null, context))
+                                .map(this::finalEvent)
+                                .flux()),
+                Flux.just(sse("done", Map.of("status", "completed")))
+        ).onErrorResume(error -> {
+            log.warn("Teaching-plan stream failed: {}", error.getMessage(), error);
+            if (!finalEventSent.get()) {
+                return onBlockingScheduler(() -> finalizeResponse(null, context))
+                        .flatMapMany(response -> Flux.just(
+                                finalEvent(response),
+                                sse("done", Map.of("status", "degraded"))
+                        ));
             }
-            if (!resultSent) {
-                sendFinalEvent(emitter, finalizeResponse(null, context));
-            }
-            sendEvent(emitter, "done", Map.of("status", "completed"));
-            emitter.complete();
-        } catch (Exception exception) {
-            log.warn("Teaching-plan stream failed: {}", exception.getMessage(), exception);
-            try {
-                if (!resultSent && context != null) {
-                    sendFinalEvent(emitter, finalizeResponse(null, context));
-                    sendEvent(emitter, "done", Map.of("status", "degraded"));
-                    emitter.complete();
-                } else {
-                    sendEvent(emitter, "error", Map.of("message", "教学方案流式生成失败"));
-                    emitter.completeWithError(exception);
-                }
-            } catch (Exception sendException) {
-                emitter.completeWithError(sendException);
-            }
-        }
+            return Flux.just(
+                    sse("error", Map.of(
+                            "code", "teaching_plan_stream_interrupted",
+                            "message", "教学方案流式生成失败",
+                            "retryable", true
+                    )),
+                    sse("done", Map.of("status", "interrupted"))
+            );
+        });
     }
 
-    private boolean forwardAgentEvent(SseEmitter emitter,
-                                      AgentRuntimeClient.StreamEvent event,
-                                      TeachingPlanContextVO context) throws Exception {
+    private Flux<ServerSentEvent<Map<String, Object>>> forwardAgentEvent(
+            AgentRuntimeClient.StreamEvent event,
+            TeachingPlanContextVO context) {
         String eventName = event.event();
         Map<String, Object> payload = event.safeData();
         if ("final".equals(eventName)) {
             Object rawResponse = payload.get("response");
             if (!(rawResponse instanceof Map<?, ?> responseMap)) {
-                return false;
+                return Flux.empty();
             }
             Object rawPlan = responseMap.get("teachingPlan");
             if (!(rawPlan instanceof Map<?, ?>)) {
-                return false;
+                return Flux.empty();
             }
             GeneratedTeachingPlanResponse response = objectMapper.convertValue(
                     normalizeRawTeachingPlan(rawPlan), GeneratedTeachingPlanResponse.class
             );
             response.setThreadId(textValue(payload.get("threadId"), textValue(responseMap.get("threadId"), "")));
             applyMemoryMetadata(response, responseMap);
-            sendFinalEvent(emitter, finalizeResponse(response, context));
-            return true;
+            return Flux.just(finalEvent(finalizeResponse(response, context)));
         }
         if ("run.started".equals(eventName) || "model.started".equals(eventName)) {
-            sendEvent(emitter, "stage", Map.of("stage", "generation", "message", "正在生成教学方案"));
+            return Flux.just(sse("stage", Map.of(
+                    "stage", "generation", "message", "正在生成教学方案"
+            )));
         } else if ("model.failed".equals(eventName)) {
-            sendEvent(emitter, "stage", Map.of("stage", "generation", "message", "正在切换备用生成方式"));
+            return Flux.just(sse("stage", Map.of(
+                    "stage", "generation", "message", "正在切换备用生成方式"
+            )));
         } else if ("plan.patch".equals(eventName)) {
             Map<String, Object> patch = safeTeachingPlanPatch(payload.get("patch"));
             if (!patch.isEmpty()) {
-                sendEvent(emitter, "plan.patch", Map.of("patch", patch));
+                return Flux.just(sse("plan.patch", Map.of("patch", patch)));
             }
         } else if ("token".equals(eventName)) {
             // 兼容旧版事件但不再透传原始分片，教学方案只使用结构化 patch。
         } else if ("error".equals(eventName)) {
-            sendEvent(emitter, "stage", Map.of("stage", "generation", "message", "正在整理基础教学方案"));
+            return Flux.just(sse("stage", Map.of(
+                    "stage", "generation", "message", "正在整理基础教学方案"
+            )));
         }
-        return false;
+        return Flux.empty();
     }
 
     private Map<String, Object> safeTeachingPlanPatch(Object rawPatch) {
@@ -414,7 +465,8 @@ public class AiTeachingPlanServiceImpl implements AiTeachingPlanService {
         return citations;
     }
 
-    private void sendFinalEvent(SseEmitter emitter, GeneratedTeachingPlanResponse response) throws Exception {
+    private ServerSentEvent<Map<String, Object>> finalEvent(
+            GeneratedTeachingPlanResponse response) {
         String generationStatus = canonicalGenerationStatus(response.getGenerationStatus(), false);
         response.setGenerationStatus(generationStatus);
         Map<String, Object> agentResponse = new LinkedHashMap<>();
@@ -432,24 +484,27 @@ public class AiTeachingPlanServiceImpl implements AiTeachingPlanService {
         if (response.getMemoryCandidates() != null && !response.getMemoryCandidates().isEmpty()) {
             agentResponse.put("memoryCandidates", response.getMemoryCandidates());
         }
-        sendEvent(emitter, "final", Map.of(
+        return sse("final", Map.of(
                 "threadId", response.getThreadId() == null ? "" : response.getThreadId(),
                 "response", agentResponse
         ));
     }
 
-    private void sendEvent(SseEmitter emitter, String eventName, Object data) throws Exception {
-        emitter.send(SseEmitter.event()
-                .name(eventName)
-                .data(sseObjectWriter.writeValueAsString(data)));
+    private ServerSentEvent<Map<String, Object>> sse(
+            String eventName, Map<String, Object> data) {
+        return ServerSentEvent.<Map<String, Object>>builder()
+                .event(eventName)
+                .data(data)
+                .build();
     }
 
-    private GeneratedTeachingPlanResponse callLlmService(TeachingPlanContextVO context) {
+    private Mono<GeneratedTeachingPlanResponse> callLlmService(
+            TeachingPlanContextVO context) {
         if (agentRuntimeClient == null || !StringUtils.hasText(appMapProperties.getLlmServiceBaseUrl())) {
-            return null;
+            return Mono.empty();
         }
-        try {
-            var response = agentRuntimeClient.send(buildAgentTaskRequest(context));
+        return agentRuntimeClient.send(buildAgentTaskRequest(context))
+                .flatMap(response -> {
             GeneratedTeachingPlanResponse plan = response.getTeachingPlan();
             if (plan != null) {
                 plan.setThreadId(response.getThreadId());
@@ -459,11 +514,42 @@ public class AiTeachingPlanServiceImpl implements AiTeachingPlanService {
                     plan.setMemoryCandidates(response.getMemoryCandidates());
                 }
             }
-            return plan;
-        } catch (Exception exception) {
-            log.warn("Stateful Agent teaching-plan request failed: {}", exception.getMessage(), exception);
-            return null;
-        }
+            return plan == null ? Mono.empty() : Mono.just(plan);
+        }).onErrorResume(error -> {
+            log.warn("Stateful Agent teaching-plan request failed: {}", error.getMessage(), error);
+            return Mono.empty();
+        });
+    }
+
+    private Flux<ServerSentEvent<Map<String, Object>>> streamFailure(Throwable error) {
+        Throwable unwrapped = Exceptions.unwrap(error);
+        String code = unwrapped instanceof AgentBusyException
+                ? "agent_busy"
+                : unwrapped instanceof AgentUpstreamException upstream
+                ? upstream.getCode()
+                : unwrapped instanceof IllegalArgumentException
+                ? "request_invalid"
+                : "teaching_plan_stream_interrupted";
+        boolean retryable = !(unwrapped instanceof IllegalArgumentException);
+        String message = unwrapped instanceof IllegalArgumentException
+                && unwrapped.getMessage() != null
+                ? unwrapped.getMessage()
+                : "教学方案流式生成失败";
+        return Flux.just(
+                sse("error", Map.of(
+                        "code", code,
+                        "message", message,
+                        "retryable", retryable
+                )),
+                sse("done", Map.of("status", "failed"))
+        );
+    }
+
+    private <T> Mono<T> onBlockingScheduler(Callable<T> callable) {
+        return Mono.fromCallable(callable)
+                .subscribeOn(agentBlockingScheduler)
+                .onErrorMap(error -> Exceptions.unwrap(error) instanceof RejectedExecutionException,
+                        AgentBusyException::new);
     }
 
     private StatefulAgentRequest buildAgentTaskRequest(TeachingPlanContextVO context) {

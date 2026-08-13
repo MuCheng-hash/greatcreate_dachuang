@@ -4,6 +4,7 @@ import com.redculture.platform.vo.AuthCurrentUserVO;
 import org.junit.jupiter.api.Test;
 import org.springframework.mock.web.MockHttpServletRequest;
 import org.springframework.mock.web.MockHttpServletResponse;
+import jakarta.servlet.DispatcherType;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -34,6 +35,23 @@ class RequestRateLimitInterceptorTest {
         assertTrue(call(interceptor, "/api/ai/qa/stream", "127.0.0.1", 1L).allowed());
         assertFalse(call(interceptor, "/api/ai/qa/stream", "10.0.0.2", 1L).allowed());
         assertTrue(call(interceptor, "/api/ai/qa/stream", "127.0.0.1", 2L).allowed());
+    }
+
+    @Test
+    void ignoresSpringMvcAsyncRedispatchForReactiveStreams() throws Exception {
+        RateLimitProperties properties = new RateLimitProperties();
+        properties.setAiRequestsPerMinute(1);
+        RequestRateLimitInterceptor interceptor = new RequestRateLimitInterceptor(properties);
+
+        assertTrue(call(interceptor, "/api/ai/qa/stream", "127.0.0.1", 1L).allowed());
+        MockHttpServletRequest asyncRequest = new MockHttpServletRequest(
+                "POST", "/api/ai/qa/stream"
+        );
+        asyncRequest.setDispatcherType(DispatcherType.ASYNC);
+        MockHttpServletResponse asyncResponse = new MockHttpServletResponse();
+
+        assertTrue(interceptor.preHandle(asyncRequest, asyncResponse, new Object()));
+        assertEquals(200, asyncResponse.getStatus());
     }
 
     private Result call(RequestRateLimitInterceptor interceptor, String path, String address, Long accountId)

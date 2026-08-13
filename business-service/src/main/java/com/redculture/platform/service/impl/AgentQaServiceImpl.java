@@ -10,8 +10,10 @@ import com.redculture.platform.service.SchoolMapService;
 import com.redculture.platform.service.TownMapService;
 import com.redculture.platform.service.agent.AgentAnswerContext;
 import com.redculture.platform.service.agent.AgentAccessGuard;
+import com.redculture.platform.service.agent.AgentBusyException;
 import com.redculture.platform.service.agent.AgentRuntimeClient;
 import com.redculture.platform.service.agent.AgentRuntimeResult;
+import com.redculture.platform.service.agent.AgentUpstreamException;
 import com.redculture.platform.service.agent.AnswerGenerator;
 import com.redculture.platform.service.agent.CitationValidator;
 import com.redculture.platform.service.agent.GeneratedAnswer;
@@ -35,20 +37,27 @@ import com.redculture.platform.vo.ai.KnowledgeScopeType;
 import com.redculture.platform.vo.request.AgentQaRequest;
 import com.redculture.platform.vo.request.AgentAttachmentRequest;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.http.codec.ServerSentEvent;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
-import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
+import reactor.core.Exceptions;
+import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
+import reactor.core.scheduler.Scheduler;
+import reactor.core.scheduler.Schedulers;
 
-import java.io.IOException;
+import java.time.Duration;
 import java.util.ArrayList;
+import java.util.concurrent.Callable;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.UUID;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicReference;
-import java.util.concurrent.locks.LockSupport;
 import java.util.function.Consumer;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -70,6 +79,7 @@ public class AgentQaServiceImpl implements AgentQaService {
     private final AgentAccessGuard accessGuard;
     private final AgentRuntimeClient agentRuntimeClient;
     private final AgentProperties agentProperties;
+    private final Scheduler agentBlockingScheduler;
 
     @Autowired
     public AgentQaServiceImpl(SchoolMapService schoolMapService,
@@ -81,7 +91,8 @@ public class AgentQaServiceImpl implements AgentQaService {
                               CitationValidator citationValidator,
                               AgentAccessGuard accessGuard,
                               AgentRuntimeClient agentRuntimeClient,
-                              AgentProperties agentProperties) {
+                              AgentProperties agentProperties,
+                              @Qualifier("agentBlockingScheduler") Scheduler agentBlockingScheduler) {
         this.schoolMapService = schoolMapService;
         this.townMapService = townMapService;
         this.localEduResourceService = localEduResourceService;
@@ -92,6 +103,32 @@ public class AgentQaServiceImpl implements AgentQaService {
         this.accessGuard = accessGuard;
         this.agentRuntimeClient = agentRuntimeClient;
         this.agentProperties = agentProperties;
+        this.agentBlockingScheduler = agentBlockingScheduler;
+    }
+
+    public AgentQaServiceImpl(SchoolMapService schoolMapService,
+                              TownMapService townMapService,
+                              LocalEduResourceService localEduResourceService,
+                              KnowledgeRetriever knowledgeRetriever,
+                              IntentRecognizer intentRecognizer,
+                              AnswerGenerator answerGenerator,
+                              CitationValidator citationValidator,
+                              AgentAccessGuard accessGuard,
+                              AgentRuntimeClient agentRuntimeClient,
+                              AgentProperties agentProperties) {
+        this(
+                schoolMapService,
+                townMapService,
+                localEduResourceService,
+                knowledgeRetriever,
+                intentRecognizer,
+                answerGenerator,
+                citationValidator,
+                accessGuard,
+                agentRuntimeClient,
+                agentProperties,
+                Schedulers.immediate()
+        );
     }
 
     public AgentQaServiceImpl(SchoolMapService schoolMapService,
@@ -105,7 +142,7 @@ public class AgentQaServiceImpl implements AgentQaService {
                               AgentRuntimeClient agentRuntimeClient) {
         this(schoolMapService, townMapService, localEduResourceService, knowledgeRetriever,
                 intentRecognizer, answerGenerator, citationValidator, accessGuard,
-                agentRuntimeClient, new AgentProperties());
+                agentRuntimeClient, new AgentProperties(), Schedulers.immediate());
     }
 
     public AgentQaServiceImpl(SchoolMapService schoolMapService,
@@ -117,7 +154,8 @@ public class AgentQaServiceImpl implements AgentQaService {
                               CitationValidator citationValidator) {
         this(schoolMapService, townMapService, localEduResourceService, knowledgeRetriever,
                 intentRecognizer, answerGenerator, citationValidator,
-                new AgentAccessGuard(schoolMapService), null, new AgentProperties());
+                new AgentAccessGuard(schoolMapService), null, new AgentProperties(),
+                Schedulers.immediate());
     }
 
     /** Compatibility constructor for the stateful runtime path. */
@@ -131,11 +169,12 @@ public class AgentQaServiceImpl implements AgentQaService {
                                AgentRuntimeClient agentRuntimeClient) {
         this(schoolMapService, townMapService, localEduResourceService, knowledgeRetriever,
                 intentRecognizer, answerGenerator, citationValidator,
-                new AgentAccessGuard(schoolMapService), agentRuntimeClient, new AgentProperties());
+                new AgentAccessGuard(schoolMapService), agentRuntimeClient, new AgentProperties(),
+                Schedulers.immediate());
     }
 
     @Override
-    public AgentQaResponse ask(AgentQaRequest request, AuthCurrentUserVO currentUser) {
+    public Mono<AgentQaResponse> ask(AgentQaRequest request, AuthCurrentUserVO currentUser) {
         validateRequest(request);
         if (currentUser == null) {
             throw new IllegalArgumentException("school account is required");
@@ -145,7 +184,7 @@ public class AgentQaServiceImpl implements AgentQaService {
     }
 
     @Override
-    public AssistantConversationTurnCancellation cancelTurn(
+    public Mono<AssistantConversationTurnCancellation> cancelTurn(
             String clientTurnId, AuthCurrentUserVO currentUser) {
         if (!StringUtils.hasText(clientTurnId)) {
             throw new IllegalArgumentException("clientTurnId is required");
@@ -165,7 +204,7 @@ public class AgentQaServiceImpl implements AgentQaService {
     }
 
     @Override
-    public com.redculture.platform.vo.ai.AgentActionVO getAction(
+    public Mono<com.redculture.platform.vo.ai.AgentActionVO> getAction(
             String actionId, AuthCurrentUserVO currentUser) {
         validateActionRequest(actionId, currentUser);
         return agentRuntimeClient.getAction(
@@ -177,7 +216,7 @@ public class AgentQaServiceImpl implements AgentQaService {
     }
 
     @Override
-    public com.redculture.platform.vo.ai.AgentActionVO decideAction(
+    public Mono<com.redculture.platform.vo.ai.AgentActionVO> decideAction(
             String actionId, String decision, AuthCurrentUserVO currentUser) {
         validateActionRequest(actionId, currentUser);
         if (!"approve".equals(decision) && !"reject".equals(decision)) {
@@ -205,15 +244,28 @@ public class AgentQaServiceImpl implements AgentQaService {
     }
 
     @Override
-    public SseEmitter stream(AgentQaRequest request, AuthCurrentUserVO currentUser) {
-        validateRequest(request);
-        if (currentUser == null) {
-            throw new IllegalArgumentException("school account is required");
-        }
-        SseEmitter emitter = new SseEmitter(Math.max(1000L, agentProperties.getStreamTimeoutMs()));
-        AgentAccessGuard.ScopeResolution scopeResolution = accessGuard.resolveScope(
-                request.getScopeType(), request.getScopeId(), currentUser, request.getQuestion().trim()
-        );
+    public Flux<ServerSentEvent<Map<String, Object>>> stream(
+            AgentQaRequest request, AuthCurrentUserVO currentUser) {
+        return Flux.defer(() -> {
+            validateRequest(request);
+            if (currentUser == null) {
+                return Flux.error(new IllegalArgumentException("school account is required"));
+            }
+            return onBlockingScheduler(() -> accessGuard.resolveScope(
+                    request.getScopeType(),
+                    request.getScopeId(),
+                    currentUser,
+                    request.getQuestion().trim()
+            )).flatMapMany(scopeResolution -> streamResolvedScope(
+                    request, currentUser, scopeResolution
+            ));
+        }).onErrorResume(error -> streamFailure(request, error));
+    }
+
+    private Flux<ServerSentEvent<Map<String, Object>>> streamResolvedScope(
+            AgentQaRequest request,
+            AuthCurrentUserVO currentUser,
+            AgentAccessGuard.ScopeResolution scopeResolution) {
         if (scopeResolution.clarificationRequired()) {
             AgentQaResponse clarification = clarificationResponse(
                     AgentIntent.UNKNOWN,
@@ -221,154 +273,135 @@ public class AgentQaServiceImpl implements AgentQaService {
                     scopeResolution.options()
             );
             clarification.setClientTurnId(request.getClientTurnId());
-            sendEvent(emitter, "final", Map.of("response", clarification));
-            sendEvent(emitter, "done", Collections.emptyMap());
-            emitter.complete();
-            return emitter;
+            return Flux.just(
+                    sse("final", Map.of("response", clarification)),
+                    sse("done", Collections.emptyMap())
+            );
         }
-
         if (agentRuntimeClient == null) {
-            startLocalFallbackStream(emitter, request, currentUser);
-            return emitter;
+            return localFallbackStream(request, currentUser);
         }
 
         String question = request.getQuestion().trim();
         AgentIntent intent = hasImageAttachments(request)
                 ? AgentIntent.RESOURCE_EXPLANATION : intentRecognizer.recognize(question);
         Scope scope = new Scope(scopeResolution.type(), scopeResolution.id());
-        AtomicBoolean finished = new AtomicBoolean(false);
-        AtomicReference<Thread> workerRef = new AtomicReference<>();
-        Runnable cancelWorker = () -> {
-            if (finished.get()) {
-                return;
-            }
-            Thread worker = workerRef.get();
-            if (worker != null && worker != Thread.currentThread()) {
-                worker.interrupt();
-            }
-        };
-        emitter.onCompletion(cancelWorker);
-        emitter.onTimeout(cancelWorker);
-        emitter.onError(ignored -> cancelWorker.run());
-
-        Thread thread = new Thread(() -> {
-            boolean[] upstreamDone = {false};
-            boolean[] upstreamFinal = {false};
-            try {
-                sendEvent(emitter, "phase.started", Map.of(
+        return Flux.concat(
+                Flux.just(sse("phase.started", Map.of(
                         "phase", "retrieval",
                         "label", "正在检索可信知识与业务数据"
-                ));
-                AgentAnswerContext context = buildAgentContext(request, currentUser, question, intent, scope);
-                sendEvent(emitter, "phase.completed", retrievalCompletedEvent(request, context, null));
-                agentRuntimeClient.streamStateful(request, currentUser, context, event -> {
+                ))),
+                onBlockingScheduler(() -> buildAgentContext(
+                        request, currentUser, question, intent, scope
+                )).flatMapMany(context -> Flux.concat(
+                        Flux.just(sse(
+                                "phase.completed",
+                                retrievalCompletedEvent(request, context, null)
+                        )),
+                        upstreamStream(request, currentUser, context)
+                ))
+        );
+    }
+
+    private Flux<ServerSentEvent<Map<String, Object>>> upstreamStream(
+            AgentQaRequest request,
+            AuthCurrentUserVO currentUser,
+            AgentAnswerContext context) {
+        AtomicBoolean upstreamDone = new AtomicBoolean(false);
+        AtomicBoolean upstreamFinal = new AtomicBoolean(false);
+        return agentRuntimeClient.streamStateful(request, currentUser, context)
+                .map(event -> {
                     if ("done".equals(event.event())) {
-                        upstreamDone[0] = true;
+                        upstreamDone.set(true);
                     }
                     Map<String, Object> data = event.safeData();
                     if ("final".equals(event.event())) {
-                        upstreamFinal[0] = true;
+                        upstreamFinal.set(true);
                         data = normalizeStatefulFinalEvent(data, request, context);
                     }
-                    sendEvent(emitter, event.event(), data);
+                    return sse(event.event(), data);
+                })
+                .concatWith(Flux.defer(() -> upstreamDone.get()
+                        ? Flux.empty()
+                        : Flux.just(sse("done", Collections.emptyMap()))))
+                .onErrorResume(error -> {
+                    if (upstreamFinal.get()) {
+                        return errorEvents(
+                                request,
+                                "agent_stream_incomplete",
+                                "Agent 已返回回答，但流式连接未正常结束",
+                                true
+                        );
+                    }
+                    return streamFailure(request, error);
                 });
-                if (!upstreamDone[0]) {
-                    sendEvent(emitter, "done", Collections.emptyMap());
-                }
-                finished.set(true);
-                emitter.complete();
-            } catch (RuntimeException exception) {
-                if (isClientDisconnected(exception)) {
-                    return;
-                }
-                if (upstreamFinal[0]) {
-                    sendEvent(emitter, "error", Map.of(
-                            "errorType", "agent_stream_incomplete",
-                            "message", "Agent 已返回回答，但流式连接未正常结束"
-                    ));
-                    sendEvent(emitter, "done", Collections.emptyMap());
-                    emitter.complete();
-                    return;
-                }
-                sendEvent(emitter, "error", Map.of(
-                        "errorType", "agent_stream_interrupted",
-                        "message", "连接中断，可使用同一 clientTurnId 恢复本轮执行",
-                        "clientTurnId", request.getClientTurnId(),
-                        "retryable", true
-                ));
-                sendEvent(emitter, "done", Map.of(
-                        "clientTurnId", request.getClientTurnId()
-                ));
-                emitter.complete();
-                return;
-            } finally {
-                finished.set(true);
-            }
-        }, "agent-runtime-sse");
-        workerRef.set(thread);
-        thread.setDaemon(true);
-        thread.start();
-        return emitter;
     }
 
-    private void startLocalFallbackStream(SseEmitter emitter,
-                                   AgentQaRequest request,
-                                   AuthCurrentUserVO currentUser) {
-        Thread thread = new Thread(() -> {
-            String runId = java.util.UUID.randomUUID().toString();
-            try {
-                sendEvent(emitter, "run.started", Map.of(
-                        "runId", runId,
-                        "clientTurnId", request.getClientTurnId(),
-                        "resumed", false,
-                        "attempt", 1
-                ));
-                sendEvent(emitter, "phase.started", Map.of(
-                        "runId", runId,
-                        "phase", "retrieval",
-                        "label", "正在检索可信知识与业务数据"
-                ));
-                AtomicReference<AgentAnswerContext> contextRef = new AtomicReference<>();
-                AgentQaResponse response = askWithPipeline(request, currentUser, false, contextRef::set);
-                sendEvent(emitter, "phase.completed", retrievalCompletedEvent(request, contextRef.get(), runId));
-                sendEvent(emitter, "phase.started", Map.of(
-                        "runId", runId,
-                        "phase", "response",
-                        "label", "正在生成回答"
-                ));
-                response.setRunId(runId);
-                if (!StringUtils.hasText(response.getConversationId())) {
-                    response.setConversationId(StringUtils.hasText(request.getConversationId())
-                            ? request.getConversationId() : java.util.UUID.randomUUID().toString());
-                }
-                String answer = response.getAnswer() == null ? "" : response.getAnswer();
-                for (int index = 0; index < answer.length(); index += 8) {
-                    sendEvent(emitter, "token", Map.of(
-                            "runId", runId,
-                            "delta", answer.substring(index, Math.min(answer.length(), index + 8))
-                    ));
-                    LockSupport.parkNanos(1_000_000L);
-                }
-                sendEvent(emitter, "phase.completed", Map.of(
-                        "runId", runId,
-                        "phase", "response",
-                        "label", "回答生成完成"
-                ));
-                sendEvent(emitter, "final", Map.of("runId", runId, "response", response));
-                sendEvent(emitter, "done", Map.of("runId", runId));
-                emitter.complete();
-            } catch (RuntimeException exception) {
-                sendEvent(emitter, "error", Map.of(
-                        "runId", runId,
-                        "errorType", "local_fallback_stream_error",
-                        "message", exception.getMessage() == null ? "agent stream failed" : exception.getMessage()
-                ));
-                sendEvent(emitter, "done", Map.of("runId", runId));
-                emitter.completeWithError(exception);
+    private Flux<ServerSentEvent<Map<String, Object>>> localFallbackStream(
+            AgentQaRequest request,
+            AuthCurrentUserVO currentUser) {
+        String runId = UUID.randomUUID().toString();
+        return onBlockingScheduler(() -> {
+            AgentAnswerContext[] context = new AgentAnswerContext[1];
+            AgentQaResponse response = askWithPipeline(
+                    request, currentUser, false, value -> context[0] = value
+            );
+            response.setRunId(runId);
+            if (!StringUtils.hasText(response.getConversationId())) {
+                response.setConversationId(StringUtils.hasText(request.getConversationId())
+                        ? request.getConversationId() : UUID.randomUUID().toString());
             }
-        }, "local-agent-sse");
-        thread.setDaemon(true);
-        thread.start();
+            return new LocalFallbackResult(response, context[0]);
+        }).flatMapMany(result -> {
+            String answer = result.response().getAnswer() == null
+                    ? "" : result.response().getAnswer();
+            int chunkCount = (answer.length() + 7) / 8;
+            Flux<ServerSentEvent<Map<String, Object>>> tokens = Flux.range(0, chunkCount)
+                    .delayElements(Duration.ofMillis(1))
+                    .map(index -> sse("token", Map.of(
+                            "runId", runId,
+                            "delta", answer.substring(
+                                    index * 8,
+                                    Math.min(answer.length(), (index + 1) * 8)
+                            )
+                    )));
+            return Flux.concat(
+                    Flux.just(
+                            sse("run.started", Map.of(
+                                    "runId", runId,
+                                    "clientTurnId", request.getClientTurnId(),
+                                    "resumed", false,
+                                    "attempt", 1
+                            )),
+                            sse("phase.started", Map.of(
+                                    "runId", runId,
+                                    "phase", "retrieval",
+                                    "label", "正在检索可信知识与业务数据"
+                            )),
+                            sse("phase.completed", retrievalCompletedEvent(
+                                    request, result.context(), runId
+                            )),
+                            sse("phase.started", Map.of(
+                                    "runId", runId,
+                                    "phase", "response",
+                                    "label", "正在生成回答"
+                            ))
+                    ),
+                    tokens,
+                    Flux.just(
+                            sse("phase.completed", Map.of(
+                                    "runId", runId,
+                                    "phase", "response",
+                                    "label", "回答生成完成"
+                            )),
+                            sse("final", Map.of(
+                                    "runId", runId,
+                                    "response", result.response()
+                            )),
+                            sse("done", Map.of("runId", runId))
+                    )
+            );
+        });
     }
 
     private Map<String, Object> normalizeStatefulFinalEvent(Map<String, Object> eventData,
@@ -569,23 +602,92 @@ public class AgentQaServiceImpl implements AgentQaService {
         return event;
     }
 
-    private void sendEvent(SseEmitter emitter, String eventName, Object data) {
-        try {
-            emitter.send(SseEmitter.event().name(eventName).data(data));
-        } catch (IOException exception) {
-            throw new IllegalStateException("client disconnected", exception);
+    private ServerSentEvent<Map<String, Object>> sse(
+            String eventName, Map<String, Object> data) {
+        return ServerSentEvent.<Map<String, Object>>builder()
+                .event(eventName)
+                .data(data)
+                .build();
+    }
+
+    private Flux<ServerSentEvent<Map<String, Object>>> streamFailure(
+            AgentQaRequest request, Throwable error) {
+        Throwable unwrapped = Exceptions.unwrap(error);
+        if (unwrapped instanceof AgentBusyException) {
+            return errorEvents(
+                    request,
+                    "agent_busy",
+                    "当前请求较多，请稍后使用同一 clientTurnId 重试",
+                    true
+            );
         }
+        if (unwrapped instanceof AgentUpstreamException upstream) {
+            return errorEvents(
+                    request,
+                    upstream.getCode(),
+                    "Agent 服务暂时不可用，可使用同一 clientTurnId 恢复本轮执行",
+                    upstream.isRetryable()
+            );
+        }
+        if (unwrapped instanceof IllegalArgumentException) {
+            return errorEvents(
+                    request,
+                    "request_invalid",
+                    unwrapped.getMessage() == null ? "request failed" : unwrapped.getMessage(),
+                    false
+            );
+        }
+        return errorEvents(
+                request,
+                "agent_stream_interrupted",
+                "连接中断，可使用同一 clientTurnId 恢复本轮执行",
+                true
+        );
     }
 
-    private boolean isClientDisconnected(RuntimeException exception) {
-        String message = exception.getMessage();
-        return Thread.currentThread().isInterrupted()
-                || (message != null && message.contains("client disconnected"));
+    private Flux<ServerSentEvent<Map<String, Object>>> errorEvents(
+            AgentQaRequest request,
+            String code,
+            String message,
+            boolean retryable) {
+        Map<String, Object> error = new LinkedHashMap<>();
+        error.put("code", code);
+        error.put("errorType", code);
+        error.put("message", message);
+        error.put("clientTurnId", request == null ? null : request.getClientTurnId());
+        error.put("retryable", retryable);
+        Map<String, Object> done = new LinkedHashMap<>();
+        done.put("clientTurnId", request == null ? null : request.getClientTurnId());
+        return Flux.just(sse("error", error), sse("done", done));
     }
 
-    private AgentQaResponse askWithAgentPipeline(AgentQaRequest request,
-                                                  AuthCurrentUserVO currentUser) {
-        return askWithPipeline(request, currentUser, true);
+    private <T> Mono<T> onBlockingScheduler(Callable<T> callable) {
+        return Mono.fromCallable(callable)
+                .subscribeOn(agentBlockingScheduler)
+                .onErrorMap(error -> Exceptions.unwrap(error) instanceof RejectedExecutionException,
+                        AgentBusyException::new);
+    }
+
+    private Mono<AgentQaResponse> askWithAgentPipeline(
+            AgentQaRequest request, AuthCurrentUserVO currentUser) {
+        return onBlockingScheduler(() -> prepareAnswer(
+                request, currentUser, true, ignored -> { }
+        )).flatMap(prepared -> {
+            if (prepared.earlyResponse() != null) {
+                return Mono.just(prepared.earlyResponse());
+            }
+            Mono<AgentQaResponse> local = onBlockingScheduler(() -> completeAnswer(
+                    request, prepared, null
+            ));
+            if (agentRuntimeClient == null) {
+                return local;
+            }
+            return agentRuntimeClient.generate(request, currentUser, prepared.context())
+                    .flatMap(remote -> onBlockingScheduler(() -> completeAnswer(
+                            request, prepared, remote
+                    )))
+                    .switchIfEmpty(local);
+        });
     }
 
     private AgentQaResponse askWithLocalFallbackPipeline(AgentQaRequest request,
@@ -604,28 +706,67 @@ public class AgentQaServiceImpl implements AgentQaService {
                                              AuthCurrentUserVO currentUser,
                                              boolean allowRemoteAgent,
                                              Consumer<AgentAnswerContext> contextConsumer) {
+        AnswerPreparation prepared = prepareAnswer(
+                request, currentUser, allowRemoteAgent, contextConsumer
+        );
+        return prepared.earlyResponse() == null
+                ? completeAnswer(request, prepared, null)
+                : prepared.earlyResponse();
+    }
 
+    private AnswerPreparation prepareAnswer(
+            AgentQaRequest request,
+            AuthCurrentUserVO currentUser,
+            boolean allowRemoteAgent,
+            Consumer<AgentAnswerContext> contextConsumer) {
         String question = request.getQuestion().trim();
         AgentIntent intent = hasImageAttachments(request)
                 ? AgentIntent.RESOURCE_EXPLANATION : intentRecognizer.recognize(question);
 
         if (intent == AgentIntent.UNKNOWN && (agentRuntimeClient == null || !allowRemoteAgent)) {
-            return skippedResponse(intent,
-                    "我目前支持查询周边资源、解释教育资源、设计教学活动，以及查询人物、学校和资源之间的关系。请补充学校、资源或区域名称。", null);
+            return new AnswerPreparation(
+                    skippedResponse(
+                            intent,
+                            "我目前支持查询周边资源、解释教育资源、设计教学活动，以及查询人物、学校和资源之间的关系。请补充学校、资源或区域名称。",
+                            null
+                    ),
+                    intent,
+                    null,
+                    null,
+                    null
+            );
         }
 
         ScopeResolution scopeResolution = resolveScope(request, currentUser, question);
         if (scopeResolution.requiresClarification()) {
-            return clarificationResponse(intent, scopeResolution.message(), scopeResolution.options());
+            return new AnswerPreparation(
+                    clarificationResponse(
+                            intent,
+                            scopeResolution.message(),
+                            scopeResolution.options()
+                    ),
+                    intent,
+                    null,
+                    null,
+                    null
+            );
         }
         Scope scope = scopeResolution.scope();
 
         AgentAnswerContext context = buildAgentContext(request, currentUser, question, intent, scope);
         contextConsumer.accept(context);
         KnowledgeRetrieveResult retrieval = context.getRetrieval();
+        return new AnswerPreparation(null, intent, scope, context, retrieval);
+    }
 
-        AgentRuntimeResult remote = !allowRemoteAgent || agentRuntimeClient == null
-                ? null : agentRuntimeClient.generate(request, currentUser, context);
+    private AgentQaResponse completeAnswer(
+            AgentQaRequest request,
+            AnswerPreparation prepared,
+            AgentRuntimeResult remote) {
+        AgentIntent intent = prepared.intent();
+        Scope scope = prepared.scope();
+        AgentAnswerContext context = prepared.context();
+        KnowledgeRetrieveResult retrieval = prepared.retrieval();
         GeneratedAnswer generated = remote == null ? null : remote.getAnswer();
         if (generated == null) {
             try {
@@ -979,6 +1120,18 @@ public class AgentQaServiceImpl implements AgentQaService {
     }
 
     private record Scope(KnowledgeScopeType type, Long id) {
+    }
+
+    private record AnswerPreparation(
+            AgentQaResponse earlyResponse,
+            AgentIntent intent,
+            Scope scope,
+            AgentAnswerContext context,
+            KnowledgeRetrieveResult retrieval) {
+    }
+
+    private record LocalFallbackResult(
+            AgentQaResponse response, AgentAnswerContext context) {
     }
 
     private record ScopeResolution(Scope scope, String message, List<String> options) {

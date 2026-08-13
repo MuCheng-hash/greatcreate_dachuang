@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
 from pathlib import Path
@@ -9,7 +10,7 @@ from fastapi.testclient import TestClient
 from langchain_core.messages import AIMessage, AIMessageChunk
 import pytest
 
-from llm_service.api import create_app
+from llm_service.api import DisconnectAwareStreamingResponse, create_app
 from llm_service.container import build_container
 from llm_service.planner import AgentPlan
 from llm_service.runtime import AgentRuntime
@@ -565,6 +566,126 @@ def test_stateful_stream_emits_events_and_persists_final_response(tmp_path: Path
     assert stored["messages"][-1]["metadata"]["clientTurnId"] == "turn-stream-1"
     assert stored["messages"][-1]["metadata"]["followUpQuestions"] == final_data["response"]["followUpQuestions"]
     assert stored["messages"][-1]["metadata"]["responseSnapshot"]["schemaVersion"] == 1
+
+
+def test_stateful_stream_uses_bounded_backpressure_and_cancels_worker(tmp_path: Path):
+    runtime = started_runtime(settings_for(tmp_path, agent_stream_buffer_size=1))
+    request = AgentMessageRequest.model_validate(message_payload(
+        clientTurnId="turn-bounded-stream",
+    ))
+    progress: list[str] = []
+    cancelled = asyncio.Event()
+
+    async def fake_stream_turn(*args):
+        emit = args[8]
+        try:
+            progress.append("before-first")
+            await emit("token", {"delta": "第一段"})
+            progress.append("after-first")
+            progress.append("before-second")
+            await emit("token", {"delta": "第二段"})
+            progress.append("after-second")
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+
+    runtime._stream_agent_turn = fake_stream_turn
+
+    async def exercise_stream():
+        stream = runtime.stream_events(request)
+        try:
+            first = await anext(stream)
+            await asyncio.sleep(0)
+            assert progress == ["before-first"]
+
+            second = await anext(stream)
+            await asyncio.sleep(0)
+            assert progress == ["before-first", "after-first", "before-second"]
+
+            third = await anext(stream)
+            await asyncio.sleep(0)
+            assert progress == [
+                "before-first", "after-first", "before-second", "after-second"
+            ]
+
+            fourth = await anext(stream)
+            await asyncio.sleep(0)
+        finally:
+            await stream.aclose()
+        await asyncio.wait_for(cancelled.wait(), timeout=1)
+        return [first, second, third, fourth]
+
+    events = run_async(exercise_stream())
+    assert [event.splitlines()[0] for event in events] == [
+        "event: phase.started",
+        "event: phase.completed",
+        "event: token",
+        "event: token",
+    ]
+
+
+def test_disconnect_aware_streaming_response_cancels_idle_producer() -> None:
+    first_chunk_sent = asyncio.Event()
+    disconnect = asyncio.Event()
+    producer_closed = asyncio.Event()
+
+    async def body():
+        try:
+            yield "event: run.started\ndata: {}\n\n"
+            await asyncio.Future()
+        finally:
+            producer_closed.set()
+
+    async def receive():
+        await disconnect.wait()
+        return {"type": "http.disconnect"}
+
+    async def send(message):
+        if message["type"] == "http.response.body" and message.get("body"):
+            first_chunk_sent.set()
+
+    async def exercise() -> None:
+        response = DisconnectAwareStreamingResponse(
+            body(), media_type="text/event-stream"
+        )
+        task = asyncio.create_task(response(
+            {"type": "http", "asgi": {"spec_version": "2.4"}},
+            receive,
+            send,
+        ))
+        await asyncio.wait_for(first_chunk_sent.wait(), timeout=1)
+        disconnect.set()
+        await asyncio.wait_for(task, timeout=1)
+        assert producer_closed.is_set()
+
+    run_async(exercise())
+
+
+def test_stateful_stream_error_is_stable_and_sanitized(tmp_path: Path):
+    runtime = started_runtime(settings_for(tmp_path))
+    request = AgentMessageRequest.model_validate(message_payload(
+        clientTurnId="turn-stream-error",
+    ))
+
+    async def fail_stream_turn(*_args):
+        raise RuntimeError("database-password=must-not-leak")
+
+    runtime._stream_agent_turn = fail_stream_turn
+
+    async def collect_events():
+        return [event async for event in runtime.stream_events(request)]
+
+    events = run_async(collect_events())
+    error_event = next(event for event in events if event.startswith("event: error"))
+    error_data = json.loads(error_event.split("data: ", 1)[1])
+
+    assert error_data["code"] == "agent_stream_interrupted"
+    assert error_data["errorType"] == "agent_stream_interrupted"
+    assert error_data["clientTurnId"] == "turn-stream-error"
+    assert error_data["retryable"] is True
+    assert "must-not-leak" not in error_event
+    assert events[-1].startswith("event: done")
 
 
 def test_teaching_plan_and_resource_discovery_streams_use_unified_protocol(tmp_path: Path):

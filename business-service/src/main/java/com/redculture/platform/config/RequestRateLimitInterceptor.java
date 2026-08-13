@@ -3,6 +3,7 @@ package com.redculture.platform.config;
 import com.redculture.platform.vo.AuthCurrentUserVO;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
+import jakarta.servlet.DispatcherType;
 import org.springframework.stereotype.Component;
 
 import java.time.Instant;
@@ -22,6 +23,11 @@ public class RequestRateLimitInterceptor implements org.springframework.web.serv
 
     @Override
     public boolean preHandle(HttpServletRequest request, HttpServletResponse response, Object handler) throws Exception {
+        // Spring MVC 会为 Mono/Flux 结果进行 ASYNC 二次分派；限流只统计初始请求，
+        // 否则同一条已提交的 SSE 会被重复计数，甚至在二次分派时尝试写 JSON 错误体。
+        if (request.getDispatcherType() == DispatcherType.ASYNC) {
+            return true;
+        }
         if (!properties.isEnabled()) {
             return true;
         }

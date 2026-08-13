@@ -38,7 +38,7 @@ class LlmModelControllerTest {
             MockHttpServletRequest request = new MockHttpServletRequest();
             request.setAttribute(AuthContext.CURRENT_USER_ATTRIBUTE, new AuthCurrentUserVO());
 
-            var response = controller.list(request);
+            var response = controller.list(request).block();
 
             assertEquals(200, response.getCode());
             assertEquals("ernie-test", response.getData().get(0).getModel());
