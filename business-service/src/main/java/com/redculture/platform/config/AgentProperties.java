@@ -25,6 +25,19 @@ public class AgentProperties {
 
     private long streamTimeoutMs = 65000L;
 
+    /** MySQL/Neo4j 等遗留阻塞上下文任务的最大并发线程数。 */
+    private int blockingMaxThreads = 8;
+
+    /** 遗留阻塞上下文任务的总等待队列容量。 */
+    private int blockingQueueCapacity = 64;
+
+    /** Spring MVC 异步响应写入执行器。 */
+    private int mvcAsyncCoreThreads = 4;
+
+    private int mvcAsyncMaxThreads = 16;
+
+    private int mvcAsyncQueueCapacity = 128;
+
     /** 写工具总开关。完成数据库迁移和具体工具安全评审前必须保持关闭。 */
     private boolean writeToolsEnabled = false;
 

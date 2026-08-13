@@ -69,12 +69,12 @@ class AssistantConversationHistoryControllerTest {
             MockHttpServletRequest request = new MockHttpServletRequest();
             request.setAttribute(AuthContext.CURRENT_USER_ATTRIBUTE, user);
 
-            var history = controller.list("active", request);
-            var archivedHistory = controller.list("archived", request);
-            var detail = controller.detail("thread-1", request);
-            var recovery = controller.recover("turn-recovery-1", request);
-            var archived = controller.archive("thread-1", request);
-            var restored = controller.restore("thread-1", request);
+            var history = controller.list("active", request).block();
+            var archivedHistory = controller.list("archived", request).block();
+            var detail = controller.detail("thread-1", request).block();
+            var recovery = controller.recover("turn-recovery-1", request).block();
+            var archived = controller.archive("thread-1", request).block();
+            var restored = controller.restore("thread-1", request).block();
 
             assertEquals("历史问题", history.getData().get(0).getTitle());
             assertEquals("历史问题", archivedHistory.getData().get(0).getTitle());

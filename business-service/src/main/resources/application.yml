@@ -61,6 +61,11 @@ app:
     connect-timeout-ms: ${AGENT_CONNECT_TIMEOUT_MS:3000}
     read-timeout-ms: ${AGENT_READ_TIMEOUT_MS:30000}
     stream-timeout-ms: ${AGENT_STREAM_TIMEOUT_MS:65000}
+    blocking-max-threads: ${AGENT_BLOCKING_MAX_THREADS:8}
+    blocking-queue-capacity: ${AGENT_BLOCKING_QUEUE_CAPACITY:64}
+    mvc-async-core-threads: ${AGENT_MVC_ASYNC_CORE_THREADS:4}
+    mvc-async-max-threads: ${AGENT_MVC_ASYNC_MAX_THREADS:16}
+    mvc-async-queue-capacity: ${AGENT_MVC_ASYNC_QUEUE_CAPACITY:128}
     agent-runtime-enabled: ${AGENT_RUNTIME_ENABLED:true}
     write-tools-enabled: ${AGENT_WRITE_TOOLS_ENABLED:false}
     outbox-batch-size: ${AGENT_OUTBOX_BATCH_SIZE:20}

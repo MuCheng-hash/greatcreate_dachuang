@@ -27,6 +27,7 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
+import reactor.core.publisher.Mono;
 
 import java.util.List;
 import java.util.Locale;
@@ -49,43 +50,45 @@ public class AgentMemoryController {
 
     //获取当前账号的“AI 是否使用长期记忆”开关状态。
     @GetMapping("/memory-settings")
-    public ApiResponse<AgentMemorySetting> settings(HttpServletRequest request) {
+    public Mono<ApiResponse<AgentMemorySetting>> settings(HttpServletRequest request) {
         AuthCurrentUserVO user = requireSchoolUser(request);
-        return ApiResponse.success(agentRuntimeClient.getMemorySetting(
-                ownerId(user), SCHOOL_SCOPE, user.getSchoolId()));
+        return agentRuntimeClient.getMemorySetting(
+                        ownerId(user), SCHOOL_SCOPE, user.getSchoolId())
+                .map(ApiResponse::success);
     }
 
     //开启或关闭长期记忆。请求体需要包含 enabled，例如 {"enabled": true}。
     @PutMapping("/memory-settings")
-    public ApiResponse<AgentMemorySetting> updateSettings(
+    public Mono<ApiResponse<AgentMemorySetting>> updateSettings(
             @RequestBody AgentMemorySettingUpdateRequest request,
             HttpServletRequest servletRequest) {
         if (request == null || request.getEnabled() == null) {
             throw new IllegalArgumentException("enabled is required");
         }
         AuthCurrentUserVO user = requireSchoolUser(servletRequest);
-        return ApiResponse.success(agentRuntimeClient.updateMemorySetting(
-                ownerId(user), SCHOOL_SCOPE, user.getSchoolId(), request.getEnabled()));
+        return agentRuntimeClient.updateMemorySetting(
+                        ownerId(user), SCHOOL_SCOPE, user.getSchoolId(), request.getEnabled())
+                .map(ApiResponse::success);
     }
 
     //查询记忆列表。默认查询已生效的记忆，即 status=active。
     @GetMapping("/memories")
-    public ApiResponse<List<AgentMemoryItem>> list(
+    public Mono<ApiResponse<List<AgentMemoryItem>>> list(
             @RequestParam(name = "status", defaultValue = "active") String status,
             @RequestParam(name = "memoryType", required = false) String memoryType,
             HttpServletRequest request) {
         AuthCurrentUserVO user = requireSchoolUser(request);
-        return ApiResponse.success(agentRuntimeClient.listMemories(
+        return agentRuntimeClient.listMemories(
                 ownerId(user),
                 SCHOOL_SCOPE,
                 user.getSchoolId(),
                 normalizeStatus(status),
-                normalizeMemoryType(memoryType, false)));
+                normalizeMemoryType(memoryType, false)).map(ApiResponse::success);
     }
 
     //手动新增一条记忆。
     @PostMapping("/memories")
-    public ApiResponse<AgentMemoryItem> create(
+    public Mono<ApiResponse<AgentMemoryItem>> create(
             @RequestBody AgentMemoryCreateRequest request,
             HttpServletRequest servletRequest) {
         if (request == null) {
@@ -97,13 +100,14 @@ public class AgentMemoryController {
                 normalizeFieldKey(request.getFieldKey()),
                 requireContent(request.getContent()),
                 request.getReplaceConflicts());
-        return ApiResponse.success(agentRuntimeClient.createMemory(
-                ownerId(user), SCHOOL_SCOPE, user.getSchoolId(), normalized));
+        return agentRuntimeClient.createMemory(
+                        ownerId(user), SCHOOL_SCOPE, user.getSchoolId(), normalized)
+                .map(ApiResponse::success);
     }
 
     //局部修改某条记忆，例如只改内容或分类。
     @PatchMapping("/memories/{id}")
-    public ApiResponse<AgentMemoryItem> update(
+    public Mono<ApiResponse<AgentMemoryItem>> update(
             @PathVariable String id,
             @RequestBody AgentMemoryUpdateRequest request,
             HttpServletRequest servletRequest) {
@@ -123,66 +127,71 @@ public class AgentMemoryController {
                 request.getContent() == null
                         ? null : requireContent(request.getContent()),
                 request.getReplaceConflicts());
-        return ApiResponse.success(agentRuntimeClient.updateMemory(
-                id.trim(), ownerId(user), SCHOOL_SCOPE, user.getSchoolId(), normalized));
+        return agentRuntimeClient.updateMemory(
+                        id.trim(), ownerId(user), SCHOOL_SCOPE, user.getSchoolId(), normalized)
+                .map(ApiResponse::success);
     }
 
     //查看某条待确认记忆与已有记忆的冲突预览。
     @GetMapping("/memories/{id}/confirmation-preview")
-    public ApiResponse<AgentMemoryConflictPreview> confirmationPreview(
+    public Mono<ApiResponse<AgentMemoryConflictPreview>> confirmationPreview(
             @PathVariable String id, HttpServletRequest request) {
         AuthCurrentUserVO user = requireSchoolUser(request);
-        return ApiResponse.success(agentRuntimeClient.getMemoryConfirmationPreview(
-                requireMemoryId(id), ownerId(user), SCHOOL_SCOPE, user.getSchoolId()));
+        return agentRuntimeClient.getMemoryConfirmationPreview(
+                        requireMemoryId(id), ownerId(user), SCHOOL_SCOPE, user.getSchoolId())
+                .map(ApiResponse::success);
     }
 
     //确认一条待处理的记忆，使它生效；也可选择覆盖冲突记忆。
     @PostMapping("/memories/{id}/confirm")
-    public ApiResponse<AgentMemoryItem> confirm(
+    public Mono<ApiResponse<AgentMemoryItem>> confirm(
             @PathVariable String id,
             @RequestBody(required = false) AgentMemoryResolutionRequest resolution,
             HttpServletRequest request) {
         AuthCurrentUserVO user = requireSchoolUser(request);
-        return ApiResponse.success(agentRuntimeClient.confirmMemory(
+        return agentRuntimeClient.confirmMemory(
                 requireMemoryId(id),
                 ownerId(user),
                 SCHOOL_SCOPE,
                 user.getSchoolId(),
-                resolution != null && Boolean.TRUE.equals(resolution.getReplaceConflicts())));
+                resolution != null && Boolean.TRUE.equals(resolution.getReplaceConflicts()))
+                .map(ApiResponse::success);
     }
 
     //软删除记忆。数据仍保留，可恢复。
     @DeleteMapping("/memories/{id}")
-    public ApiResponse<AgentMemoryItem> delete(
+    public Mono<ApiResponse<AgentMemoryItem>> delete(
             @PathVariable String id, HttpServletRequest request) {
         AuthCurrentUserVO user = requireSchoolUser(request);
-        return ApiResponse.success(agentRuntimeClient.deleteMemory(
-                requireMemoryId(id), ownerId(user), SCHOOL_SCOPE, user.getSchoolId()));
+        return agentRuntimeClient.deleteMemory(
+                        requireMemoryId(id), ownerId(user), SCHOOL_SCOPE, user.getSchoolId())
+                .map(ApiResponse::success);
     }
 
     //恢复已软删除的记忆；如恢复后发生冲突，也可选择替换冲突项。
     @PostMapping("/memories/{id}/restore")
-    public ApiResponse<AgentMemoryItem> restore(
+    public Mono<ApiResponse<AgentMemoryItem>> restore(
             @PathVariable String id,
             @RequestBody(required = false) AgentMemoryResolutionRequest resolution,
             HttpServletRequest request) {
         AuthCurrentUserVO user = requireSchoolUser(request);
-        return ApiResponse.success(agentRuntimeClient.restoreMemory(
+        return agentRuntimeClient.restoreMemory(
                 requireMemoryId(id),
                 ownerId(user),
                 SCHOOL_SCOPE,
                 user.getSchoolId(),
-                resolution != null && Boolean.TRUE.equals(resolution.getReplaceConflicts())));
+                resolution != null && Boolean.TRUE.equals(resolution.getReplaceConflicts()))
+                .map(ApiResponse::success);
     }
 
     //永久删除记忆，无法恢复。
     @DeleteMapping("/memories/{id}/permanent")
-    public ApiResponse<Void> permanentDelete(
+    public Mono<ApiResponse<Void>> permanentDelete(
             @PathVariable String id, HttpServletRequest request) {
         AuthCurrentUserVO user = requireSchoolUser(request);
-        agentRuntimeClient.permanentlyDeleteMemory(
-                requireMemoryId(id), ownerId(user), SCHOOL_SCOPE, user.getSchoolId());
-        return ApiResponse.success(null);
+        return agentRuntimeClient.permanentlyDeleteMemory(
+                        requireMemoryId(id), ownerId(user), SCHOOL_SCOPE, user.getSchoolId())
+                .thenReturn(ApiResponse.<Void>success(null));
     }
 
     private AuthCurrentUserVO requireSchoolUser(HttpServletRequest request) {

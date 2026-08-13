@@ -8,6 +8,7 @@ import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
+import reactor.core.publisher.Mono;
 
 import java.util.List;
 
@@ -22,14 +23,12 @@ public class LlmModelController {
     }
 
     @GetMapping
-    public ApiResponse<List<LlmModelOption>> list(HttpServletRequest request) {
+    public Mono<ApiResponse<List<LlmModelOption>>> list(HttpServletRequest request) {
         if (AuthContext.currentUser(request) == null) {
-            return ApiResponse.fail(401, "school account is required");
+            return Mono.just(ApiResponse.fail(401, "school account is required"));
         }
-        try {
-            return ApiResponse.success(agentRuntimeClient.listModels());
-        } catch (RuntimeException exception) {
-            return ApiResponse.success(List.of());
-        }
+        return agentRuntimeClient.listModels()
+                .map(ApiResponse::success)
+                .onErrorReturn(ApiResponse.success(List.of()));
     }
 }

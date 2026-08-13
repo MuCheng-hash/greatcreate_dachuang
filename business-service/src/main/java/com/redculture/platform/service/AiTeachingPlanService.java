@@ -4,23 +4,30 @@ import com.redculture.platform.vo.GeneratedTeachingPlanResponse;
 import com.redculture.platform.vo.TeachingActivityPlanAdminVO;
 import com.redculture.platform.vo.request.GeneratedTeachingPlanSaveRequest;
 import com.redculture.platform.vo.request.TeachingPlanGenerateRequest;
-import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
+import org.springframework.http.codec.ServerSentEvent;
+import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
+
+import java.util.Map;
 
 public interface AiTeachingPlanService {
 
-    GeneratedTeachingPlanResponse generatePlan(TeachingPlanGenerateRequest request);
+    Mono<GeneratedTeachingPlanResponse> generatePlan(TeachingPlanGenerateRequest request);
 
-    default GeneratedTeachingPlanResponse generatePlan(TeachingPlanGenerateRequest request,
-                                                         Long accountId,
-                                                         String sessionId) {
+    default Mono<GeneratedTeachingPlanResponse> generatePlan(
+            TeachingPlanGenerateRequest request,
+            Long accountId,
+            String sessionId) {
         return generatePlan(request);
     }
 
-    SseEmitter generatePlanStream(TeachingPlanGenerateRequest request);
+    Flux<ServerSentEvent<Map<String, Object>>> generatePlanStream(
+            TeachingPlanGenerateRequest request);
 
-    default SseEmitter generatePlanStream(TeachingPlanGenerateRequest request,
-                                          Long accountId,
-                                          String sessionId) {
+    default Flux<ServerSentEvent<Map<String, Object>>> generatePlanStream(
+            TeachingPlanGenerateRequest request,
+            Long accountId,
+            String sessionId) {
         return generatePlanStream(request);
     }
 

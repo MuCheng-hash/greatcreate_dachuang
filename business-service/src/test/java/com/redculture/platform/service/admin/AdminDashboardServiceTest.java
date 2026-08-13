@@ -12,6 +12,7 @@ import com.redculture.platform.service.agent.AgentAdminClient;
 import com.redculture.platform.service.rag.ChunkVectorStore;
 import com.redculture.platform.vo.admin.AdminDashboardOverviewVO;
 import org.junit.jupiter.api.Test;
+import reactor.core.publisher.Mono;
 
 import java.util.Map;
 import java.util.Set;
@@ -37,11 +38,13 @@ class AdminDashboardServiceTest {
         when(fixtures.plans.selectCount(any())).thenReturn(5L);
         when(fixtures.chunks.selectCount(any())).thenReturn(40L, 4L, 0L);
         when(fixtures.projectionTasks.selectCount(any())).thenReturn(2L, 1L);
-        when(fixtures.agent.observabilitySummary(anyMap())).thenReturn(Map.of("completedQuestionCount", 27));
+        when(fixtures.agent.observabilitySummary(anyMap())).thenReturn(
+                Mono.just(Map.of("completedQuestionCount", 27))
+        );
         when(fixtures.vectorStore.resolveAlias("red_culture_content_chunks_active")).thenReturn("red_culture_content_chunks_v2");
         when(fixtures.vectorStore.listPointIds("red_culture_content_chunks_v2")).thenReturn(Set.of(1L, 2L, 3L));
 
-        AdminDashboardOverviewVO result = fixtures.service().overview();
+        AdminDashboardOverviewVO result = fixtures.service().overview().block();
 
         assertEquals(12L, result.getResourceCount());
         assertEquals(27L, result.getQuestionCount());
@@ -57,11 +60,13 @@ class AdminDashboardServiceTest {
     @Test
     void keepsDatabaseMetricsWhenAgentIsUnavailable() {
         Fixtures fixtures = new Fixtures();
-        when(fixtures.agent.observabilitySummary(anyMap())).thenThrow(new IllegalStateException("agent unavailable"));
+        when(fixtures.agent.observabilitySummary(anyMap())).thenReturn(
+                Mono.error(new IllegalStateException("agent unavailable"))
+        );
         when(fixtures.vectorStore.resolveAlias("red_culture_content_chunks_active")).thenReturn("");
         when(fixtures.vectorStore.listPointIds("red_culture_content_chunks")).thenReturn(Set.of());
 
-        AdminDashboardOverviewVO result = fixtures.service().overview();
+        AdminDashboardOverviewVO result = fixtures.service().overview().block();
 
         assertEquals(0L, result.getSchoolCount());
         assertNull(result.getQuestionCount());
@@ -72,11 +77,13 @@ class AdminDashboardServiceTest {
     @Test
     void marksQdrantUnavailableWithoutLosingRagIndexCounts() {
         Fixtures fixtures = new Fixtures();
-        when(fixtures.agent.observabilitySummary(anyMap())).thenReturn(Map.of("calls", 4));
+        when(fixtures.agent.observabilitySummary(anyMap())).thenReturn(
+                Mono.just(Map.of("calls", 4))
+        );
         when(fixtures.vectorStore.resolveAlias("red_culture_content_chunks_active"))
                 .thenThrow(new IllegalStateException("qdrant unavailable"));
 
-        AdminDashboardOverviewVO result = fixtures.service().overview();
+        AdminDashboardOverviewVO result = fixtures.service().overview().block();
 
         assertEquals(4L, result.getQuestionCount());
         assertEquals(40L, result.getRagStatus().get("done"));

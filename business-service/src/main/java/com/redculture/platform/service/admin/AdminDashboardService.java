@@ -6,12 +6,20 @@ import com.redculture.platform.entity.*;
 import com.redculture.platform.enums.EmbeddingStatus;
 import com.redculture.platform.mapper.*;
 import com.redculture.platform.service.agent.AgentAdminClient;
+import com.redculture.platform.service.agent.AgentBusyException;
 import com.redculture.platform.service.rag.ChunkVectorStore;
 import com.redculture.platform.vo.admin.AdminDashboardOverviewVO;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Service;
+import reactor.core.Exceptions;
+import reactor.core.publisher.Mono;
+import reactor.core.scheduler.Scheduler;
+import reactor.core.scheduler.Schedulers;
 
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.concurrent.RejectedExecutionException;
 
 @Service
 public class AdminDashboardService {
@@ -25,19 +33,52 @@ public class AdminDashboardService {
     private final AgentAdminClient agentAdminClient;
     private final RagProperties ragProperties;
     private final ChunkVectorStore vectorStore;
+    private final Scheduler agentBlockingScheduler;
+
+    @Autowired
+    public AdminDashboardService(LocalEduResourceMapper resourceMapper, SchoolMapper schoolMapper,
+                                 TeacherProfileMapper teacherMapper, StudentProfileMapper studentMapper,
+                                 TeachingActivityPlanMapper planMapper, ContentChunkMapper chunkMapper,
+                                 CatalogProjectionTaskMapper projectionTaskMapper, AgentAdminClient agentAdminClient,
+                                 RagProperties ragProperties, ChunkVectorStore vectorStore,
+                                 @Qualifier("agentBlockingScheduler") Scheduler agentBlockingScheduler) {
+        this.resourceMapper = resourceMapper; this.schoolMapper = schoolMapper; this.teacherMapper = teacherMapper;
+        this.studentMapper = studentMapper; this.planMapper = planMapper; this.chunkMapper = chunkMapper;
+        this.projectionTaskMapper = projectionTaskMapper; this.agentAdminClient = agentAdminClient;
+        this.ragProperties = ragProperties; this.vectorStore = vectorStore;
+        this.agentBlockingScheduler = agentBlockingScheduler;
+    }
 
     public AdminDashboardService(LocalEduResourceMapper resourceMapper, SchoolMapper schoolMapper,
                                  TeacherProfileMapper teacherMapper, StudentProfileMapper studentMapper,
                                  TeachingActivityPlanMapper planMapper, ContentChunkMapper chunkMapper,
                                  CatalogProjectionTaskMapper projectionTaskMapper, AgentAdminClient agentAdminClient,
                                  RagProperties ragProperties, ChunkVectorStore vectorStore) {
-        this.resourceMapper = resourceMapper; this.schoolMapper = schoolMapper; this.teacherMapper = teacherMapper;
-        this.studentMapper = studentMapper; this.planMapper = planMapper; this.chunkMapper = chunkMapper;
-        this.projectionTaskMapper = projectionTaskMapper; this.agentAdminClient = agentAdminClient;
-        this.ragProperties = ragProperties; this.vectorStore = vectorStore;
+        this(resourceMapper, schoolMapper, teacherMapper, studentMapper, planMapper, chunkMapper,
+                projectionTaskMapper, agentAdminClient, ragProperties, vectorStore,
+                Schedulers.immediate());
     }
 
-    public AdminDashboardOverviewVO overview() {
+    public Mono<AdminDashboardOverviewVO> overview() {
+        return Mono.fromCallable(this::localOverview)
+                .subscribeOn(agentBlockingScheduler)
+                .onErrorMap(error -> Exceptions.unwrap(error) instanceof RejectedExecutionException,
+                        AgentBusyException::new)
+                .flatMap(result -> agentAdminClient
+                        .observabilitySummary(Map.of("includeQuestionMetrics", "true"))
+                        .map(summary -> {
+                            result.setQuestionCount(readCount(summary));
+                            result.setQuestionStatus("ok");
+                            return result;
+                        })
+                        .onErrorResume(error -> {
+                            result.setQuestionCount(null);
+                            result.setQuestionStatus("unavailable");
+                            return Mono.just(result);
+                        }));
+    }
+
+    private AdminDashboardOverviewVO localOverview() {
         AdminDashboardOverviewVO result = new AdminDashboardOverviewVO();
         result.setResourceCount(resourceMapper.selectCount(null));
         result.setSchoolCount(schoolMapper.selectCount(null));
@@ -53,14 +94,6 @@ public class AdminDashboardService {
                 "pending", pendingProjectionCount,
                 "failed", failedProjectionCount,
                 "total", pendingProjectionCount + failedProjectionCount)));
-        try {
-            Map<String, Object> summary = agentAdminClient.observabilitySummary(Map.of("includeQuestionMetrics", "true"));
-            result.setQuestionCount(readCount(summary));
-            result.setQuestionStatus("ok");
-        } catch (RuntimeException exception) {
-            result.setQuestionCount(null);
-            result.setQuestionStatus("unavailable");
-        }
         result.setRagStatus(ragStatus());
         return result;
     }

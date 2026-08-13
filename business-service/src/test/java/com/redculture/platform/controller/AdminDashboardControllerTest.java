@@ -4,6 +4,7 @@ import com.redculture.platform.common.ApiResponse;
 import com.redculture.platform.service.admin.AdminDashboardService;
 import com.redculture.platform.vo.admin.AdminDashboardOverviewVO;
 import org.junit.jupiter.api.Test;
+import reactor.core.publisher.Mono;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.Mockito.mock;
@@ -17,9 +18,10 @@ class AdminDashboardControllerTest {
         AdminDashboardOverviewVO overview = new AdminDashboardOverviewVO();
         overview.setResourceCount(12L);
         overview.setSchoolCount(3L);
-        when(service.overview()).thenReturn(overview);
+        when(service.overview()).thenReturn(Mono.just(overview));
 
-        ApiResponse<AdminDashboardOverviewVO> response = new AdminDashboardController(service).overview();
+        ApiResponse<AdminDashboardOverviewVO> response =
+                new AdminDashboardController(service).overview().block();
 
         assertEquals(200, response.getCode());
         assertEquals(12L, response.getData().getResourceCount());

@@ -1,10 +1,12 @@
 package com.redculture.platform.service.impl;
 
+import com.redculture.platform.config.AgentProperties;
 import com.redculture.platform.service.KnowledgeRetriever;
 import com.redculture.platform.service.LocalEduResourceService;
 import com.redculture.platform.service.SchoolMapService;
 import com.redculture.platform.service.TownMapService;
 import com.redculture.platform.service.agent.AnswerGenerator;
+import com.redculture.platform.service.agent.AgentAccessGuard;
 import com.redculture.platform.service.agent.AgentRuntimeClient;
 import com.redculture.platform.service.agent.AgentRuntimeResult;
 import com.redculture.platform.service.agent.CitationValidator;
@@ -25,10 +27,14 @@ import com.redculture.platform.vo.ai.KnowledgeRetrieveResult;
 import com.redculture.platform.vo.ai.KnowledgeRetrievalStatus;
 import com.redculture.platform.vo.request.AgentQaRequest;
 import org.junit.jupiter.api.Test;
+import reactor.core.publisher.Mono;
+import reactor.core.scheduler.Scheduler;
+import reactor.core.scheduler.Schedulers;
 import org.mockito.ArgumentCaptor;
 
 import java.util.Collections;
 import java.util.List;
+import java.util.concurrent.RejectedExecutionException;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -49,7 +55,9 @@ class AgentQaServiceImplTest {
         AgentQaServiceImpl service = newService(retriever, new GeneratedAnswer(
                 "回答", List.of("chunk:1", "forged:citation"), List.of("继续追问")));
 
-        AgentQaResponse response = service.ask(request("请介绍这个资源的教育价值。"), schoolUser());
+        AgentQaResponse response = service.ask(
+                request("请介绍这个资源的教育价值。"), schoolUser()
+        ).block();
 
         assertEquals(AgentIntent.RESOURCE_EXPLANATION, response.getIntent());
         assertEquals(KnowledgeRetrievalStatus.OK, response.getRetrievalStatus());
@@ -69,7 +77,7 @@ class AgentQaServiceImplTest {
         AgentQaServiceImpl service = newService(retriever, new GeneratedAnswer("回答", List.of(), List.of()));
 
         AgentQaRequest request = request("里庄小学附近有哪些红色资源？适合四年级去？");
-        AgentQaResponse response = service.ask(request, adminUser());
+        AgentQaResponse response = service.ask(request, adminUser()).block();
 
         assertEquals(1L, response.getScopeId());
         assertEquals(AgentGenerationStatus.COMPLETED, response.getGenerationStatus());
@@ -87,7 +95,7 @@ class AgentQaServiceImplTest {
         AgentQaResponse response = service.ask(
                 request("里庄小学和示例小学附近有哪些红色资源？"),
                 adminUser()
-        );
+        ).block();
 
         assertTrue(response.isClarificationRequired());
         assertEquals(KnowledgeRetrievalStatus.EMPTY, response.getRetrievalStatus());
@@ -102,7 +110,9 @@ class AgentQaServiceImplTest {
         AgentQaServiceImpl service = newService(retriever, new GeneratedAnswer("回答", List.of(), List.of()));
 
         assertThrows(IllegalArgumentException.class,
-                () -> service.ask(request("示例小学附近有哪些红色资源？"), schoolUser()));
+                () -> service.ask(
+                        request("示例小学附近有哪些红色资源？"), schoolUser()
+                ).block());
         verify(retriever, never()).retrieve(any());
     }
 
@@ -111,7 +121,9 @@ class AgentQaServiceImplTest {
         KnowledgeRetriever retriever = mock(KnowledgeRetriever.class);
         AgentQaServiceImpl service = newService(retriever, new GeneratedAnswer("回答", List.of(), List.of()));
 
-        AgentQaResponse response = service.ask(request("今天的天气怎么样？"), schoolUser());
+        AgentQaResponse response = service.ask(
+                request("今天的天气怎么样？"), schoolUser()
+        ).block();
 
         assertEquals(AgentIntent.UNKNOWN, response.getIntent());
         assertEquals(KnowledgeRetrievalStatus.EMPTY, response.getRetrievalStatus());
@@ -123,13 +135,15 @@ class AgentQaServiceImplTest {
         KnowledgeRetriever retriever = mock(KnowledgeRetriever.class);
         when(retriever.retrieve(any(KnowledgeRetrieveRequest.class))).thenReturn(KnowledgeRetrieveResult.empty());
         AgentRuntimeClient runtime = mock(AgentRuntimeClient.class);
-        when(runtime.generate(any(), any(), any())).thenReturn(new AgentRuntimeResult(
+        when(runtime.generate(any(), any(), any())).thenReturn(Mono.just(new AgentRuntimeResult(
                 new GeneratedAnswer("问候回答", List.of(), List.of("你还可以问什么？")),
                 "thread-greeting", "degraded", List.of()
-        ));
+        )));
         AgentQaServiceImpl service = newRuntimeService(retriever, runtime);
 
-        AgentQaResponse response = service.ask(request("你好，你可以做什么？"), schoolUser());
+        AgentQaResponse response = service.ask(
+                request("你好，你可以做什么？"), schoolUser()
+        ).block();
 
         assertEquals(AgentIntent.UNKNOWN, response.getIntent());
         assertEquals("thread-greeting", response.getThreadId());
@@ -143,7 +157,9 @@ class AgentQaServiceImplTest {
         when(retriever.retrieve(any())).thenReturn(KnowledgeRetrieveResult.empty());
         AgentQaServiceImpl service = newService(retriever, new GeneratedAnswer("回答", List.of(), List.of()));
 
-        AgentQaResponse response = service.ask(request("附近有哪些红色资源？"), schoolUser());
+        AgentQaResponse response = service.ask(
+                request("附近有哪些红色资源？"), schoolUser()
+        ).block();
 
         assertEquals(KnowledgeRetrievalStatus.EMPTY, response.getRetrievalStatus());
     }
@@ -154,7 +170,9 @@ class AgentQaServiceImplTest {
         when(retriever.retrieve(any())).thenReturn(okResult());
         AgentQaServiceImpl service = newService(retriever, new GeneratedAnswer("回答", List.of(), List.of()));
 
-        AgentQaResponse response = service.ask(request("附近有哪些红色资源？"), schoolUser());
+        AgentQaResponse response = service.ask(
+                request("附近有哪些红色资源？"), schoolUser()
+        ).block();
 
         assertEquals(1, response.getCitations().size());
         assertEquals("chunk:1", response.getCitations().get(0).getCitationId());
@@ -166,7 +184,9 @@ class AgentQaServiceImplTest {
         when(retriever.retrieve(any())).thenThrow(new IllegalStateException("neo4j unavailable"));
         AgentQaServiceImpl service = newService(retriever, new GeneratedAnswer("回答", List.of(), List.of()));
 
-        AgentQaResponse response = service.ask(request("附近有哪些红色资源？"), schoolUser());
+        AgentQaResponse response = service.ask(
+                request("附近有哪些红色资源？"), schoolUser()
+        ).block();
 
         assertEquals(KnowledgeRetrievalStatus.DEGRADED, response.getRetrievalStatus());
     }
@@ -179,7 +199,10 @@ class AgentQaServiceImplTest {
         request.setScopeType("REGION");
         request.setScopeId(99L);
 
-        assertThrows(IllegalArgumentException.class, () -> service.ask(request, schoolUser()));
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> service.ask(request, schoolUser()).block()
+        );
         verify(retriever, never()).retrieve(any());
     }
 
@@ -188,20 +211,54 @@ class AgentQaServiceImplTest {
         KnowledgeRetriever retriever = mock(KnowledgeRetriever.class);
         when(retriever.retrieve(any(KnowledgeRetrieveRequest.class))).thenReturn(okResult());
         AgentRuntimeClient runtime = mock(AgentRuntimeClient.class);
-        when(runtime.generate(any(), any(), any())).thenReturn(new AgentRuntimeResult(
+        when(runtime.generate(any(), any(), any())).thenReturn(Mono.just(new AgentRuntimeResult(
                 new GeneratedAnswer("Agent 回答", List.of("chunk:1"), List.of("继续追问")),
                 "thread-1", "completed", List.of("retrieve_knowledge")
-        ));
+        )));
         AgentQaServiceImpl service = newRuntimeService(retriever, runtime);
         AgentQaRequest request = request("请介绍这个资源的教育价值。");
         request.setThreadId("thread-1");
 
-        AgentQaResponse response = service.ask(request, schoolUser());
+        AgentQaResponse response = service.ask(request, schoolUser()).block();
 
         assertEquals("thread-1", response.getThreadId());
         assertEquals("completed", response.getStatus());
         assertEquals(List.of("retrieve_knowledge"), response.getToolExecutions());
         assertEquals("Agent 回答", response.getAnswer());
+    }
+
+    @Test
+    void returnsAgentBusyEventsWhenBlockingSchedulerIsExhausted() {
+        SchoolMapService schoolMapService = mock(SchoolMapService.class);
+        Scheduler rejectingScheduler = Schedulers.fromExecutor(command -> {
+            throw new RejectedExecutionException("queue full");
+        });
+        AgentQaServiceImpl service = new AgentQaServiceImpl(
+                schoolMapService,
+                mock(TownMapService.class),
+                mock(LocalEduResourceService.class),
+                mock(KnowledgeRetriever.class),
+                new KeywordIntentRecognizer(),
+                context -> new GeneratedAnswer("fallback", List.of(), List.of()),
+                new CitationValidator(),
+                new AgentAccessGuard(schoolMapService),
+                null,
+                new AgentProperties(),
+                rejectingScheduler
+        );
+
+        try {
+            var events = service.stream(request("附近有哪些红色资源？"), schoolUser())
+                    .collectList()
+                    .block();
+
+            assertEquals(List.of("error", "done"),
+                    events.stream().map(event -> event.event()).toList());
+            assertEquals("agent_busy", events.get(0).data().get("code"));
+            assertEquals(Boolean.TRUE, events.get(0).data().get("retryable"));
+        } finally {
+            rejectingScheduler.dispose();
+        }
     }
 
     private AgentQaServiceImpl newService(KnowledgeRetriever retriever, GeneratedAnswer answer) {

@@ -1,33 +1,36 @@
 package com.redculture.platform.controller;
 
 import com.redculture.platform.common.ApiResponse;
-import com.redculture.platform.service.AgentQaService;
 import com.redculture.platform.config.AuthContext;
+import com.redculture.platform.service.AgentQaService;
+import com.redculture.platform.service.agent.AgentBusyException;
+import com.redculture.platform.service.agent.AgentUpstreamException;
 import com.redculture.platform.vo.AgentQaResponse;
 import com.redculture.platform.vo.AuthCurrentUserVO;
-import com.redculture.platform.vo.ai.AssistantConversationTurnCancellation;
 import com.redculture.platform.vo.ai.AgentActionVO;
+import com.redculture.platform.vo.ai.AssistantConversationTurnCancellation;
 import com.redculture.platform.vo.request.AgentActionDecisionRequest;
 import com.redculture.platform.vo.request.AgentQaRequest;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
-import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
+import org.springframework.http.codec.ServerSentEvent;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
-import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
-import org.springframework.http.MediaType;
-import org.springframework.http.ResponseEntity;
-import org.springframework.web.client.RestClientResponseException;
+import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
 
-import java.io.IOException;
+import java.util.LinkedHashMap;
 import java.util.Map;
 
 @RestController
 @RequestMapping("/api/ai/qa")
-//AI 助手问答：普通问答接口及 SSE 流式输出接口。
 public class AgentQaController {
 
     private final AgentQaService agentQaService;
@@ -36,117 +39,138 @@ public class AgentQaController {
         this.agentQaService = agentQaService;
     }
 
-    //对应普通问答接口
-    //前端传入 AgentQaRequest，例如用户问题、会话 ID、模型选择等；接口等待 AI 生成完成后，一次性返回完整的 AgentQaResponse。
     @PostMapping("/ask")
-    public ApiResponse<AgentQaResponse> ask(@RequestBody AgentQaRequest request, HttpServletRequest servletRequest) {
+    public Mono<ResponseEntity<ApiResponse<AgentQaResponse>>> ask(
+            @RequestBody AgentQaRequest request,
+            HttpServletRequest servletRequest) {
         AuthCurrentUserVO currentUser = AuthContext.currentUser(servletRequest);
         if (currentUser == null) {
-            return ApiResponse.fail(401, "school account is required");
+            return response(HttpStatus.UNAUTHORIZED, "school account is required");
         }
-        try {
-            return ApiResponse.success(agentQaService.ask(request, currentUser));
-        } catch (IllegalArgumentException exception) {
-            return ApiResponse.fail(exception.getMessage());
-        }
+        return Mono.defer(() -> agentQaService.ask(request, currentUser))
+                .map(value -> ResponseEntity.ok(ApiResponse.success(value)))
+                .onErrorResume(error -> responseError(error, "agent request failed"));
     }
 
-    //对应流式问答接口：
-    //AI 每生成一小段文字，前端就立刻显示，而无需等整段答案生成完毕
     @PostMapping(value = "/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
-    public SseEmitter stream(@RequestBody AgentQaRequest request,
-                             HttpServletRequest servletRequest,
-                             HttpServletResponse servletResponse) {
+    public Flux<ServerSentEvent<Map<String, Object>>> stream(
+            @RequestBody AgentQaRequest request,
+            HttpServletRequest servletRequest,
+            HttpServletResponse servletResponse) {
         servletResponse.setHeader("Cache-Control", "no-cache, no-transform");
         servletResponse.setHeader("X-Accel-Buffering", "no");
         AuthCurrentUserVO currentUser = AuthContext.currentUser(servletRequest);
         if (currentUser == null) {
-            return errorEmitter("AUTH_REQUIRED", "school account is required");
+            return errorEvents(
+                    "auth_required",
+                    "school account is required",
+                    request == null ? null : request.getClientTurnId(),
+                    false
+            );
         }
-        try {
-            return agentQaService.stream(request, currentUser);
-        } catch (IllegalArgumentException exception) {
-            return errorEmitter("REQUEST_INVALID", exception.getMessage());
-        }
+        return Flux.defer(() -> agentQaService.stream(request, currentUser))
+                .onErrorResume(error -> errorEvents(
+                        error instanceof IllegalArgumentException
+                                ? "request_invalid" : "agent_stream_interrupted",
+                        error instanceof IllegalArgumentException && error.getMessage() != null
+                                ? error.getMessage() : "连接中断，可使用同一 clientTurnId 恢复本轮执行",
+                        request == null ? null : request.getClientTurnId(),
+                        !(error instanceof IllegalArgumentException)
+                ));
     }
 
     @PostMapping("/turns/{clientTurnId}/cancel")
-    public ApiResponse<AssistantConversationTurnCancellation> cancelTurn(
-            @PathVariable String clientTurnId, HttpServletRequest servletRequest) {
+    public Mono<ResponseEntity<ApiResponse<AssistantConversationTurnCancellation>>> cancelTurn(
+            @PathVariable String clientTurnId,
+            HttpServletRequest servletRequest) {
         AuthCurrentUserVO currentUser = AuthContext.currentUser(servletRequest);
         if (currentUser == null) {
-            return ApiResponse.fail(401, "school account is required");
+            return response(HttpStatus.UNAUTHORIZED, "school account is required");
         }
-        try {
-            return ApiResponse.success(agentQaService.cancelTurn(clientTurnId, currentUser));
-        } catch (IllegalArgumentException exception) {
-            return ApiResponse.fail(exception.getMessage());
-        }
+        return Mono.defer(() -> agentQaService.cancelTurn(clientTurnId, currentUser))
+                .map(value -> ResponseEntity.ok(ApiResponse.success(value)))
+                .onErrorResume(error -> responseError(error, "cancel request failed"));
     }
 
     @GetMapping("/actions/{actionId}")
-    public ResponseEntity<ApiResponse<AgentActionVO>> getAction(
-            @PathVariable String actionId, HttpServletRequest servletRequest) {
+    public Mono<ResponseEntity<ApiResponse<AgentActionVO>>> getAction(
+            @PathVariable String actionId,
+            HttpServletRequest servletRequest) {
         AuthCurrentUserVO currentUser = AuthContext.currentUser(servletRequest);
         if (currentUser == null) {
-            return ResponseEntity.status(401).body(
-                    ApiResponse.fail(401, "school account is required"));
+            return response(HttpStatus.UNAUTHORIZED, "school account is required");
         }
-        try {
-            return ResponseEntity.ok(
-                    ApiResponse.success(agentQaService.getAction(actionId, currentUser)));
-        } catch (IllegalArgumentException exception) {
-            return ResponseEntity.badRequest().body(
-                    ApiResponse.fail(400, exception.getMessage()));
-        } catch (RestClientResponseException exception) {
-            return ResponseEntity.status(exception.getStatusCode()).body(
-                    ApiResponse.fail(exception.getStatusCode().value(),
-                            "action request was rejected"));
-        }
+        return Mono.defer(() -> agentQaService.getAction(actionId, currentUser))
+                .map(value -> ResponseEntity.ok(ApiResponse.success(value)))
+                .onErrorResume(error -> responseError(error, "action request was rejected"));
     }
 
     @PostMapping("/actions/{actionId}/decision")
-    public ResponseEntity<ApiResponse<AgentActionVO>> decideAction(
+    public Mono<ResponseEntity<ApiResponse<AgentActionVO>>> decideAction(
             @PathVariable String actionId,
             @RequestBody AgentActionDecisionRequest request,
             HttpServletRequest servletRequest) {
         AuthCurrentUserVO currentUser = AuthContext.currentUser(servletRequest);
         if (currentUser == null) {
-            return ResponseEntity.status(401).body(
-                    ApiResponse.fail(401, "school account is required"));
+            return response(HttpStatus.UNAUTHORIZED, "school account is required");
         }
-        try {
-            return ResponseEntity.ok(ApiResponse.success(agentQaService.decideAction(
-                    actionId, request == null ? null : request.getDecision(), currentUser)));
-        } catch (IllegalArgumentException exception) {
-            return ResponseEntity.badRequest().body(
-                    ApiResponse.fail(400, exception.getMessage()));
-        } catch (RestClientResponseException exception) {
-            return ResponseEntity.status(exception.getStatusCode()).body(
-                    ApiResponse.fail(exception.getStatusCode().value(),
-                            "action decision was rejected"));
-        }
+        return Mono.defer(() -> agentQaService.decideAction(
+                        actionId,
+                        request == null ? null : request.getDecision(),
+                        currentUser
+                ))
+                .map(value -> ResponseEntity.ok(ApiResponse.success(value)))
+                .onErrorResume(error -> responseError(error, "action decision was rejected"));
     }
 
-    //关闭连接，通知前端本轮请求已结束。
-    /*
-    两类错误会被转成 SSE 事件：
-场景	errorType	含义
-用户未登录	AUTH_REQUIRED	没有可用的学校账号身份，不能发起 AI 问答。
-请求参数不合法	REQUEST_INVALID	请求内容不符合要求，例如问题为空。
-     */
-    private SseEmitter errorEmitter(String errorType, String message) {
-        SseEmitter emitter = new SseEmitter(1000L);
-        try {
-            emitter.send(SseEmitter.event().name("error").data(Map.of(
-                    "errorType", errorType,
-                    "message", message == null ? "request failed" : message
-            )));
-            emitter.send(SseEmitter.event().name("done").data(Map.of()));
-            emitter.complete();
-        } catch (IOException exception) {
-            emitter.completeWithError(exception);
+    private <T> Mono<ResponseEntity<ApiResponse<T>>> response(
+            HttpStatus status, String message) {
+        return Mono.just(ResponseEntity.status(status).body(
+                ApiResponse.fail(status.value(), message)
+        ));
+    }
+
+    private <T> Mono<ResponseEntity<ApiResponse<T>>> responseError(
+            Throwable error, String fallbackMessage) {
+        if (error instanceof IllegalArgumentException) {
+            return response(
+                    HttpStatus.BAD_REQUEST,
+                    error.getMessage() == null ? fallbackMessage : error.getMessage()
+            );
         }
-        return emitter;
+        if (error instanceof AgentBusyException) {
+            return response(HttpStatus.SERVICE_UNAVAILABLE, "agent_busy");
+        }
+        if (error instanceof AgentUpstreamException upstream) {
+            HttpStatus status = HttpStatus.resolve(upstream.getStatusCode());
+            return response(
+                    status == null ? HttpStatus.BAD_GATEWAY : status,
+                    upstream.getCode()
+            );
+        }
+        return response(HttpStatus.BAD_GATEWAY, fallbackMessage);
+    }
+
+    private Flux<ServerSentEvent<Map<String, Object>>> errorEvents(
+            String code,
+            String message,
+            String clientTurnId,
+            boolean retryable) {
+        Map<String, Object> error = new LinkedHashMap<>();
+        error.put("code", code);
+        error.put("errorType", code);
+        error.put("message", message);
+        error.put("clientTurnId", clientTurnId);
+        error.put("retryable", retryable);
+        return Flux.just(
+                ServerSentEvent.<Map<String, Object>>builder()
+                        .event("error")
+                        .data(error)
+                        .build(),
+                ServerSentEvent.<Map<String, Object>>builder()
+                        .event("done")
+                        .data(Map.of())
+                        .build()
+        );
     }
 }
