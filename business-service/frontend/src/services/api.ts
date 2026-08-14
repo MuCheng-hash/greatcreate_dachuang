@@ -182,6 +182,14 @@ async function readJson(response: Response): Promise<unknown> {
   }
 }
 
+async function releaseResponseBody(response: Response): Promise<void> {
+  try {
+    await response.body?.cancel();
+  } catch {
+    // 释放旧响应属于尽力清理，失败不能阻断认证后的原请求重试。
+  }
+}
+
 async function refreshAccessToken(): Promise<boolean> {
   if (refreshPromise) return refreshPromise;
   refreshPromise = performAccessTokenRefresh();
@@ -241,7 +249,10 @@ export async function apiRequest<T = unknown>(path: string, options: ApiRequestO
 
       if (response.status === 401 && !refreshAttempted && path !== "/api/auth/refresh") {
         refreshAttempted = true;
-        if (await refreshAccessToken()) continue;
+        if (await refreshAccessToken()) {
+          await releaseResponseBody(response);
+          continue;
+        }
         dispatchUnauthorized();
       }
 
@@ -306,9 +317,10 @@ export async function streamRequest(
       throw new ApiError(`流式请求超时或网络不可用：${errorMessage(error)}`, 0);
     }
     if (response.status === 401 && !refreshAttempted) {
+      timeout.dispose();
       refreshAttempted = true;
       if (await refreshAccessToken()) {
-        timeout.dispose();
+        await releaseResponseBody(response);
         continue;
       }
       dispatchUnauthorized();
