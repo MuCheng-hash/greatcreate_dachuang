@@ -8,6 +8,26 @@ function jsonResponse(payload: unknown, status = 200): Response {
   });
 }
 
+function pendingJsonResponse(payload: unknown, status = 401): {
+  response: Response;
+  cancel: ReturnType<typeof vi.fn>;
+} {
+  const cancel = vi.fn();
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode(JSON.stringify(payload)));
+    },
+    cancel,
+  });
+  return {
+    response: new Response(body, {
+      status,
+      headers: { "Content-Type": "application/json" },
+    }),
+    cancel,
+  };
+}
+
 describe("typed api client", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
@@ -52,10 +72,14 @@ describe("typed api client", () => {
 
   it("refreshes once after 401 and retries the original request", async () => {
     const fetchMock = vi.mocked(fetch);
+    const stale = pendingJsonResponse({ code: 401, message: "expired" });
     fetchMock
-      .mockResolvedValueOnce(jsonResponse({ code: 401, message: "expired" }, 401))
+      .mockResolvedValueOnce(stale.response)
       .mockResolvedValueOnce(jsonResponse({ code: 200, data: { refreshed: true } }))
-      .mockResolvedValueOnce(jsonResponse({ code: 200, data: { accountId: 7 } }));
+      .mockImplementationOnce(async () => {
+        expect(stale.cancel).toHaveBeenCalledTimes(1);
+        return jsonResponse({ code: 200, data: { accountId: 7 } });
+      });
 
     await expect(api.get("/api/auth/me")).resolves.toEqual({ accountId: 7 });
     expect(fetchMock.mock.calls.map(([path]) => path)).toEqual([
@@ -67,6 +91,10 @@ describe("typed api client", () => {
 
   it("shares one refresh request across concurrent 401 responses", async () => {
     const fetchMock = vi.mocked(fetch);
+    const staleResponses = [
+      pendingJsonResponse({ code: 401, message: "expired" }),
+      pendingJsonResponse({ code: 401, message: "expired" }),
+    ];
     let protectedCalls = 0;
     let refreshCalls = 0;
     fetchMock.mockImplementation(async (path) => {
@@ -77,13 +105,44 @@ describe("typed api client", () => {
       }
       protectedCalls += 1;
       return protectedCalls <= 2
-        ? jsonResponse({ code: 401, message: "expired" }, 401)
+        ? staleResponses[protectedCalls - 1].response
         : jsonResponse({ code: 200, data: { ok: true } });
     });
 
     await expect(Promise.all([api.get("/api/one"), api.get("/api/two")]))
       .resolves.toEqual([{ ok: true }, { ok: true }]);
     expect(refreshCalls).toBe(1);
+    expect(staleResponses[0].cancel).toHaveBeenCalledTimes(1);
+    expect(staleResponses[1].cancel).toHaveBeenCalledTimes(1);
+  });
+
+  it("continues the retry when releasing a stale 401 response fails", async () => {
+    const fetchMock = vi.mocked(fetch);
+    const stale = pendingJsonResponse({ code: 401, message: "expired" });
+    stale.cancel.mockRejectedValueOnce(new Error("cancel failed"));
+    fetchMock
+      .mockResolvedValueOnce(stale.response)
+      .mockResolvedValueOnce(jsonResponse({ code: 200, data: { refreshed: true } }))
+      .mockResolvedValueOnce(jsonResponse({ code: 200, data: { ok: true } }));
+
+    await expect(api.get("/api/protected")).resolves.toEqual({ ok: true });
+    expect(stale.cancel).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the original 401 payload when token refresh fails", async () => {
+    const fetchMock = vi.mocked(fetch);
+    const stale = jsonResponse({ code: 401, message: "expired" }, 401);
+    const cancel = vi.spyOn(stale.body!, "cancel");
+    fetchMock
+      .mockResolvedValueOnce(stale)
+      .mockResolvedValueOnce(jsonResponse({ code: 500, message: "refresh failed" }, 500));
+
+    await expect(api.get("/api/protected")).rejects.toMatchObject({
+      status: 401,
+      message: "expired",
+      payload: { code: 401, message: "expired" },
+    });
+    expect(cancel).not.toHaveBeenCalled();
   });
 
   it("retries transient GET failures with a bounded retry count", async () => {
@@ -221,23 +280,53 @@ describe("typed api client", () => {
   it("cleans the first SSE attempt before retrying after a 401", async () => {
     vi.useFakeTimers();
     const fetchMock = vi.mocked(fetch);
+    const stale = pendingJsonResponse({ code: 401, message: "expired" });
+    let firstAttemptSignal: AbortSignal | undefined;
+    let resolveRefresh: ((response: Response) => void) | undefined;
     fetchMock
-      .mockResolvedValueOnce(jsonResponse({ code: 401, message: "expired" }, 401))
-      .mockResolvedValueOnce(jsonResponse({ code: 200, data: { refreshed: true } }))
+      .mockImplementationOnce(async (_path, init) => {
+        firstAttemptSignal = init?.signal || undefined;
+        return stale.response;
+      })
+      .mockImplementationOnce(() => new Promise<Response>((resolve) => {
+        resolveRefresh = resolve;
+      }))
       .mockResolvedValueOnce(new Response(
         "event: done\ndata: {\"runId\":\"run-1\"}\n\n",
         { status: 200, headers: { "Content-Type": "text/event-stream" } },
       ));
 
-    await expect(api.stream("/api/ai/qa/stream", {})).resolves.toMatchObject({
+    const request = api.stream("/api/ai/qa/stream", {}, { connectTimeoutMs: 20 });
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(25);
+    expect(firstAttemptSignal?.aborted).toBe(false);
+
+    resolveRefresh?.(jsonResponse({ code: 200, data: { refreshed: true } }));
+    await expect(request).resolves.toMatchObject({
       event: "done",
     });
 
+    expect(stale.cancel).toHaveBeenCalledTimes(1);
     expect(fetchMock.mock.calls.map(([path]) => path)).toEqual([
       "/api/ai/qa/stream",
       "/api/auth/refresh",
       "/api/ai/qa/stream",
     ]);
     expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("keeps the original SSE 401 payload when token refresh fails", async () => {
+    const fetchMock = vi.mocked(fetch);
+    const stale = jsonResponse({ code: 401, message: "stream expired" }, 401);
+    const cancel = vi.spyOn(stale.body!, "cancel");
+    fetchMock
+      .mockResolvedValueOnce(stale)
+      .mockResolvedValueOnce(jsonResponse({ code: 500, message: "refresh failed" }, 500));
+
+    await expect(api.stream("/api/ai/qa/stream", {})).rejects.toMatchObject({
+      status: 401,
+      message: "stream expired",
+    });
+    expect(cancel).not.toHaveBeenCalled();
   });
 });
