@@ -43,6 +43,8 @@ from .schemas import (
     MemoryItem,
     ToolExecution,
     TrustedContext,
+    ResourceDiscoveryOutput,
+    TeachingPlanOutput,
 )
 from .settings import ModelConfig, Settings
 from .turns import (
@@ -768,9 +770,14 @@ class AgentRuntime:
                 base_url="",
                 api_key="injected",
                 fallback_level=0,
+                supports_json_object=True,
             )
             return [(config, self._agent)]
-        return [(config, None) for config in self.model.model_configs_for(model_id)]
+        return [
+            (config, None)
+            for config in self.model.model_configs_for(model_id)
+            if config.supports_json_object
+        ]
 
     async def _create_agent_for(
         self, config: ModelConfig, checkpoint_namespace: str
@@ -783,7 +790,9 @@ class AgentRuntime:
                 self.settings.agent_write_tools_enabled
             )
             self._agents[key] = create_agent(
-                self.model.build_model(config),
+                self.model.build_model(config).bind(
+                    response_format={"type": "json_object"}
+                ),
                 tools=AGENT_TOOLS,
                 system_prompt=await self._load_prompt(),
                 checkpointer=self.checkpoints.scoped_saver(
@@ -1414,7 +1423,15 @@ class AgentRuntime:
         )
         model_kwargs = {"model_id": request.model_id} if request.model_id else {}
         generated, metadata = await self.model.generate_json_with_metadata(
-            selection.content, trace_context, validator, **model_kwargs
+            selection.content,
+            trace_context,
+            validator,
+            response_schema=(
+                TeachingPlanOutput
+                if request.task_type == "TEACHING_PLAN"
+                else ResourceDiscoveryOutput
+            ),
+            **model_kwargs,
         )
         memory_candidates: list[MemoryItem] = []
         if generated is None:
@@ -1513,6 +1530,16 @@ class AgentRuntime:
                 continue
             elif event_name == "fallback":
                 error_message = str(data.get("errorType") or "model_failed")
+                await emit(
+                    "response.reset",
+                    {
+                        "clientTurnId": request.client_turn_id,
+                        "reason": "model_fallback",
+                        "failedModel": data.get("failedModel"),
+                        "nextModel": data.get("nextModel"),
+                        "errorType": error_message,
+                    },
+                )
                 await emit("model.failed", data)
             elif event_name == "complete":
                 generated = data.get("result") if isinstance(data.get("result"), dict) else None
@@ -2406,44 +2433,24 @@ class AgentRuntime:
             raise ValueError("invalid_model_output")
 
         payload = ModelGateway.parse_json(final_content)
-        if payload is not None:
-            try:
-                parsed = AgentModelOutput.model_validate(payload)
-            except (ValueError, TypeError) as exc:
-                raise ValueError("invalid_model_output") from exc
-            if not parsed.answer.strip():
-                raise ValueError("invalid_model_output")
-            return parsed
-
-        # 普通 CHAT 允许兼容返回纯文本；结构化任务仍由各自 validator 严格校验。
-        plain_answer = self._plain_text_answer(final_content)
-        if not plain_answer:
+        if payload is None:
             raise ValueError("invalid_model_output")
-        return AgentModelOutput(answer=plain_answer)
+        try:
+            parsed = AgentModelOutput.model_validate(payload)
+        except (ValueError, TypeError) as exc:
+            raise ValueError("invalid_model_output") from exc
+        if not parsed.answer.strip():
+            raise ValueError("invalid_model_output")
+        return parsed
 
     def _partial_answer(self, content: str) -> str:
-        normalized = content.strip()
-        if not normalized:
+        payload = ModelGateway.parse_json(content)
+        if payload is None:
             return ""
-        parsed_payload = ModelGateway.parse_json(normalized)
-        if parsed_payload is not None and isinstance(parsed_payload.get("answer"), str):
-            return parsed_payload["answer"]
-        candidate = self._strip_json_fence(normalized)
         try:
-            parsed = json.loads(candidate)
-            if isinstance(parsed, dict) and isinstance(parsed.get("answer"), str):
-                return parsed["answer"]
-        except (ValueError, TypeError, json.JSONDecodeError):
-            pass
-        match = re.search(r'"answer"\s*:\s*"((?:\\.|[^"\\])*)', candidate)
-        if match:
-            try:
-                return json.loads('"' + match.group(1) + '"')
-            except (ValueError, json.JSONDecodeError):
-                return match.group(1)
-        if "{" in normalized or normalized.startswith("```"):
+            return AgentModelOutput.model_validate(payload).answer
+        except (ValueError, TypeError):
             return ""
-        return self._plain_text_answer(normalized)
 
     @staticmethod
     def _plain_text_answer(content: str) -> str:
@@ -2464,15 +2471,6 @@ class AgentRuntime:
             return ""
         return normalized
 
-    def _strip_json_fence(self, value: str) -> str:
-        normalized = value.strip()
-        if normalized.startswith("```"):
-            normalized = normalized[3:]
-            if normalized.startswith("json"):
-                normalized = normalized[4:]
-            if normalized.endswith("```"):
-                normalized = normalized[:-3]
-        return normalized.strip()
 
     def _stream_messages(self, chunk: Any) -> list[Any]:
         if isinstance(chunk, (AIMessage, AIMessageChunk)):

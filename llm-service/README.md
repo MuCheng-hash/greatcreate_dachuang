@@ -270,11 +270,14 @@ $env:AGENT_PRIMARY_PROVIDER = "bailian"
 $env:AGENT_PRIMARY_MODEL = "qwen-plus"
 $env:AGENT_PRIMARY_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 $env:AGENT_PRIMARY_API_KEY = "你的百炼API_KEY"
+$env:AGENT_PRIMARY_SUPPORTS_JSON_OBJECT = "true"
 
 $env:AGENT_FALLBACK_PROVIDER = "ollama"
 $env:AGENT_FALLBACK_MODEL = "qwen3:8b"
 $env:AGENT_FALLBACK_BASE_URL = "http://127.0.0.1:11434/v1"
 $env:AGENT_FALLBACK_API_KEY = "ollama"
+# Only set this after verifying the installed Ollama model/server honors JSON mode.
+$env:AGENT_FALLBACK_SUPPORTS_JSON_OBJECT = "true"
 python app.py
 ```
 

@@ -5,6 +5,7 @@ from dataclasses import replace
 from typing import Any, Callable
 
 from langchain_openai import ChatOpenAI
+from pydantic import BaseModel
 
 from .observability import (
     FallbackAlertManager,
@@ -73,6 +74,9 @@ class ModelGateway:
                 base_url=target.base_url,
                 api_key=target.api_key,
                 fallback_level=target.fallback_level,
+                supports_json_object=target.supports_json_object,
+                supports_json_schema=target.supports_json_schema,
+                supports_structured_tool_output=target.supports_structured_tool_output,
             )
             for target, _model in self.chat_models
         )
@@ -89,6 +93,9 @@ class ModelGateway:
                 "provider": target.provider,
                 "model": target.model,
                 "isDefault": index == 0,
+                "supportsJsonObject": target.supports_json_object,
+                "supportsJsonSchema": target.supports_json_schema,
+                "supportsStructuredToolOutput": target.supports_structured_tool_output,
             }
             for index, (target, _model) in enumerate(self.chat_models)
         ]
@@ -124,6 +131,9 @@ class ModelGateway:
             api_url=config.base_url,
             api_key=config.api_key,
             fallback_level=config.fallback_level,
+            supports_json_object=config.supports_json_object,
+            supports_json_schema=config.supports_json_schema,
+            supports_structured_tool_output=config.supports_structured_tool_output,
         )
         model = self._build_model(target)
         self.chat_models.append((target, model))
@@ -135,9 +145,10 @@ class ModelGateway:
         trace_context: LlmTraceContext | None = None,
         validator: Callable[[dict[str, Any]], bool] | None = None,
         model_id: str | None = None,
+        response_schema: type[BaseModel] | None = None,
     ) -> dict[str, Any] | None:
         result, _metadata = await self.generate_json_with_metadata(
-            prompt, trace_context, validator, model_id
+            prompt, trace_context, validator, model_id, response_schema
         )
         return result
 
@@ -147,6 +158,7 @@ class ModelGateway:
         trace_context: LlmTraceContext | None = None,
         validator: Callable[[dict[str, Any]], bool] | None = None,
         model_id: str | None = None,
+        response_schema: type[BaseModel] | None = None,
     ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
         context = trace_context or LlmTraceContext(feature="unclassified")
         attempts: list[dict[str, Any]] = []
@@ -156,11 +168,26 @@ class ModelGateway:
             config = self._trace_config(attempt_context, target, validator)
             error_type = "invalid_response"
             try:
-                response = await model.ainvoke(self._messages(prompt), config=config)
-                parsed = self.parse_json(message_text(response.content))
+                if not target.supports_json_object and not (
+                    response_schema is not None and target.supports_json_schema
+                ):
+                    error_type = "structured_output_unsupported"
+                    raise StructuredOutputUnsupported(target.model)
+                if response_schema is not None and target.supports_json_schema:
+                    response = await model.with_structured_output(response_schema).ainvoke(
+                        self._messages(prompt), config=config
+                    )
+                    parsed = self._structured_response_dict(response)
+                else:
+                    response = await self._json_mode_model(model).ainvoke(
+                        self._messages(prompt), config=config
+                    )
+                    parsed = self.parse_json(message_text(response.content))
                 if parsed is not None and (validator is None or validator(parsed)):
                     return parsed, self._target_data(target)
-                error_type = "schema_validation" if parsed is not None else "json_parse"
+                error_type = "schema_validation" if parsed is not None else "json_mode_protocol_violation"
+            except StructuredOutputUnsupported:
+                pass
             except Exception as exc:
                 error_type = classify_llm_error(exc)
             attempts.append(self._attempt(target, error_type))
@@ -189,7 +216,10 @@ class ModelGateway:
             stream_buffer = ""
             error_type = "invalid_response"
             try:
-                async for chunk in model.astream(
+                if not target.supports_json_object:
+                    error_type = "structured_output_unsupported"
+                    raise StructuredOutputUnsupported(target.model)
+                async for chunk in self._json_mode_model(model).astream(
                     self._messages(prompt),
                     config=self._trace_config(attempt_context, target, validator),
                 ):
@@ -202,7 +232,9 @@ class ModelGateway:
                 if parsed is not None and (validator is None or validator(parsed)):
                     yield "complete", {"result": parsed, **self._target_data(target)}
                     return
-                error_type = "schema_validation" if parsed is not None else "json_parse"
+                error_type = "schema_validation" if parsed is not None else "json_mode_protocol_violation"
+            except StructuredOutputUnsupported:
+                pass
             except Exception as exc:
                 error_type = classify_llm_error(exc)
             attempts.append(self._attempt(target, error_type))
@@ -293,7 +325,7 @@ class ModelGateway:
     @staticmethod
     def _messages(prompt: str) -> list[tuple[str, str]]:
         return [
-            ("system", "Return one valid JSON object only. Do not wrap it in Markdown."),
+            ("system", "Return exactly one JSON object. Do not use Markdown, prose, duplicate keys, or fields outside the requested schema."),
             ("user", prompt),
         ]
 
@@ -304,6 +336,9 @@ class ModelGateway:
             "model": target.model,
             "modelRole": target.role,
             "fallbackLevel": target.fallback_level,
+            "supportsJsonObject": target.supports_json_object,
+            "supportsJsonSchema": target.supports_json_schema,
+            "supportsStructuredToolOutput": target.supports_structured_tool_output,
         }
 
     @staticmethod
@@ -316,13 +351,7 @@ class ModelGateway:
 
     @staticmethod
     def parse_json(content: str) -> dict[str, Any] | None:
-        """Extract the first valid JSON object from a model response.
-
-        Providers do not all honor the same structured-output behavior. Some
-        return a JSON object directly, while others wrap it in Markdown or a
-        short explanatory sentence. Keep the result contract strict (a JSON
-        object) but tolerate that harmless presentation difference.
-        """
+        """Decode a complete JSON object without attempting textual recovery."""
         if not isinstance(content, str):
             return None
 
@@ -330,14 +359,22 @@ class ModelGateway:
         if not normalized:
             return None
 
-        decoder = json.JSONDecoder()
-        for start, character in enumerate(normalized):
-            if character != "{":
-                continue
-            try:
-                parsed, _end = decoder.raw_decode(normalized, start)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(parsed, dict):
-                return parsed
-        return None
+        try:
+            parsed = json.loads(normalized)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return None
+        return parsed if isinstance(parsed, dict) else None
+
+    @staticmethod
+    def _json_mode_model(model: ChatOpenAI) -> Any:
+        return model.bind(response_format={"type": "json_object"})
+
+    @staticmethod
+    def _structured_response_dict(response: Any) -> dict[str, Any] | None:
+        if isinstance(response, BaseModel):
+            return response.model_dump(by_alias=True)
+        return response if isinstance(response, dict) else None
+
+
+class StructuredOutputUnsupported(RuntimeError):
+    pass

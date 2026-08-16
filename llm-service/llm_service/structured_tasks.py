@@ -4,6 +4,7 @@ import json
 from typing import Any
 
 from .schemas import AgentMessageRequest, TrustedContext
+from .schemas import ResourceDiscoveryOutput, TeachingPlanOutput
 
 
 RESOURCE_CATEGORIES = {
@@ -62,14 +63,19 @@ def task_context(
 
 
 def teaching_plan_valid(value: dict[str, Any]) -> bool:
-    return all(
-        isinstance(value.get(field), list) and bool(value.get(field))
-        for field in ("objectives", "activityFlow")
-    )
+    try:
+        TeachingPlanOutput.model_validate(value)
+    except (TypeError, ValueError):
+        return False
+    return True
 
 
 def resource_discovery_valid(value: dict[str, Any]) -> bool:
-    return isinstance(value.get("results"), list)
+    try:
+        ResourceDiscoveryOutput.model_validate(value)
+    except (TypeError, ValueError):
+        return False
+    return True
 
 
 def _safe_plan_message(value: Any) -> str:

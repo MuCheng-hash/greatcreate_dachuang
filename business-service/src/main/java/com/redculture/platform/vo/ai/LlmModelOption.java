@@ -9,4 +9,7 @@ public class LlmModelOption {
     private String provider;
     private String model;
     private boolean isDefault;
+    private boolean supportsJsonObject;
+    private boolean supportsJsonSchema;
+    private boolean supportsStructuredToolOutput;
 }

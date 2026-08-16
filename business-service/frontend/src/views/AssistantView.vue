@@ -112,6 +112,7 @@ const conversationId = ref<string>(loadConversationId());
 const activeAbortController = ref<AbortController | null>(null);
 const threadId = ref<string>(loadThreadId());
 const models = ref<LlmModelOption[]>([]);
+const structuredModels = computed(() => models.value.filter((item) => item.supportsJsonObject !== false));
 const selectedModelId = ref<string>("");
 const history = ref<AssistantConversationSummary[]>([]);
 const historyLoading = ref<boolean>(false);
@@ -1709,7 +1710,7 @@ function clearChat(): void {
                 <span class="visually-hidden">回答模型</span>
                 <select v-model="selectedModelId" class="composer-model-select" aria-label="回答模型" :disabled="readOnlyConversation || loading">
                   <option value="">系统默认</option>
-                  <option v-for="item in models" :key="item.id" :value="item.id">{{ item.displayName }} · {{ item.provider }}</option>
+                  <option v-for="item in structuredModels" :key="item.id" :value="item.id">{{ item.displayName }} · {{ item.provider }}</option>
                 </select>
               </label>
             </div>

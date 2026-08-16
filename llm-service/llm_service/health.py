@@ -134,11 +134,27 @@ class HealthService:
 
     def _check_model_chain(self) -> DependencyHealth:
         started = time.perf_counter()
-        configured = len(self.settings.model_chain)
+        targets = self.settings.model_chain
+        configured = len(targets)
+        structured = sum(
+            1
+            for target in targets
+            if target.supports_json_object or target.supports_json_schema
+        )
         required = self.settings.require_llm_model
+        if configured and (structured or not required):
+            return self._result(
+                "up",
+                required,
+                started,
+                f"{configured} model target(s) configured; {structured} declared for structured output",
+            )
         if configured:
             return self._result(
-                "up", required, started, f"{configured} model target(s) configured"
+                "down",
+                required,
+                started,
+                "no configured model declares JSON object or JSON schema support",
             )
         return self._result(
             "down", required, started, "no model target configured"

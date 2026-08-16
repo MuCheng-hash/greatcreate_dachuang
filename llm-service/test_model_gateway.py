@@ -17,13 +17,19 @@ class FakeModel:
     def __init__(self, content: str = "", error: Exception | None = None):
         self.content = content
         self.error = error
+        self.invoke_calls = 0
 
     async def ainvoke(self, _messages, config=None):
+        self.invoke_calls += 1
         if self.error:
             raise self.error
         return FakeResponse(self.content)
 
+    def bind(self, **_kwargs):
+        return self
+
     async def astream(self, _messages, config=None):
+        self.invoke_calls += 1
         if self.error:
             raise self.error
         midpoint = max(1, len(self.content) // 2)
@@ -43,17 +49,48 @@ def router_settings() -> Settings:
         llm_fallback_model="gpt-3.5",
         llm_lightweight_api_url="http://127.0.0.1:11434/v1",
         llm_lightweight_model="qwen3:8b",
+        agent_primary_supports_json_object=True,
+        agent_fallback_supports_json_object=True,
+        agent_lightweight_supports_json_object=True,
     )
 
 
 class ModelGatewayFallbackTest(unittest.IsolatedAsyncioTestCase):
+    def test_strict_json_decoder_rejects_text_fences_and_multiple_objects(self) -> None:
+        self.assertEqual({"answer": "ok"}, ModelGateway.parse_json('{"answer":"ok"}'))
+        for invalid in (
+            '说明：{"answer":"ok"}',
+            '```json\n{"answer":"ok"}\n```',
+            '{"answer":"one"}{"answer":"two"}',
+            '{"answer":',
+        ):
+            self.assertIsNone(ModelGateway.parse_json(invalid))
+
+    async def test_skips_model_without_declared_json_capability(self) -> None:
+        settings = router_settings().model_copy(update={
+            "agent_primary_supports_json_object": False,
+            "agent_fallback_supports_json_object": True,
+            "agent_lightweight_supports_json_object": False,
+        })
+        primary = FakeModel('{"answer":"must not be called"}')
+        fallback = FakeModel('{"answer":"fallback"}')
+        alerts = Mock(spec=FallbackAlertManager)
+        with patch.object(ModelGateway, "_build_model", side_effect=[primary, fallback, FakeModel()]):
+            gateway = ModelGateway(settings, alerts=alerts)
+
+        result, metadata = await gateway.generate_json_with_metadata("prompt")
+
+        self.assertEqual({"answer": "fallback"}, result)
+        self.assertEqual("gpt-3.5", metadata["model"])
+        self.assertEqual(0, primary.invoke_calls)
+        self.assertEqual("structured_output_unsupported", alerts.fallback.call_args.args[3])
     async def test_arbitrary_deepseek_and_ernie_models_form_selectable_chain(self) -> None:
         settings = Settings(
             _env_file=None,
             database_url="postgresql://test:test@127.0.0.1/test",
             llm_models=[
-                {"id": "deepseek", "provider": "deepseek", "model": "deepseek-chat", "apiUrl": "https://deepseek.test/v1", "apiKey": "key-a"},
-                {"id": "ernie", "provider": "qianfan", "model": "ernie-test", "apiUrl": "https://qianfan.test/v2", "apiKey": "key-b"},
+                {"id": "deepseek", "provider": "deepseek", "model": "deepseek-chat", "apiUrl": "https://deepseek.test/v1", "apiKey": "key-a", "supportsJsonObject": True},
+                {"id": "ernie", "provider": "qianfan", "model": "ernie-test", "apiUrl": "https://qianfan.test/v2", "apiKey": "key-b", "supportsJsonObject": True},
             ],
         )
         with patch.object(ModelGateway, "_build_model", side_effect=[FakeModel(), FakeModel()]):
@@ -136,7 +173,10 @@ class ModelGatewayFallbackTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(result)
         attempts = alerts.exhausted.call_args.args[1]
         self.assertEqual(["gpt-4", "gpt-3.5", "qwen3:8b"], [item["model"] for item in attempts])
-        self.assertEqual(["json_parse", "json_parse", "network"], [item["errorType"] for item in attempts])
+        self.assertEqual(
+            ["json_mode_protocol_violation", "json_mode_protocol_violation", "network"],
+            [item["errorType"] for item in attempts],
+        )
 
     async def test_stream_emits_reset_boundary_before_next_model(self) -> None:
         models = [FakeModel("invalid"), FakeModel('{"answer":"fallback"}'), FakeModel("unused")]

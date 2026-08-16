@@ -8,6 +8,8 @@ from typing import Any
 from .model_gateway import ModelGateway
 from .observability import LlmTraceContext
 from .prompt_manager import PromptManager, PromptSelection
+from .schemas import AgentModelOutput, ResourceDiscoveryOutput, TeachingPlanOutput
+from .structured_tasks import IncrementalTeachingPlanParser
 
 
 def compact_list(values: list[Any], limit: int = 6) -> list[str]:
@@ -128,10 +130,19 @@ def _normalize_generated_plan(generated: dict[str, Any], payload: dict[str, Any]
 
 
 def _valid_teaching_plan(generated: dict[str, Any]) -> bool:
-    return all(
-        isinstance(generated.get(field), list) and bool(generated.get(field))
-        for field in ("objectives", "activityFlow")
-    )
+    try:
+        TeachingPlanOutput.model_validate(generated)
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
+def _valid_agent_output(generated: dict[str, Any]) -> bool:
+    try:
+        AgentModelOutput.model_validate(generated)
+    except (TypeError, ValueError):
+        return False
+    return True
 
 
 def _attach_prompt_metadata(
@@ -163,6 +174,7 @@ async def build_structured_teaching_plan(
             metadata={"promptVersion": selection.version, "promptRunId": run_id},
         ),
         _valid_teaching_plan,
+        response_schema=TeachingPlanOutput,
     )
     if generated:
         result = _normalize_generated_plan(generated, payload)
@@ -198,6 +210,7 @@ async def stream_structured_teaching_plan(
     error_message = ""
     generated: dict[str, Any] | None = None
     selected_model: dict[str, Any] = {}
+    parser = IncrementalTeachingPlanParser()
     user_id, session_id = _trace_identity(payload, run_id)
     trace_context = LlmTraceContext(
         feature="teaching-plan-stream",
@@ -219,13 +232,15 @@ async def stream_structured_teaching_plan(
         elif gateway_event == "token":
             token = str(gateway_data.get("delta") or "")
             raw_parts.append(token)
-            yield "token", {"delta": token}
+            for patch in parser.feed(token):
+                yield "plan.patch", {"patch": patch}
         elif gateway_event == "fallback":
             raw_parts.clear()
+            parser = IncrementalTeachingPlanParser()
             error_message = str(gateway_data.get("errorType") or "model_failed")
-            yield "fallback", {
+            yield "response.reset", {
                 **gateway_data,
-                "reset": True,
+                "reason": "model_fallback",
                 "message": f"模型不可用，正在切换到 {gateway_data['nextModel']}",
             }
         elif gateway_event == "complete":
@@ -234,12 +249,12 @@ async def stream_structured_teaching_plan(
         elif gateway_event == "exhausted":
             raw_parts.clear()
             error_message = "all configured models failed"
-            yield "fallback", {
+            yield "response.reset", {
                 "failedModel": selected_model.get("model"),
                 "nextModel": "local-evidence-fallback",
                 "errorType": "fallback_exhausted",
                 "fallbackLevel": "local",
-                "reset": True,
+                "reason": "fallback_exhausted",
                 "message": "模型服务暂不可用，正在生成基于检索证据的本地方案",
             }
 
@@ -255,10 +270,6 @@ async def stream_structured_teaching_plan(
             message="模型流不可用或返回格式无效，已生成本地结构化兜底方案。",
         )
         status = "degraded"
-        fallback_text = json.dumps(result, ensure_ascii=False)
-        if not raw_parts:
-            for start in range(0, len(fallback_text), 18):
-                yield "token", {"delta": fallback_text[start:start + 18]}
     elapsed = round((time.perf_counter() - started) * 1000)
     await prompts.finish_run(
         run_id, status, elapsed, len("".join(raw_parts)) or len(json.dumps(result, ensure_ascii=False)), error_message
@@ -296,6 +307,7 @@ async def build_resource_discovery_classification(payload: dict[str, Any], model
             metadata={"candidateCount": len(candidates)},
         ),
         lambda value: isinstance(value.get("results"), list),
+        response_schema=ResourceDiscoveryOutput,
     )
     if not isinstance(generated, dict) or not isinstance(generated.get("results"), list):
         return {"analysisStatus": "unavailable", "message": "LLM 未配置或暂时不可用，保留高德原始地点等待分析。", "results": []}
@@ -354,7 +366,9 @@ def build_agent_answer_prompt(payload: dict[str, Any]) -> str:
     return (
         "你是学校本土思政教育 Agent 的答案生成器。只能依据给定的业务上下文和检索证据回答，"
         "不能编造学校、资源、人物、来源或引用。请只输出严格 JSON，字段必须包含 answer、"
-        "citationIds、relatedResources、followUpQuestions。citationIds 只能使用 evidence 中的值。"
+        "intent、retrievalStatus、citationIds、relatedResources、followUpQuestions。intent 必须是 "
+        "NEARBY_RESOURCE、TEACHING_SUGGESTION、RESOURCE_EXPLANATION、RELATION_QUERY 或 UNKNOWN；"
+        "retrievalStatus 必须是 ok、empty 或 degraded。citationIds 只能使用 evidence 中的值。"
         f"\n上下文：{json.dumps(context, ensure_ascii=False)}"
     )
 
@@ -402,7 +416,11 @@ def build_agent_answer_fallback(payload: dict[str, Any], message: str | None = N
 
 
 async def build_agent_answer(payload: dict[str, Any], model: ModelGateway) -> dict[str, Any]:
-    generated = await model.generate_json(build_agent_answer_prompt(payload))
+    generated = await model.generate_json(
+        build_agent_answer_prompt(payload),
+        validator=_valid_agent_output,
+        response_schema=AgentModelOutput,
+    )
     available_ids = set(agent_evidence_citation_ids(payload))
     if isinstance(generated, dict) and generated.get("answer"):
         raw_ids = generated.get("citationIds") or []

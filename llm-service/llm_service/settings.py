@@ -27,6 +27,9 @@ class LlmModelTarget:
     api_url: str
     api_key: str
     fallback_level: int
+    supports_json_object: bool = False
+    supports_json_schema: bool = False
+    supports_structured_tool_output: bool = False
 
     @property
     def configured(self) -> bool:
@@ -48,6 +51,9 @@ class ModelConfig:
     base_url: str
     api_key: str
     fallback_level: int = 0
+    supports_json_object: bool = False
+    supports_json_schema: bool = False
+    supports_structured_tool_output: bool = False
 
     def configured(self) -> bool:
         return bool(self.model and self.api_key)
@@ -115,14 +121,23 @@ class Settings(BaseSettings):
     agent_primary_model: str = ""
     agent_primary_base_url: str = ""
     agent_primary_api_key: str = ""
+    agent_primary_supports_json_object: bool = False
+    agent_primary_supports_json_schema: bool = False
+    agent_primary_supports_structured_tool_output: bool = False
     agent_fallback_provider: str = ""
     agent_fallback_model: str = ""
     agent_fallback_base_url: str = ""
     agent_fallback_api_key: str = ""
+    agent_fallback_supports_json_object: bool = False
+    agent_fallback_supports_json_schema: bool = False
+    agent_fallback_supports_structured_tool_output: bool = False
     agent_lightweight_provider: str = "ollama"
     agent_lightweight_model: str = ""
     agent_lightweight_base_url: str = ""
     agent_lightweight_api_key: str = ""
+    agent_lightweight_supports_json_object: bool = False
+    agent_lightweight_supports_json_schema: bool = False
+    agent_lightweight_supports_structured_tool_output: bool = False
     agent_max_iterations: int = 4
     agent_max_history_messages: int = 20
     agent_prompt_version: str = "v1"
@@ -375,15 +390,24 @@ class Settings(BaseSettings):
             LlmModelTarget(
                 "primary", primary_provider, primary_model,
                 primary_api_url, primary_api_key, 0,
+                self.agent_primary_supports_json_object,
+                self.agent_primary_supports_json_schema,
+                self.agent_primary_supports_structured_tool_output,
             ),
             LlmModelTarget(
                 "fallback", fallback_provider, fallback_model,
                 fallback_api_url, fallback_api_key, 1,
+                self.agent_fallback_supports_json_object,
+                self.agent_fallback_supports_json_schema,
+                self.agent_fallback_supports_structured_tool_output,
             ),
             LlmModelTarget(
                 "lightweight", lightweight_provider, lightweight_model,
                 lightweight_api_url, lightweight_api_key,
                 2,
+                self.agent_lightweight_supports_json_object,
+                self.agent_lightweight_supports_json_schema,
+                self.agent_lightweight_supports_structured_tool_output,
             ),
         )
         result: list[LlmModelTarget] = []
@@ -397,6 +421,9 @@ class Settings(BaseSettings):
             role = str(item.get("id") or item.get("role") or f"model-{index + 1}").strip()
             configured_targets.append(LlmModelTarget(
                 role, provider, model, api_url, api_key, index,
+                bool(item.get("supportsJsonObject", False)),
+                bool(item.get("supportsJsonSchema", False)),
+                bool(item.get("supportsStructuredToolOutput", False)),
             ))
         source_targets = tuple(configured_targets) if configured_targets else targets
         for target in source_targets:

@@ -32,6 +32,10 @@ agent_stream_buffer_size = 256
 agent_checkpoint_retention_days = 7
 agent_checkpoint_cleanup_batch_size = 50
 agent_checkpoint_cleanup_interval_seconds = 3600
+# Explicitly enable these only after a provider health check has verified its
+# OpenAI-compatible response_format behavior. Defaults are intentionally false.
+# agent_primary_supports_json_object = true
+# agent_fallback_supports_json_object = true
 embedding_api_url = ""
 embedding_api_key = ""
 embedding_model = "text-embedding-v3"

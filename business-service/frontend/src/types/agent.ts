@@ -60,6 +60,9 @@ export interface LlmModelOption {
   provider: string;
   model: string;
   isDefault: boolean;
+  supportsJsonObject?: boolean;
+  supportsJsonSchema?: boolean;
+  supportsStructuredToolOutput?: boolean;
 }
 
 export interface AssistantConversationSummary {

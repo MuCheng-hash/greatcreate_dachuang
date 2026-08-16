@@ -930,10 +930,6 @@ class LlmTraceCallbackHandler(AsyncCallbackHandler):
     @staticmethod
     def _parse_json(content: str) -> dict[str, Any] | None:
         normalized = content.strip()
-        if normalized.startswith("```"):
-            normalized = normalized.strip("`")
-            if normalized.startswith("json"):
-                normalized = normalized[4:].lstrip()
         try:
             parsed = json.loads(normalized)
             return parsed if isinstance(parsed, dict) else None

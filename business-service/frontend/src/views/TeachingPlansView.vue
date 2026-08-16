@@ -22,6 +22,7 @@ const streamStage = ref("");
 const activeAbortController = ref(null);
 const threadId = ref("");
 const models = ref([]);
+const structuredModels = computed(() => models.value.filter((item) => item.supportsJsonObject !== false));
 const selectedModelId = ref("");
 const effectiveModel = ref("");
 const modelStatusVisible = ref(false);
@@ -96,11 +97,13 @@ async function generate() {
       onEvent(eventName, data) {
         if (eventName === "stage") {
           streamStage.value = data.stage === "retrieval" ? "正在检索教学依据" : "正在生成教学方案";
-        } else if (eventName === "token") {
-          streamStage.value = "正在整理教学方案";
         } else if (eventName === "plan.patch") {
           mergePlanPatch(data.patch);
           streamStage.value = "正在生成教学方案";
+        } else if (eventName === "response.reset") {
+          generated.value = null;
+          draftPlan.value = null;
+          streamStage.value = "正在切换备用生成方式";
         } else if (eventName === "fallback" || eventName === "model.failed") {
           streamStage.value = "正在切换备用生成方式";
         } else if (eventName === "model.completed") {
@@ -183,7 +186,7 @@ function statusLabel(status) {
           <label>教学主题<input v-model="form.theme" placeholder="例如：敬老志愿服务" /></label>
           <label>活动类型<select v-model="form.activityType"><option value="VOLUNTEER_SERVICE">志愿服务</option><option value="FIELD_TRIP">实地研学</option><option value="CLASSROOM">课堂教学</option><option value="LABOR_PRACTICE">劳动实践</option><option value="SCHOOL_BASED_COURSE">校本课程</option></select></label>
           <label>活动时长（分钟）<input v-model.number="form.durationMinutes" type="number" min="20" step="10" /></label>
-          <label>生成模型<select v-model="selectedModelId" :disabled="loading"><option value="">系统默认</option><option v-for="item in models" :key="item.id" :value="item.id">{{ item.displayName }} · {{ item.provider }}</option></select></label>
+          <label>生成模型<select v-model="selectedModelId" :disabled="loading"><option value="">系统默认</option><option v-for="item in structuredModels" :key="item.id" :value="item.id">{{ item.displayName }} · {{ item.provider }}</option></select></label>
           <label class="check-field"><input v-model="form.practiceRequired" type="checkbox" /><span>包含线下实践活动</span></label>
           <button v-if="!loading" class="primary-button full-button" type="submit"><Sparkles :size="18" />生成教学方案</button>
           <button v-else class="secondary-button full-button" type="button" @click="stopGeneration"><Square :size="16" />停止生成</button>

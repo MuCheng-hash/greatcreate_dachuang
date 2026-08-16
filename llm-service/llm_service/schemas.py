@@ -25,6 +25,12 @@ class ApiModel(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="ignore")
 
 
+class StructuredOutputModel(BaseModel):
+    """Model-facing contracts reject unknown fields instead of silently repairing them."""
+
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
+
+
 class TrustedContext(ApiModel):
     actor: dict[str, Any] | None = None
     scope: dict[str, Any] | None = None
@@ -319,11 +325,79 @@ class ThreadSummaryResponse(ApiModel):
     updated_at: datetime = Field(alias="updatedAt")
 
 
-class AgentModelOutput(ApiModel):
-    answer: str
-    citation_ids: list[str] = Field(default_factory=list, alias="citationIds")
-    related_resources: list[str] = Field(default_factory=list, alias="relatedResources")
-    follow_up_questions: list[str] = Field(default_factory=list, alias="followUpQuestions")
+class AgentModelOutput(StructuredOutputModel):
+    answer: str = Field(min_length=1)
+    intent: Literal[
+        "NEARBY_RESOURCE", "TEACHING_SUGGESTION", "RESOURCE_EXPLANATION",
+        "RELATION_QUERY", "UNKNOWN",
+    ]
+    retrieval_status: Literal["ok", "empty", "degraded"] = Field(alias="retrievalStatus")
+    citation_ids: list[str] = Field(alias="citationIds")
+    related_resources: list[str] = Field(alias="relatedResources")
+    follow_up_questions: list[str] = Field(alias="followUpQuestions")
     memory_candidates: list[MemoryCandidateOutput] = Field(
         default_factory=list, alias="memoryCandidates"
     )
+
+
+class TeachingPlanActivity(StructuredOutputModel):
+    time: str | None = None
+    content: str | None = None
+    text: str | None = None
+    description: str | None = None
+
+
+class TeachingPlanCitation(StructuredOutputModel):
+    citation_id: str = Field(alias="citationId")
+    title: str | None = None
+    excerpt: str | None = None
+    source_type: str | None = Field(default=None, alias="sourceType")
+    score: float | None = None
+
+
+class TeachingPlanOutput(StructuredOutputModel):
+    generation_status: Literal["completed", "success", "succeeded", "ok", "degraded", "fallback"] = Field(alias="generationStatus")
+    message: str
+    theme: str
+    grade: str
+    activity_type: str = Field(alias="activityType")
+    duration_minutes: int | float | None = Field(alias="durationMinutes")
+    practice_required: bool = Field(alias="practiceRequired")
+    objectives: list[str] = Field(min_length=1)
+    resource_basis: list[str] = Field(alias="resourceBasis")
+    activity_flow: list[str | TeachingPlanActivity] = Field(alias="activityFlow", min_length=1)
+    preparation: list[str]
+    field_tasks: list[str] = Field(alias="fieldTasks")
+    safety_notes: list[str] = Field(alias="safetyNotes")
+    reflection: list[str]
+    evaluation: list[str]
+    citations: list[TeachingPlanCitation]
+    related_resources: list[str] = Field(alias="relatedResources")
+    follow_up_suggestions: list[str] = Field(alias="followUpSuggestions")
+    memory_candidates: list[MemoryCandidateOutput] = Field(default_factory=list, alias="memoryCandidates")
+
+
+ResourceCategory = Literal[
+    "red_culture", "intangible_culture", "traditional_culture", "local_history",
+    "public_culture", "labor_education", "public_welfare", "ecological_civilization",
+    "patriotism_base", "social_practice", "other",
+]
+
+
+class ResourceDiscoveryResult(StructuredOutputModel):
+    provider_place_id: str = Field(alias="providerPlaceId", min_length=1)
+    ideological_relevant: bool = Field(alias="ideologicalRelevant")
+    resource_category: ResourceCategory = Field(alias="resourceCategory")
+    resource_subcategory: str | None = Field(alias="resourceSubcategory")
+    confidence: float = Field(ge=0.0, le=1.0)
+    rationale: str
+    education_themes: list[str] = Field(alias="educationThemes")
+    target_grades: list[str] = Field(alias="targetGrades")
+    activity_suggestion: str | None = Field(alias="activitySuggestion")
+    verification_notes: str | None = Field(alias="verificationNotes")
+
+
+class ResourceDiscoveryOutput(StructuredOutputModel):
+    analysis_status: str = Field(alias="analysisStatus")
+    message: str
+    results: list[ResourceDiscoveryResult]

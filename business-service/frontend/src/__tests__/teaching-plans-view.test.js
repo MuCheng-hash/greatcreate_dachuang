@@ -94,8 +94,7 @@ describe("teaching plans view", () => {
       expect(path).toBe("/api/ai/teaching-plans/generate/stream");
       expect(body).toEqual(expect.objectContaining({ schoolId: 1, theme: "敬老志愿服务" }));
       options.onEvent("run.started", { model: "qwen-plus", message: "正在调用 qwen-plus" });
-      options.onEvent("token", { delta: '{"theme":"敬老志愿服务"' });
-      options.onEvent("model.failed", { reset: true, nextModel: "qwen3:8b", message: "备用模型 qwen3:8b" });
+      options.onEvent("response.reset", { nextModel: "qwen3:8b", reason: "model_fallback" });
       options.onEvent("plan.patch", {
         patch: {
           theme: "敬老志愿服务",
