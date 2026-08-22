@@ -660,6 +660,43 @@
                 </div>
             </div>
 
+            <article class="table-card">
+                <div class="card-topline">
+                    <div>
+                        <h3>AI 教学方案采纳率报告</h3>
+                        <p class="status-box">采纳率按已反馈记录计算；低分固定为 1–2 分。</p>
+                    </div>
+                    <button class="ghost-button" id="planFeedbackRefreshButton" type="button">刷新报告</button>
+                </div>
+                <div class="field-grid two-col">
+                    <label><span>开始日期</span><input id="planFeedbackStartDate" type="date"></label>
+                    <label><span>结束日期</span><input id="planFeedbackEndDate" type="date"></label>
+                    <label><span>主题关键词</span><input id="planFeedbackTheme" type="search" placeholder="按教学主题筛选"></label>
+                    <label><span>反馈状态</span><select id="planFeedbackStatus"><option value="">全部</option><option value="submitted">已反馈</option><option value="pending">待反馈</option></select></label>
+                    <label><span>采纳状态</span><select id="planFeedbackAdopted"><option value="">全部</option><option value="true">已采纳</option><option value="false">未采纳</option></select></label>
+                    <label><span>问题原因</span><select id="planFeedbackReason"><option value="">全部</option><option value="GRADE_MISMATCH">年级不匹配</option><option value="THEME_DEVIATION">偏离主题</option><option value="RESOURCE_MISMATCH">资源不匹配</option><option value="HARD_TO_IMPLEMENT">难以实施</option><option value="DURATION_UNREASONABLE">时长不合理</option><option value="SAFETY_RISK">存在安全风险</option><option value="CONTENT_INCOMPLETE">内容不完整</option><option value="UNCLEAR_EXPRESSION">表达不清</option><option value="OTHER">其他</option><option value="UNSPECIFIED">未记录原因</option></select></label>
+                    <label class="check-field"><input id="planFeedbackLowScore" type="checkbox"><span>仅看低分（1–2 分）</span></label>
+                </div>
+                <div class="dashboard-metric-grid">
+                    <article class="dashboard-metric-card"><span>生成数</span><strong id="planFeedbackGenerationMetric">0</strong><small>教师完成或降级生成</small></article>
+                    <article class="dashboard-metric-card"><span>反馈率</span><strong id="planFeedbackResponseRateMetric">0.00%</strong><small id="planFeedbackResponseHint">0 / 0</small></article>
+                    <article class="dashboard-metric-card"><span>采纳率</span><strong id="planFeedbackAdoptionRateMetric">0.00%</strong><small id="planFeedbackAdoptionHint">0 / 0</small></article>
+                    <article class="dashboard-metric-card"><span>平均分</span><strong id="planFeedbackAverageRatingMetric">0.00</strong><small id="planFeedbackRatingDistribution">1–5 分暂无数据</small></article>
+                </div>
+                <div class="status-box"><strong>问题原因分布：</strong><span id="planFeedbackReasonDistribution">暂无负面反馈原因数据</span></div>
+                <div class="table-shell">
+                    <table>
+                        <thead><tr><th>教师 / 学校</th><th>生成方案</th><th>反馈</th><th>教师备注</th><th>时间</th></tr></thead>
+                        <tbody id="planFeedbackTableBody"></tbody>
+                    </table>
+                </div>
+                <div class="form-actions">
+                    <button class="ghost-button" id="planFeedbackPrevButton" type="button">上一页</button>
+                    <span class="status-box" id="planFeedbackPageLabel">第 1 页</span>
+                    <button class="ghost-button" id="planFeedbackNextButton" type="button">下一页</button>
+                </div>
+            </article>
+
             <div class="workspace-grid">
                 <article class="form-card">
                     <div class="card-topline">

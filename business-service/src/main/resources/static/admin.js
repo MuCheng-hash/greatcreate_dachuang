@@ -29,6 +29,7 @@ const adminState = {
     discoveryCandidates: [],
     selectedSchoolIdForMap: null,
     selectedSchoolIdForPlans: null,
+    feedbackReportPage: 1,
     agentSummary: null,
     agentTraces: [],
     agentToolTraces: [],
@@ -217,6 +218,26 @@ const adminElements = {
     planResetButton: document.querySelector("#planResetButton"),
     planTableBody: document.querySelector("#planTableBody"),
     planListCount: document.querySelector("#planListCount"),
+    planFeedbackRefreshButton: document.querySelector("#planFeedbackRefreshButton"),
+    planFeedbackStartDate: document.querySelector("#planFeedbackStartDate"),
+    planFeedbackEndDate: document.querySelector("#planFeedbackEndDate"),
+    planFeedbackTheme: document.querySelector("#planFeedbackTheme"),
+    planFeedbackStatus: document.querySelector("#planFeedbackStatus"),
+    planFeedbackAdopted: document.querySelector("#planFeedbackAdopted"),
+    planFeedbackReason: document.querySelector("#planFeedbackReason"),
+    planFeedbackLowScore: document.querySelector("#planFeedbackLowScore"),
+    planFeedbackGenerationMetric: document.querySelector("#planFeedbackGenerationMetric"),
+    planFeedbackResponseRateMetric: document.querySelector("#planFeedbackResponseRateMetric"),
+    planFeedbackResponseHint: document.querySelector("#planFeedbackResponseHint"),
+    planFeedbackAdoptionRateMetric: document.querySelector("#planFeedbackAdoptionRateMetric"),
+    planFeedbackAdoptionHint: document.querySelector("#planFeedbackAdoptionHint"),
+    planFeedbackAverageRatingMetric: document.querySelector("#planFeedbackAverageRatingMetric"),
+    planFeedbackRatingDistribution: document.querySelector("#planFeedbackRatingDistribution"),
+    planFeedbackReasonDistribution: document.querySelector("#planFeedbackReasonDistribution"),
+    planFeedbackTableBody: document.querySelector("#planFeedbackTableBody"),
+    planFeedbackPrevButton: document.querySelector("#planFeedbackPrevButton"),
+    planFeedbackNextButton: document.querySelector("#planFeedbackNextButton"),
+    planFeedbackPageLabel: document.querySelector("#planFeedbackPageLabel"),
 
     agentTraceStatusFilter: document.querySelector("#agentTraceStatusFilter"),
     agentTraceFeatureFilter: document.querySelector("#agentTraceFeatureFilter"),
@@ -861,11 +882,25 @@ function bindAdminEvents() {
         event.preventDefault();
         await submitPlanForm();
     });
-    adminElements.planRefreshButton?.addEventListener("click", () => void loadPlans());
+    adminElements.planRefreshButton?.addEventListener("click", () => void Promise.all([loadPlans(), loadTeachingPlanFeedbackReport()]));
     adminElements.planResetButton?.addEventListener("click", resetPlanForm);
     adminElements.planFilterSchoolSelect?.addEventListener("change", () => {
         adminState.selectedSchoolIdForPlans = parseNullableNumber(adminElements.planFilterSchoolSelect.value);
-        void loadPlans();
+        adminState.feedbackReportPage = 1;
+        void Promise.all([loadPlans(), loadTeachingPlanFeedbackReport()]);
+    });
+    adminElements.planFeedbackRefreshButton?.addEventListener("click", () => {
+        adminState.feedbackReportPage = 1;
+        void loadTeachingPlanFeedbackReport();
+    });
+    adminElements.planFeedbackPrevButton?.addEventListener("click", () => {
+        if (adminState.feedbackReportPage <= 1) return;
+        adminState.feedbackReportPage -= 1;
+        void loadTeachingPlanFeedbackReport();
+    });
+    adminElements.planFeedbackNextButton?.addEventListener("click", () => {
+        adminState.feedbackReportPage += 1;
+        void loadTeachingPlanFeedbackReport();
     });
 
     adminElements.agentOpsRefreshButton?.addEventListener("click", () => void loadAgentOps());
@@ -934,7 +969,8 @@ async function bootstrapAdmin() {
             loadRegistrations(),
             loadSchools(),
               loadResources(),
-              loadPlans()
+              loadPlans(),
+              loadTeachingPlanFeedbackReport()
           ]);
           const dashboardAvailable = await loadDashboardOverview();
           syncSelectOptions();
@@ -3702,6 +3738,82 @@ async function deleteRelation(relId) {
     await requestJson(`/api/admin/school-resource-rel/${relId}`, { method: "DELETE" });
     setGlobalStatus("已删除", "学校与资源关联已删除。");
     await loadRelations();
+}
+
+async function loadTeachingPlanFeedbackReport() {
+    if (!adminElements.planFeedbackTableBody) return;
+    const pageSize = 20;
+    const params = new URLSearchParams({
+        pageNum: String(adminState.feedbackReportPage || 1),
+        pageSize: String(pageSize)
+    });
+    const schoolId = adminState.selectedSchoolIdForPlans;
+    const startDate = adminElements.planFeedbackStartDate?.value;
+    const endDate = adminElements.planFeedbackEndDate?.value;
+    const theme = adminElements.planFeedbackTheme?.value?.trim();
+    const feedbackStatus = adminElements.planFeedbackStatus?.value;
+    const adopted = adminElements.planFeedbackAdopted?.value;
+    const reasonCode = adminElements.planFeedbackReason?.value;
+    if (schoolId) params.set("schoolId", String(schoolId));
+    if (startDate) params.set("startDate", startDate);
+    if (endDate) params.set("endDate", endDate);
+    if (theme) params.set("theme", theme);
+    if (feedbackStatus) params.set("feedbackStatus", feedbackStatus);
+    if (adopted) params.set("adopted", adopted);
+    if (reasonCode) params.set("reasonCode", reasonCode);
+    if (adminElements.planFeedbackLowScore?.checked) params.set("lowScoreOnly", "true");
+
+    const report = await requestJson(`/api/admin/teaching-plan-feedback/report?${params.toString()}`);
+    const details = report.details || { records: [], total: 0, pageNum: 1, pageSize };
+    const records = details.records || [];
+    const distribution = report.ratingDistribution || {};
+    const reasonDistribution = report.reasonDistribution || {};
+    adminElements.planFeedbackGenerationMetric.textContent = String(report.generationCount || 0);
+    adminElements.planFeedbackResponseRateMetric.textContent = `${Number(report.feedbackRate || 0).toFixed(2)}%`;
+    adminElements.planFeedbackResponseHint.textContent = `${report.feedbackCount || 0} / ${report.generationCount || 0}`;
+    adminElements.planFeedbackAdoptionRateMetric.textContent = `${Number(report.adoptionRate || 0).toFixed(2)}%`;
+    adminElements.planFeedbackAdoptionHint.textContent = `${report.adoptedCount || 0} / ${report.feedbackCount || 0}`;
+    adminElements.planFeedbackAverageRatingMetric.textContent = Number(report.averageRating || 0).toFixed(2);
+    adminElements.planFeedbackRatingDistribution.textContent = [1, 2, 3, 4, 5]
+        .map(score => `${score}分 ${distribution[score] || 0}`)
+        .join(" · ");
+    const reasonLabels = {
+        GRADE_MISMATCH: "年级不匹配", THEME_DEVIATION: "偏离主题", RESOURCE_MISMATCH: "资源不匹配",
+        HARD_TO_IMPLEMENT: "难以实施", DURATION_UNREASONABLE: "时长不合理", SAFETY_RISK: "存在安全风险",
+        CONTENT_INCOMPLETE: "内容不完整", UNCLEAR_EXPRESSION: "表达不清", OTHER: "其他", UNSPECIFIED: "未记录原因"
+    };
+    const reasonParts = Object.entries(reasonLabels)
+        .filter(([code]) => Number(reasonDistribution[code] || 0) > 0)
+        .map(([code, label]) => `${label} ${reasonDistribution[code]}`);
+    adminElements.planFeedbackReasonDistribution.textContent = reasonParts.join(" · ") || "暂无负面反馈原因数据";
+    adminElements.planFeedbackPageLabel.textContent = `第 ${details.pageNum || 1} 页 · 共 ${details.total || 0} 条`;
+    adminElements.planFeedbackPrevButton.disabled = Number(details.pageNum || 1) <= 1;
+    adminElements.planFeedbackNextButton.disabled = Number(details.pageNum || 1) * Number(details.pageSize || pageSize) >= Number(details.total || 0);
+    adminElements.planFeedbackTableBody.innerHTML = records.length
+        ? records.map(record => {
+            const feedback = record.feedbackId
+                ? `${record.adopted ? "已采纳" : "未采纳"} · ${record.rating || "-"} 分`
+                : "待反馈";
+            const negative = record.feedbackId && (!record.adopted || Number(record.rating) <= 2);
+            const reasonCodes = Array.isArray(record.reasonCodes) ? record.reasonCodes : [];
+            const reasons = reasonCodes.length
+                ? reasonCodes.map(code => reasonLabels[code] || code).join("、")
+                : (negative ? "未记录原因" : "-");
+            const model = [record.llmProvider, record.llmModel].filter(Boolean).join(" / ") || "本地降级或未记录";
+            const plan = record.plan || {};
+            const planSummary = [
+                ...(Array.isArray(plan.objectives) ? plan.objectives.slice(0, 2) : []),
+                ...(Array.isArray(plan.activityFlow) ? plan.activityFlow.slice(0, 2) : [])
+            ].join("；") || "暂无方案摘要";
+            return `<tr>
+                <td><strong>${escapeHtml(record.teacherName || "-")}</strong><div class="status-box">${escapeHtml(record.schoolName || "-")}</div></td>
+                <td><strong>${escapeHtml(record.theme || "-")}</strong><div class="status-box">${escapeHtml(record.grade || "-")} · ${escapeHtml(model)}</div><details><summary>查看方案摘要</summary><p>${escapeHtml(planSummary)}</p></details></td>
+                <td>${renderStatus(feedback)}<div class="status-box">${escapeHtml(reasons)}</div>${record.savedPlanId ? `<div class="status-box">草稿 #${escapeHtml(record.savedPlanId)}</div>` : ""}</td>
+                <td>${escapeHtml(record.teacherNote || "-")}</td>
+                <td>${escapeHtml(record.submittedAt || record.createdAt || "-")}</td>
+            </tr>`;
+        }).join("")
+        : `<tr><td colspan="5">当前筛选条件下暂无教师反馈数据。</td></tr>`;
 }
 
 async function loadPlans() {
