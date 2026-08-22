@@ -1252,6 +1252,8 @@ def test_grounded_response_persists_deterministic_sanitized_snapshot(tmp_path: P
     result = run_async(runtime._response_from_model_result(
         {"messages": [AIMessage(content=json.dumps({
             "answer": "基于可信证据回答。",
+            "intent": "RESOURCE_EXPLANATION",
+            "retrievalStatus": "degraded",
             "citationIds": [],
             "relatedResources": ["常安镇敬老院"],
             "followUpQuestions": ["还能如何开展活动？"],
@@ -1292,6 +1294,22 @@ def test_grounded_response_persists_deterministic_sanitized_snapshot(tmp_path: P
     assert "outputSummary" not in serialized
     assert "traceEvents" not in serialized
     assert "正在" not in serialized
+
+
+def test_agent_model_output_allows_omitted_related_resources(tmp_path: Path):
+    settings = settings_for(tmp_path)
+    repository = conversation_repository(settings)
+    runtime = AgentRuntime(settings, repository.async_target)
+
+    result = runtime._parse_model_output({"messages": [AIMessage(content=json.dumps({
+        "answer": "可以先核对资源开放状态。",
+        "intent": "NEARBY_RESOURCE",
+        "retrievalStatus": "ok",
+        "citationIds": ["chunk:1"],
+        "followUpQuestions": ["请介绍该资源的教育价值。"],
+    }, ensure_ascii=False))]})
+
+    assert result.related_resources == []
 
 
 def test_agent_prompt_allows_markdown_answer_without_changing_json_contract(tmp_path: Path):

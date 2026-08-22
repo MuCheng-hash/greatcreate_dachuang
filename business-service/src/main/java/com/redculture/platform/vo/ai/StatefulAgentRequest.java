@@ -37,5 +37,9 @@ public class StatefulAgentRequest {
 
     private String theme;
 
+    private String resourceCategory;
+
+    private Integer maxDistanceMeters;
+
     private Map<String, Object> context = new LinkedHashMap<>();
 }

@@ -61,6 +61,8 @@ public class AgentToolServiceImpl implements AgentToolService {
         result.put("activityPlanCount", detail.getActivityPlanCount());
         result.put("grade", request.getGrade());
         result.put("theme", request.getTheme());
+        result.put("resourceCategory", request.getResourceCategory());
+        result.put("maxDistanceMeters", request.getMaxDistanceMeters());
         return result;
     }
 
@@ -113,6 +115,8 @@ public class AgentToolServiceImpl implements AgentToolService {
         retrieveRequest.setScopeId(request.getScope().getScopeId());
         retrieveRequest.setGrade(request.getGrade());
         retrieveRequest.setTheme(request.getTheme());
+        retrieveRequest.setResourceCategory(request.getResourceCategory());
+        retrieveRequest.setMaxDistanceMeters(request.getMaxDistanceMeters());
         retrieveRequest.setTopK(normalizeTopK(request.getTopK()));
         retrieveRequest.setHydeQuery(request.getHydeQuery());
         retrieveRequest.setWebEvidence(request.getWebEvidence());

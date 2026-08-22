@@ -24,6 +24,10 @@ public class KnowledgeRetrieveRequest {
 
     private String theme;
 
+    private String resourceCategory;
+
+    private Integer maxDistanceMeters;
+
     private Integer topK;
 
     /** Optional hypothetical answer used only as an additional dense retrieval query. */

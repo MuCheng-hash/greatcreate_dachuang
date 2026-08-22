@@ -716,7 +716,7 @@ class AgentRuntime:
             return MemoryContext.empty()
         if request.task_type == "RESOURCE_DISCOVERY":
             return MemoryContext.empty()
-        query_parts = [request.message, request.grade or "", request.theme or ""]
+        query_parts = [request.message, request.grade or "", request.theme or "", request.resource_category or ""]
         if request.task_payload:
             query_parts.append(
                 json.dumps(request.task_payload, ensure_ascii=False, default=str)
@@ -931,6 +931,8 @@ class AgentRuntime:
                 business_tool_client=self.business_tool_client,
                 grade=request.grade,
                 theme=request.theme,
+                resource_category=request.resource_category,
+                max_distance_meters=request.max_distance_meters,
                 executions=list(prefetched_executions),
                 degraded_reasons=list(prefetched_reasons),
             )
@@ -1110,6 +1112,8 @@ class AgentRuntime:
                 business_tool_client=self.business_tool_client,
                 grade=request.grade,
                 theme=request.theme,
+                resource_category=request.resource_category,
+                max_distance_meters=request.max_distance_meters,
                 event_sink=emit,
                 executions=list(prefetched_executions),
                 degraded_reasons=list(prefetched_reasons),
@@ -1176,7 +1180,10 @@ class AgentRuntime:
                         "model": config.model,
                         "fallbackLevel": config.fallback_level,
                         "errorType": classify_llm_error(exc),
+                        "exceptionType": type(exc).__name__,
+                        "errorMessage": str(exc)[:500],
                     },
+                    exc_info=True,
                 )
                 resume_namespace = None
                 await emit(
@@ -1233,6 +1240,8 @@ class AgentRuntime:
             business_tool_client=self.business_tool_client,
             grade=request.grade,
             theme=request.theme,
+            resource_category=request.resource_category,
+            max_distance_meters=request.max_distance_meters,
             event_sink=emit,
         )
         token = bind_tool_runtime(runtime)
@@ -1866,6 +1875,8 @@ class AgentRuntime:
             business_tool_client=self.business_tool_client,
             grade=request.grade,
             theme=request.theme,
+            resource_category=request.resource_category,
+            max_distance_meters=request.max_distance_meters,
         )
         target_agent = agent or self._agent
         if target_agent is None:
@@ -2205,6 +2216,17 @@ class AgentRuntime:
             f"{', '.join(plan.recommended_tools)}；最多执行 {plan.max_tool_rounds} 轮工具调用。"
         )))
         if request:
+            teaching_context = request.context.teaching_context or {}
+            context_lines = [
+                "可信教学场景限定（不得自行扩大或改变）：",
+                f"学校：{(teaching_context.get('school') or {}).get('name') or '当前所属学校'}",
+                f"年级：{request.grade or teaching_context.get('grade') or '未指定'}",
+                f"主题：{request.theme or teaching_context.get('theme') or '未指定'}",
+                f"资源类别：{request.resource_category or teaching_context.get('resourceCategory') or '全部类别'}",
+                f"周边距离：{(request.max_distance_meters or teaching_context.get('maxDistanceMeters') or '不限')} 米",
+                "回答必须基于下方真实业务数据和知识库证据；没有证据时不得编造资源、距离、人物或事件。",
+            ]
+            lc_messages.append(SystemMessage(content="\n".join(context_lines)))
             evidence_prompt = self._prefetched_evidence_message(request.context)
             if evidence_prompt:
                 lc_messages.append(SystemMessage(content=evidence_prompt))

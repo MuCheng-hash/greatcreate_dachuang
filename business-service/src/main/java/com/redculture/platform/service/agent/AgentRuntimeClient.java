@@ -485,6 +485,8 @@ public class AgentRuntimeClient {
         body.setAttachments(request.getAttachments());
         body.setGrade(context.getGrade());
         body.setTheme(context.getTheme());
+        body.setResourceCategory(context.getResourceCategory());
+        body.setMaxDistanceMeters(context.getMaxDistanceMeters());
         body.setIntent(context.getIntent() == null ? null : context.getIntent().name());
         body.setContext(trustedContext(context));
         return body;
@@ -653,14 +655,40 @@ public class AgentRuntimeClient {
         Map<String, Object> trusted = new LinkedHashMap<>();
         if (context.getSchoolDetail() != null) {
             trusted.put("school", context.getSchoolDetail().getSchool());
-            trusted.put("resources", context.getSchoolDetail().getResources());
+            trusted.put("resources", filteredResources(context));
         }
         trusted.put("region", context.getRegionDetail());
         trusted.put("resource", context.getResource());
         trusted.put("retrieval", context.getRetrieval());
         trusted.put("citationCandidates", context.getRetrieval() == null
                 ? List.of() : context.getRetrieval().getCitationCandidates());
+        Map<String, Object> teachingContext = new LinkedHashMap<>();
+        if (context.getSchoolDetail() != null && context.getSchoolDetail().getSchool() != null) {
+            Map<String, Object> school = new LinkedHashMap<>();
+            school.put("id", context.getScopeId());
+            school.put("name", context.getSchoolDetail().getSchool().getSchoolName());
+            teachingContext.put("school", school);
+        }
+        teachingContext.put("grade", context.getGrade());
+        teachingContext.put("theme", context.getTheme());
+        teachingContext.put("resourceCategory", context.getResourceCategory());
+        teachingContext.put("maxDistanceMeters", context.getMaxDistanceMeters());
+        trusted.put("teachingContext", teachingContext);
         return trusted;
+    }
+
+    private List<?> filteredResources(AgentAnswerContext context) {
+        if (context.getSchoolDetail() == null || context.getSchoolDetail().getResources() == null) {
+            return List.of();
+        }
+        return context.getSchoolDetail().getResources().stream()
+                .filter(item -> item != null && item.getResource() != null)
+                .filter(item -> !StringUtils.hasText(context.getResourceCategory())
+                        || context.getResourceCategory().equalsIgnoreCase(item.getResource().getResourceCategory()))
+                .filter(item -> context.getMaxDistanceMeters() == null
+                        || (item.getDistanceMeters() != null
+                        && item.getDistanceMeters() <= context.getMaxDistanceMeters()))
+                .collect(java.util.stream.Collectors.toCollection(ArrayList::new));
     }
 
     private StreamEvent decodeEvent(ServerSentEvent<String> event) {

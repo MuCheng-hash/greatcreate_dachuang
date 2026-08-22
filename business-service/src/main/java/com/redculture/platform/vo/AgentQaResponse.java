@@ -8,6 +8,8 @@ import lombok.Data;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.LinkedHashMap;
+import java.util.Map;
 
 @Data
 public class AgentQaResponse {
@@ -61,4 +63,6 @@ public class AgentQaResponse {
     private List<AgentMemoryItem> memoryCandidates = new ArrayList<>();
 
     private AgentMemoryApplied memoryApplied;
+
+    private Map<String, Object> appliedContext = new LinkedHashMap<>();
 }

@@ -40,6 +40,7 @@ class TrustedContext(ApiModel):
     resources: list[dict[str, Any]] = Field(default_factory=list)
     retrieval: dict[str, Any] = Field(default_factory=dict)
     citation_candidates: list[dict[str, Any]] = Field(default_factory=list, alias="citationCandidates")
+    teaching_context: dict[str, Any] = Field(default_factory=dict, alias="teachingContext")
 
 
 class AgentAttachment(ApiModel):
@@ -75,6 +76,8 @@ class AgentMessageRequest(ApiModel):
     intent: str | None = Field(default=None, max_length=64)
     grade: str | None = Field(default=None, max_length=100)
     theme: str | None = Field(default=None, max_length=200)
+    resource_category: str | None = Field(default=None, alias="resourceCategory", max_length=64)
+    max_distance_meters: int | None = Field(default=None, alias="maxDistanceMeters")
     context: TrustedContext = Field(default_factory=TrustedContext)
     attachments: list[AgentAttachment] = Field(default_factory=list, max_length=3)
 
@@ -333,7 +336,7 @@ class AgentModelOutput(StructuredOutputModel):
     ]
     retrieval_status: Literal["ok", "empty", "degraded"] = Field(alias="retrievalStatus")
     citation_ids: list[str] = Field(alias="citationIds")
-    related_resources: list[str] = Field(alias="relatedResources")
+    related_resources: list[str] = Field(default_factory=list, alias="relatedResources")
     follow_up_questions: list[str] = Field(alias="followUpQuestions")
     memory_candidates: list[MemoryCandidateOutput] = Field(
         default_factory=list, alias="memoryCandidates"

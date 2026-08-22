@@ -248,9 +248,12 @@ public class DatabaseKnowledgeRetriever implements KnowledgeRetriever {
                         if (item == null || item.getResourceId() == null) {
                             continue;
                         }
+                        LocalEduResourceSummaryVO resource = item.getResource();
+                        if (!matchesTeachingResource(request, item)) {
+                            continue;
+                        }
                         addEntity(entityIds, EntityType.RESOURCE, item.getResourceId());
                         approvedSchoolResourceIds.add(item.getResourceId());
-                        LocalEduResourceSummaryVO resource = item.getResource();
                         addEntityHint(entityHints, EntityType.RESOURCE, item.getResourceId(),
                                 resource == null ? null : resource.getResourceName(),
                                 resource == null ? null : resource.getResourceCode());
@@ -624,6 +627,18 @@ public class DatabaseKnowledgeRetriever implements KnowledgeRetriever {
                 true,
                 needsGraph(intent)
         );
+    }
+
+    private boolean matchesTeachingResource(KnowledgeRetrieveRequest request, SchoolResourceItemVO item) {
+        if (request == null || item == null || item.getResource() == null) {
+            return false;
+        }
+        if (StringUtils.hasText(request.getResourceCategory())
+                && !request.getResourceCategory().equalsIgnoreCase(item.getResource().getResourceCategory())) {
+            return false;
+        }
+        return request.getMaxDistanceMeters() == null
+                || (item.getDistanceMeters() != null && item.getDistanceMeters() <= request.getMaxDistanceMeters());
     }
 
     private boolean matchesEntity(String query, EntityHint hint) {

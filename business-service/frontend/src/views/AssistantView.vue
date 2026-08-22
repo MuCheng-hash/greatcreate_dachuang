@@ -30,6 +30,7 @@ import type {
   AssistantResponseSnapshot,
   AgentAction,
   AssistantConversationSummary,
+  TeachingContext,
 } from "@/types/agent";
 
 interface AssistantToolEvent {
@@ -114,6 +115,32 @@ const threadId = ref<string>(loadThreadId());
 const models = ref<LlmModelOption[]>([]);
 const structuredModels = computed(() => models.value.filter((item) => item.supportsJsonObject !== false));
 const selectedModelId = ref<string>("");
+const teachingContext = ref<TeachingContext>(loadTeachingContext());
+const themeOptions = ["红色文化", "地方历史", "人物事迹", "历史事件", "劳动教育", "志愿服务", "研学实践"];
+const categoryOptions = [
+  { value: "", label: "全部类别" },
+  { value: "red_culture", label: "红色文化" },
+  { value: "local_history", label: "地方历史" },
+  { value: "labor_education", label: "劳动教育" },
+];
+const distanceOptions = [
+  { value: null, label: "不限距离" },
+  { value: 1000, label: "1 公里内" },
+  { value: 3000, label: "3 公里内" },
+  { value: 5000, label: "5 公里内" },
+  { value: 10000, label: "10 公里内" },
+];
+const gradeOptions = ["小学一年级", "小学二年级", "小学三年级", "小学四年级", "小学五年级", "小学六年级", "小学低年级", "小学中年级", "小学高年级"];
+const teachingContextSummary = computed(() => {
+  const labels = [
+    teachingContext.value.schoolName || schoolStore.school?.schoolName || "当前学校",
+    teachingContext.value.grade,
+    teachingContext.value.theme,
+    categoryOptions.find((item) => item.value === teachingContext.value.resourceCategory)?.label,
+    distanceOptions.find((item) => item.value === teachingContext.value.maxDistanceMeters)?.label,
+  ].filter(Boolean);
+  return labels.join(" · ");
+});
 const history = ref<AssistantConversationSummary[]>([]);
 const historyLoading = ref<boolean>(false);
 const historyError = ref<string>("");
@@ -247,6 +274,7 @@ async function openConversation(selectedThreadId: string, showError = true): Pro
     threadId.value = detail.threadId;
     readOnlyConversation.value = detail.status === "archived";
     conversationId.value = makeConversationId();
+    teachingContext.value = {};
     await scrollToBottom(true);
   } catch {
     if (showError) historyError.value = "无法打开这条历史对话";
@@ -266,6 +294,7 @@ function startNewConversation(): void {
   readOnlyConversation.value = false;
   historyMode.value = "active";
   conversationId.value = makeConversationId();
+  teachingContext.value = {};
   messages.value = [];
   question.value = "";
   error.value = "";
@@ -326,6 +355,7 @@ watch(messages, (value) => sessionStorage.setItem(storageKey(), JSON.stringify(
   value.map(({ attachments: _attachments, ...message }) => message)
 )), { deep: true });
 watch(conversationId, (value) => sessionStorage.setItem(conversationStorageKey(), value));
+watch(teachingContext, (value) => sessionStorage.setItem(teachingContextStorageKey(), JSON.stringify(value)), { deep: true });
 watch(threadId, (value) => {
   if (value) sessionStorage.setItem(threadStorageKey(), value);
   else sessionStorage.removeItem(threadStorageKey());
@@ -337,6 +367,19 @@ function storageKey() {
 
 function conversationStorageKey() {
   return `school-portal-assistant-conversation:${auth.user?.schoolId || "unknown"}`;
+}
+
+function teachingContextStorageKey() {
+  return `school-portal-assistant-context:${conversationId.value || "new"}`;
+}
+
+function loadTeachingContext(): TeachingContext {
+  try {
+    const value = JSON.parse(sessionStorage.getItem(teachingContextStorageKey()) || "null") as TeachingContext | null;
+    return value && typeof value === "object" ? value : {};
+  } catch {
+    return {};
+  }
 }
 
 function makeConversationId() {
@@ -525,7 +568,11 @@ async function requestAssistant(
       threadId: threadId.value || null,
       clientTurnId,
       scopeType: "SCHOOL",
-      scopeId: schoolStore.school?.schoolId || auth.user?.schoolId || null
+      scopeId: schoolStore.school?.schoolId || auth.user?.schoolId || null,
+      grade: teachingContext.value.grade || null,
+      theme: teachingContext.value.theme || null,
+      resourceCategory: teachingContext.value.resourceCategory || null,
+      maxDistanceMeters: teachingContext.value.maxDistanceMeters || null,
     };
     if (attachments.length) requestBody.attachments = attachments;
     if (selectedModelId.value) requestBody.modelId = selectedModelId.value;
@@ -806,6 +853,7 @@ function applyAssistantResult(message: AssistantMessage, result: Partial<AgentQa
     memoryCandidates: Array.isArray(result?.memoryCandidates) ? result.memoryCandidates : [],
     memoryApplied: result?.memoryApplied || null,
     contextCompacted: Boolean(result?.contextCompacted),
+    appliedContext: result?.appliedContext || message.appliedContext,
     effectiveModel: result?.model ? `${result.provider || "LLM"} / ${result.model}` : message.effectiveModel,
     streamStatus: result?.generationStatus === "degraded" ? "已使用降级回答" : "回答完成",
     isStreaming: false
@@ -838,6 +886,12 @@ function normalizeStringList(value: unknown, limit = 8): string[] {
     .filter((item): item is string => typeof item === "string")
     .map((item) => item.trim())
     .filter(Boolean))].slice(0, limit);
+}
+
+function appliedContextLabel(value: TeachingContext): string {
+  const category = categoryOptions.find((item) => item.value === value.resourceCategory)?.label;
+  const distance = distanceOptions.find((item) => item.value === value.maxDistanceMeters)?.label;
+  return [value.schoolName, value.grade, value.theme, category, distance].filter(Boolean).join(" · ");
 }
 
 function normalizeCitations(value: unknown): AgentCitation[] {
@@ -1536,6 +1590,7 @@ function clearChat(): void {
   sessionStorage.removeItem(storageKey());
   sessionStorage.removeItem(conversationStorageKey());
   conversationId.value = makeConversationId();
+  teachingContext.value = {};
   sessionStorage.removeItem(threadStorageKey());
   if (wasArchivedMode) {
     history.value = [];
@@ -1626,6 +1681,7 @@ function clearChat(): void {
                 <BrainCircuit :size="14" />本次参考 {{ message.memoryApplied.count }} 条记忆
               </p>
               <p v-if="message.retrievalStatus" class="retrieval-status" :class="retrievalStatusClass(message.retrievalStatus)">{{ retrievalStatusLabel(message.retrievalStatus, message.retrievalMethods) }}</p>
+              <p v-if="message.appliedContext" class="applied-context"><strong>本次限定：</strong>{{ appliedContextLabel(message.appliedContext) }}</p>
               <p v-if="message.generationStatus" class="generation-status" :class="generationStatusClass(message.generationStatus)">{{ generationStatusLabel(message.generationStatus) }}</p>
               <div v-if="message.clarificationRequired" class="clarification"><strong>需要补充：</strong>{{ message.clarificationMessage || "请补充具体学校名称。" }}<span v-if="message.clarificationOptions?.length">可选：{{ message.clarificationOptions.join("、") }}</span></div>
               <p v-if="message.relatedResources?.length" class="related"><strong>关联资源：</strong>{{ message.relatedResources.join("、") }}</p>
@@ -1653,6 +1709,19 @@ function clearChat(): void {
           <div v-if="!messages.length && !loading" class="empty-state"><MessageCircleQuestion :size="42" /><span>选择建议问题或输入你想了解的内容</span></div>
           </div>
         </div>
+        <section class="teaching-context-panel" :class="{ 'teaching-context-readonly': readOnlyConversation }" aria-label="教学场景限定">
+          <div class="teaching-context-heading">
+            <div><strong>教学场景</strong><span>限定本次问答使用的学校、年级与资源范围</span></div>
+            <small>{{ teachingContextSummary }}</small>
+          </div>
+          <div class="teaching-context-fields">
+            <label><span>学校</span><input :value="schoolStore.school?.schoolName || auth.user?.schoolName || '当前所属学校'" disabled /></label>
+            <label><span>年级</span><select v-model="teachingContext.grade" :disabled="readOnlyConversation || loading"><option value="">不限年级</option><option v-for="item in gradeOptions" :key="item" :value="item">{{ item }}</option></select></label>
+            <label><span>主题</span><input v-model="teachingContext.theme" list="assistant-theme-options" maxlength="50" placeholder="例如：红色文化" :disabled="readOnlyConversation || loading" /><datalist id="assistant-theme-options"><option v-for="item in themeOptions" :key="item" :value="item" /></datalist></label>
+            <label><span>资源类别</span><select v-model="teachingContext.resourceCategory" :disabled="readOnlyConversation || loading"><option v-for="item in categoryOptions" :key="item.value" :value="item.value">{{ item.label }}</option></select></label>
+            <label><span>周边距离</span><select v-model.number="teachingContext.maxDistanceMeters" :disabled="readOnlyConversation || loading"><option v-for="item in distanceOptions" :key="String(item.value)" :value="item.value">{{ item.label }}</option></select></label>
+          </div>
+        </section>
         <section
           v-if="pendingMemoryCandidates.length || composerMemoryFeedback.message"
           class="composer-memory-suggestions"
@@ -1880,6 +1949,18 @@ function clearChat(): void {
 .composer-memory-feedback-success { color: #28704b; }
 .composer-memory-feedback-error { color: #ad3e35; }
 .chat-composer { display: grid; grid-template-columns: minmax(0,1fr); gap: 8px; padding: 10px 14px 12px; border-top: 1px solid var(--line); background: #fff; }
+.teaching-context-panel { margin: 0 14px; padding: 11px 12px 10px; border: 1px solid #d7e2d9; border-radius: 8px; background: #f7faf7; }
+.teaching-context-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 9px; }
+.teaching-context-heading > div { display: flex; align-items: baseline; gap: 8px; }
+.teaching-context-heading strong { color: #2f5b41; font-size: 13px; }
+.teaching-context-heading span, .teaching-context-heading small { color: var(--muted); font-size: 11px; }
+.teaching-context-heading small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.teaching-context-fields { display: grid; grid-template-columns: 1.1fr .9fr 1.4fr 1fr .9fr; gap: 7px; }
+.teaching-context-fields label { display: grid; gap: 4px; min-width: 0; }
+.teaching-context-fields label > span { color: #68766d; font-size: 10px; }
+.teaching-context-fields input, .teaching-context-fields select { width: 100%; min-width: 0; min-height: 30px; padding: 0 8px; border: 1px solid #d6dfd8; border-radius: 5px; background: #fff; color: var(--text); font-size: 11px; }
+.teaching-context-fields input:disabled, .teaching-context-fields select:disabled { background: #eef2ee; color: var(--muted); }
+.applied-context { margin-top: 7px !important; color: #5d6f63; font-size: 11px; }
 .chat-composer-readonly { background: #f8f9f7; }
 .pending-images { grid-column: 1 / -1; display: flex; gap: 8px; overflow-x: auto; }
 .pending-images > div { position: relative; flex: none; width: 72px; height: 58px; }
@@ -1917,6 +1998,9 @@ function clearChat(): void {
   .chat-scroll { padding: 16px 12px; }
   .chat-message { max-width: 92%; }
   .chat-composer { padding: 8px 10px 10px; }
+  .teaching-context-panel { margin: 0 10px; }
+  .teaching-context-heading { align-items: flex-start; flex-direction: column; gap: 3px; }
+  .teaching-context-fields { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .composer-toolbar { gap: 8px; }
   .composer-model-select { width: min(180px, 48vw); font-size: 11px; }
   .composer-actions { gap: 2px; }

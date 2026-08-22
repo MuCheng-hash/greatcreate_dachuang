@@ -24,6 +24,10 @@ public class AgentAnswerContext {
 
     private String theme;
 
+    private String resourceCategory;
+
+    private Integer maxDistanceMeters;
+
     private SchoolMapDetailVO schoolDetail;
 
     private TownMapDetailVO regionDetail;

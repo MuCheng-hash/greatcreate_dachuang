@@ -27,6 +27,7 @@ import com.redculture.platform.vo.LocalEduResourceSummaryVO;
 import com.redculture.platform.vo.SchoolMapDetailVO;
 import com.redculture.platform.vo.SchoolResourceItemVO;
 import com.redculture.platform.vo.SchoolSummaryVO;
+import com.redculture.platform.enums.ResourceCategory;
 import com.redculture.platform.vo.ai.AgentMemoryApplied;
 import com.redculture.platform.vo.ai.AgentMemoryItem;
 import com.redculture.platform.vo.ai.AssistantConversationTurnCancellation;
@@ -425,6 +426,7 @@ public class AgentQaServiceImpl implements AgentQaService {
         response.setIntent(context.getIntent());
         response.setScopeType(context.getScopeType());
         response.setScopeId(context.getScopeId());
+        response.setAppliedContext(appliedContext(context));
 
         KnowledgeRetrieveResult retrieval = context.getRetrieval() == null
                 ? KnowledgeRetrieveResult.empty() : context.getRetrieval();
@@ -581,6 +583,8 @@ public class AgentQaServiceImpl implements AgentQaService {
         context.setScopeId(scope.id());
         context.setGrade(resolveGrade(request.getGrade(), question));
         context.setTheme(clean(request.getTheme()));
+        context.setResourceCategory(clean(request.getResourceCategory()));
+        context.setMaxDistanceMeters(request.getMaxDistanceMeters());
         loadBusinessContext(context);
         context.setRetrieval(retrieve(context, request.getTopK()));
         return context;
@@ -819,7 +823,20 @@ public class AgentQaServiceImpl implements AgentQaService {
         response.setMemoryCandidates(remote == null || remote.getMemoryCandidates() == null
                 ? new ArrayList<>() : remote.getMemoryCandidates());
         response.setMemoryApplied(remote == null ? null : remote.getMemoryApplied());
+        response.setAppliedContext(appliedContext(context));
         return response;
+    }
+
+    private Map<String, Object> appliedContext(AgentAnswerContext context) {
+        Map<String, Object> applied = new LinkedHashMap<>();
+        applied.put("schoolId", context.getScopeType() == KnowledgeScopeType.SCHOOL ? context.getScopeId() : null);
+        applied.put("schoolName", context.getSchoolDetail() == null || context.getSchoolDetail().getSchool() == null
+                ? null : context.getSchoolDetail().getSchool().getSchoolName());
+        applied.put("grade", context.getGrade());
+        applied.put("theme", context.getTheme());
+        applied.put("resourceCategory", context.getResourceCategory());
+        applied.put("maxDistanceMeters", context.getMaxDistanceMeters());
+        return applied;
     }
 
     private void validateRequest(AgentQaRequest request) {
@@ -828,6 +845,16 @@ public class AgentQaServiceImpl implements AgentQaService {
         }
         if (request.getScopeId() != null && request.getScopeId() <= 0) {
             throw new IllegalArgumentException("scopeId must be positive");
+        }
+        if (StringUtils.hasText(request.getTheme()) && request.getTheme().trim().length() > 50) {
+            throw new IllegalArgumentException("theme must not exceed 50 characters");
+        }
+        if (StringUtils.hasText(request.getResourceCategory())) {
+            ResourceCategory.fromValue(request.getResourceCategory());
+        }
+        if (request.getMaxDistanceMeters() != null
+                && !List.of(1000, 3000, 5000, 10000).contains(request.getMaxDistanceMeters())) {
+            throw new IllegalArgumentException("maxDistanceMeters must be one of 1000, 3000, 5000 or 10000");
         }
         if (!StringUtils.hasText(request.getClientTurnId())) {
             request.setClientTurnId(java.util.UUID.randomUUID().toString());
@@ -1018,6 +1045,8 @@ public class AgentQaServiceImpl implements AgentQaService {
         request.setScopeId(context.getScopeId());
         request.setGrade(context.getGrade());
         request.setTheme(context.getTheme());
+        request.setResourceCategory(context.getResourceCategory());
+        request.setMaxDistanceMeters(context.getMaxDistanceMeters());
         request.setTopK(normalizeTopK(requestedTopK));
 
         try {

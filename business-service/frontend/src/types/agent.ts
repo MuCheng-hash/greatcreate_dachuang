@@ -214,6 +214,16 @@ export interface AgentQaResponse {
   memoryCandidates?: AgentMemoryItem[] | null;
   memoryApplied?: AgentMemoryApplied | null;
   contextCompacted?: boolean;
+  appliedContext?: TeachingContext;
+}
+
+export interface TeachingContext {
+  schoolId?: number | null;
+  schoolName?: string | null;
+  grade?: string | null;
+  theme?: string | null;
+  resourceCategory?: string | null;
+  maxDistanceMeters?: number | null;
 }
 
 export interface AgentThreadMessage {
@@ -257,6 +267,8 @@ export interface AgentQaRequestPayload {
   scopeId: number | null;
   grade?: string | null;
   theme?: string | null;
+  resourceCategory?: string | null;
+  maxDistanceMeters?: number | null;
   topK?: number;
   modelId?: string | null;
   debug?: boolean;

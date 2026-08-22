@@ -18,6 +18,10 @@ public class AgentToolRequest {
 
     private String theme;
 
+    private String resourceCategory;
+
+    private Integer maxDistanceMeters;
+
     private Integer topK;
 
     private Long resourceId;

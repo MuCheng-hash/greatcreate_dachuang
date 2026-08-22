@@ -26,6 +26,10 @@ public class AgentQaRequest {
 
     private String theme;
 
+    private String resourceCategory;
+
+    private Integer maxDistanceMeters;
+
     private Integer topK;
 
     private Boolean debug = false;

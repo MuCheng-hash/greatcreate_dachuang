@@ -41,6 +41,8 @@ class ToolRuntimeContext:
     business_tool_client: BusinessToolClient | None = None
     grade: str | None = None
     theme: str | None = None
+    resource_category: str | None = None
+    max_distance_meters: int | None = None
     degraded_reasons: list[str] = field(default_factory=list)
     _call_counts: dict[str, int] = field(default_factory=dict)
 
@@ -265,6 +267,8 @@ def _tool_payload(
         "query": query.strip(),
         "grade": runtime.grade,
         "theme": runtime.theme,
+        "resourceCategory": runtime.resource_category,
+        "maxDistanceMeters": runtime.max_distance_meters,
         "topK": limit,
     }
 
