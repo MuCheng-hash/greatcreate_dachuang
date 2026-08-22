@@ -10,7 +10,9 @@ import com.redculture.platform.enums.EntityType;
 import com.redculture.platform.service.KnowledgeRetriever;
 import com.redculture.platform.service.SchoolMapService;
 import com.redculture.platform.service.TeachingActivityPlanService;
+import com.redculture.platform.service.TeachingPlanFeedbackService;
 import com.redculture.platform.service.agent.AgentRuntimeClient;
+import com.redculture.platform.exception.TeachingPlanGenerationPersistenceException;
 import com.redculture.platform.vo.GeneratedTeachingPlanResponse;
 import com.redculture.platform.vo.LocalEduResourceSummaryVO;
 import com.redculture.platform.vo.SchoolMapDetailVO;
@@ -22,6 +24,7 @@ import com.redculture.platform.vo.ai.KnowledgeCitationCandidateVO;
 import com.redculture.platform.vo.ai.KnowledgeRetrieveResult;
 import com.redculture.platform.vo.ai.KnowledgeRetrievalStatus;
 import org.junit.jupiter.api.Test;
+import reactor.core.scheduler.Schedulers;
 
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
@@ -35,6 +38,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -135,6 +139,60 @@ class AiTeachingPlanServiceImplTest {
         assertEquals("ok", response.getRetrievalStatus());
         assertEquals(List.of("hybrid-rrf"), response.getRetrievalMethods());
         verify(teachingActivityPlanService, never()).createPlan(any());
+    }
+
+    @Test
+    void generatedFallbackIsPersistedBeforeItIsReturned() {
+        SchoolMapService schoolMapService = mock(SchoolMapService.class);
+        when(schoolMapService.getSchoolDetail(1L)).thenReturn(schoolDetail());
+        KnowledgeRetriever knowledgeRetriever = mock(KnowledgeRetriever.class);
+        KnowledgeRetrieveResult retrieval = new KnowledgeRetrieveResult();
+        retrieval.setRetrievalStatus(KnowledgeRetrievalStatus.EMPTY);
+        when(knowledgeRetriever.retrieve(any())).thenReturn(retrieval);
+        TeachingPlanFeedbackService feedbackService = mock(TeachingPlanFeedbackService.class);
+        when(feedbackService.recordGeneration(any(), any(), eq(17L), eq("teacher"))).thenReturn(72L);
+        AiTeachingPlanServiceImpl service = new AiTeachingPlanServiceImpl(
+                schoolMapService,
+                mock(TeachingActivityPlanService.class),
+                knowledgeRetriever,
+                properties(""),
+                null,
+                new ObjectMapper(),
+                feedbackService,
+                Schedulers.immediate()
+        );
+
+        GeneratedTeachingPlanResponse response = service.generatePlan(
+                request(), 17L, "teacher", null).block();
+
+        assertEquals(72L, response.getGenerationId());
+        verify(feedbackService).recordGeneration(any(), eq(response), eq(17L), eq("teacher"));
+    }
+
+    @Test
+    void persistenceFailureDoesNotReturnAnUntrackedPlan() {
+        SchoolMapService schoolMapService = mock(SchoolMapService.class);
+        when(schoolMapService.getSchoolDetail(1L)).thenReturn(schoolDetail());
+        KnowledgeRetriever knowledgeRetriever = mock(KnowledgeRetriever.class);
+        KnowledgeRetrieveResult retrieval = new KnowledgeRetrieveResult();
+        retrieval.setRetrievalStatus(KnowledgeRetrievalStatus.EMPTY);
+        when(knowledgeRetriever.retrieve(any())).thenReturn(retrieval);
+        TeachingPlanFeedbackService feedbackService = mock(TeachingPlanFeedbackService.class);
+        when(feedbackService.recordGeneration(any(), any(), eq(17L), eq("teacher")))
+                .thenThrow(new IllegalStateException("database unavailable"));
+        AiTeachingPlanServiceImpl service = new AiTeachingPlanServiceImpl(
+                schoolMapService,
+                mock(TeachingActivityPlanService.class),
+                knowledgeRetriever,
+                properties(""),
+                null,
+                new ObjectMapper(),
+                feedbackService,
+                Schedulers.immediate()
+        );
+
+        assertThrows(TeachingPlanGenerationPersistenceException.class,
+                () -> service.generatePlan(request(), 17L, "teacher", null).block());
     }
 
     private AiTeachingPlanServiceImpl newService(SchoolMapService schoolMapService,

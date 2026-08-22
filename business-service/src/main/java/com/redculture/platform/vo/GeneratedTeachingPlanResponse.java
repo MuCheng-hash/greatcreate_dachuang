@@ -10,6 +10,8 @@ import java.util.List;
 @Data
 public class GeneratedTeachingPlanResponse {
 
+    private Long generationId;
+
     private String threadId;
 
     private String generationStatus;

@@ -21,6 +21,14 @@ public interface AiTeachingPlanService {
         return generatePlan(request);
     }
 
+    default Mono<GeneratedTeachingPlanResponse> generatePlan(
+            TeachingPlanGenerateRequest request,
+            Long accountId,
+            String actorRole,
+            String sessionId) {
+        return generatePlan(request, accountId, sessionId);
+    }
+
     Flux<ServerSentEvent<Map<String, Object>>> generatePlanStream(
             TeachingPlanGenerateRequest request);
 
@@ -31,5 +39,17 @@ public interface AiTeachingPlanService {
         return generatePlanStream(request);
     }
 
+    default Flux<ServerSentEvent<Map<String, Object>>> generatePlanStream(
+            TeachingPlanGenerateRequest request,
+            Long accountId,
+            String actorRole,
+            String sessionId) {
+        return generatePlanStream(request, accountId, sessionId);
+    }
+
     TeachingActivityPlanAdminVO saveDraft(GeneratedTeachingPlanSaveRequest request);
+
+    default TeachingActivityPlanAdminVO saveDraft(GeneratedTeachingPlanSaveRequest request, Long accountId) {
+        return saveDraft(request);
+    }
 }

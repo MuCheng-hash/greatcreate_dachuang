@@ -7,6 +7,7 @@ import com.redculture.platform.config.AuthContext;
 import com.redculture.platform.service.KnowledgeRetriever;
 import com.redculture.platform.service.SchoolMapService;
 import com.redculture.platform.service.TeachingActivityPlanService;
+import com.redculture.platform.service.TeachingPlanFeedbackService;
 import com.redculture.platform.service.agent.AgentRuntimeClient;
 import com.redculture.platform.controller.AiTeachingPlanController;
 import com.redculture.platform.vo.AuthCurrentUserVO;
@@ -20,6 +21,7 @@ import org.springframework.http.MediaType;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
+import reactor.core.scheduler.Schedulers;
 
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
@@ -29,7 +31,10 @@ import static org.hamcrest.Matchers.containsString;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.asyncDispatch;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
@@ -89,19 +94,24 @@ class AiTeachingPlanStreamingTest {
             AppMapProperties properties = new AppMapProperties();
             properties.setLlmServiceBaseUrl("http://127.0.0.1:" + llmServer.getAddress().getPort());
             TeachingActivityPlanService plans = mock(TeachingActivityPlanService.class);
+            TeachingPlanFeedbackService feedbackService = mock(TeachingPlanFeedbackService.class);
+            when(feedbackService.recordGeneration(any(), any(), eq(17L), eq("platform_admin")))
+                    .thenReturn(91L);
             AiTeachingPlanServiceImpl service = new AiTeachingPlanServiceImpl(
                     schoolMapService,
                     plans,
                     knowledgeRetriever,
                     properties,
                     new AgentRuntimeClient(properties, new AgentProperties(), new ObjectMapper()),
-                    new ObjectMapper());
+                    new ObjectMapper(),
+                    feedbackService,
+                    Schedulers.immediate());
 
             AuthCurrentUserVO user = new AuthCurrentUserVO();
             user.setAccountId(17L);
             user.setRoleCode("platform_admin");
             MockMvc mvc = MockMvcBuilders.standaloneSetup(
-                    new AiTeachingPlanController(service, plans)).build();
+                    new AiTeachingPlanController(service, plans, feedbackService)).build();
 
             MvcResult pending = mvc.perform(post("/api/ai/teaching-plans/generate/stream")
                             .contentType(MediaType.APPLICATION_JSON)
@@ -123,6 +133,7 @@ class AiTeachingPlanStreamingTest {
                     .andExpect(content().string(containsString("event:final")))
                     .andExpect(content().string(containsString("\"teachingPlan\"")))
                     .andExpect(content().string(containsString("\"generationStatus\":\"completed\"")))
+                    .andExpect(content().string(containsString("\"generationId\":91")))
                     .andExpect(content().string(containsString("\"retrievalStatus\":\"ok\"")))
                     .andExpect(content().string(containsString("\"memoryApplied\"")))
                     .andExpect(content().string(containsString("\"memoryCandidates\"")))
@@ -134,6 +145,8 @@ class AiTeachingPlanStreamingTest {
             assertFalse(responseBody.contains("LLM 服务不可用"));
             assertTrue(requestBody.get().contains("\"ownerId\":\"account:17\""));
             assertTrue(requestBody.get().contains("\"taskType\":\"TEACHING_PLAN\""));
+            verify(feedbackService, times(1))
+                    .recordGeneration(any(), any(), eq(17L), eq("platform_admin"));
         } finally {
             llmServer.stop(0);
         }

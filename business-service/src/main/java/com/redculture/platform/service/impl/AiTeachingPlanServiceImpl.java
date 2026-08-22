@@ -3,10 +3,12 @@ package com.redculture.platform.service.impl;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.redculture.platform.config.AppMapProperties;
 import com.redculture.platform.enums.ActivityType;
+import com.redculture.platform.exception.TeachingPlanGenerationPersistenceException;
 import com.redculture.platform.service.AiTeachingPlanService;
 import com.redculture.platform.service.KnowledgeRetriever;
 import com.redculture.platform.service.SchoolMapService;
 import com.redculture.platform.service.TeachingActivityPlanService;
+import com.redculture.platform.service.TeachingPlanFeedbackService;
 import com.redculture.platform.service.agent.AgentRuntimeClient;
 import com.redculture.platform.service.agent.AgentBusyException;
 import com.redculture.platform.service.agent.AgentUpstreamException;
@@ -84,6 +86,7 @@ public class AiTeachingPlanServiceImpl implements AiTeachingPlanService {
     private final AgentRuntimeClient agentRuntimeClient;
     private final ObjectMapper objectMapper;
     private final Scheduler agentBlockingScheduler;
+    private final TeachingPlanFeedbackService teachingPlanFeedbackService;
 
     @Autowired
     public AiTeachingPlanServiceImpl(SchoolMapService schoolMapService,
@@ -92,6 +95,7 @@ public class AiTeachingPlanServiceImpl implements AiTeachingPlanService {
                                      AppMapProperties appMapProperties,
                                      AgentRuntimeClient agentRuntimeClient,
                                      ObjectMapper objectMapper,
+                                     TeachingPlanFeedbackService teachingPlanFeedbackService,
                                      @Qualifier("agentBlockingScheduler") Scheduler agentBlockingScheduler) {
         this.schoolMapService = schoolMapService;
         this.teachingActivityPlanService = teachingActivityPlanService;
@@ -100,6 +104,18 @@ public class AiTeachingPlanServiceImpl implements AiTeachingPlanService {
         this.agentRuntimeClient = agentRuntimeClient;
         this.objectMapper = objectMapper;
         this.agentBlockingScheduler = agentBlockingScheduler;
+        this.teachingPlanFeedbackService = teachingPlanFeedbackService;
+    }
+
+    public AiTeachingPlanServiceImpl(SchoolMapService schoolMapService,
+                                     TeachingActivityPlanService teachingActivityPlanService,
+                                     KnowledgeRetriever knowledgeRetriever,
+                                     AppMapProperties appMapProperties,
+                                     AgentRuntimeClient agentRuntimeClient,
+                                     ObjectMapper objectMapper,
+                                     Scheduler agentBlockingScheduler) {
+        this(schoolMapService, teachingActivityPlanService, knowledgeRetriever, appMapProperties,
+                agentRuntimeClient, objectMapper, null, agentBlockingScheduler);
     }
 
     public AiTeachingPlanServiceImpl(SchoolMapService schoolMapService,
@@ -130,7 +146,7 @@ public class AiTeachingPlanServiceImpl implements AiTeachingPlanService {
 
     @Override
     public Mono<GeneratedTeachingPlanResponse> generatePlan(TeachingPlanGenerateRequest request) {
-        return generatePlan(request, null, null);
+        return generatePlan(request, null, null, null);
     }
 
     @Override
@@ -138,27 +154,45 @@ public class AiTeachingPlanServiceImpl implements AiTeachingPlanService {
             TeachingPlanGenerateRequest request,
             Long accountId,
             String sessionId) {
+        return generatePlan(request, accountId, null, sessionId);
+    }
+
+    @Override
+    public Mono<GeneratedTeachingPlanResponse> generatePlan(
+            TeachingPlanGenerateRequest request,
+            Long accountId,
+            String actorRole,
+            String sessionId) {
         return Mono.defer(() -> {
             validateGenerateRequest(request);
             return onBlockingScheduler(() -> buildContext(request, accountId, sessionId))
                     .flatMap(context -> callLlmService(context)
                             .map(response -> finalizeResponse(response, context))
-                            .switchIfEmpty(onBlockingScheduler(
-                                    () -> finalizeResponse(null, context)
-                            )));
+                            .switchIfEmpty(Mono.fromSupplier(() -> finalizeResponse(null, context)))
+                            .flatMap(response -> onBlockingScheduler(
+                                    () -> persistFinalResponse(context, response, actorRole))));
         });
     }
 
     @Override
     public Flux<ServerSentEvent<Map<String, Object>>> generatePlanStream(
             TeachingPlanGenerateRequest request) {
-        return generatePlanStream(request, null, null);
+        return generatePlanStream(request, null, null, null);
     }
 
     @Override
     public Flux<ServerSentEvent<Map<String, Object>>> generatePlanStream(
             TeachingPlanGenerateRequest request,
             Long accountId,
+            String sessionId) {
+        return generatePlanStream(request, accountId, null, sessionId);
+    }
+
+    @Override
+    public Flux<ServerSentEvent<Map<String, Object>>> generatePlanStream(
+            TeachingPlanGenerateRequest request,
+            Long accountId,
+            String actorRole,
             String sessionId) {
         return Flux.defer(() -> {
             validateGenerateRequest(request);
@@ -168,7 +202,7 @@ public class AiTeachingPlanServiceImpl implements AiTeachingPlanService {
                             "message", "正在检索教学依据"
                     ))),
                     onBlockingScheduler(() -> buildContext(request, accountId, sessionId))
-                            .flatMapMany(this::streamPlan)
+                            .flatMapMany(context -> streamPlan(context, actorRole))
             );
         }).onErrorResume(this::streamFailure);
     }
@@ -191,8 +225,32 @@ public class AiTeachingPlanServiceImpl implements AiTeachingPlanService {
         return response;
     }
 
+    private GeneratedTeachingPlanResponse persistFinalResponse(TeachingPlanContextVO context,
+                                                                GeneratedTeachingPlanResponse response,
+                                                                String actorRole) {
+        if (teachingPlanFeedbackService == null) {
+            return response;
+        }
+        Long accountId = context.getActor() == null ? null : context.getActor().getAccountId();
+        try {
+            Long generationId = teachingPlanFeedbackService.recordGeneration(
+                    context.getRequest(), response, accountId, actorRole);
+            response.setGenerationId(generationId);
+            return response;
+        } catch (TeachingPlanGenerationPersistenceException exception) {
+            throw exception;
+        } catch (RuntimeException exception) {
+            throw new TeachingPlanGenerationPersistenceException(exception);
+        }
+    }
+
     @Override
     public TeachingActivityPlanAdminVO saveDraft(GeneratedTeachingPlanSaveRequest request) {
+        return saveDraft(request, null);
+    }
+
+    @Override
+    public TeachingActivityPlanAdminVO saveDraft(GeneratedTeachingPlanSaveRequest request, Long accountId) {
         validateSaveRequest(request);
         SchoolMapDetailVO detail = requireApprovedSchool(request.getSchoolId());
 
@@ -214,6 +272,10 @@ public class AiTeachingPlanServiceImpl implements AiTeachingPlanService {
             createRequest.setResourceId(detail.getResources().get(0).getResourceId());
         }
 
+        if (request.getGenerationId() != null && teachingPlanFeedbackService != null) {
+            return teachingPlanFeedbackService.saveDraftForGeneration(
+                    request.getGenerationId(), accountId, createRequest);
+        }
         return teachingActivityPlanService.createPlan(createRequest);
     }
 
@@ -309,7 +371,8 @@ public class AiTeachingPlanServiceImpl implements AiTeachingPlanService {
     }
 
     private Flux<ServerSentEvent<Map<String, Object>>> streamPlan(
-            TeachingPlanContextVO context) {
+            TeachingPlanContextVO context,
+            String actorRole) {
         Flux<ServerSentEvent<Map<String, Object>>> generationStarted = Flux.just(sse(
                 "stage",
                 Map.of("stage", "generation", "message", "正在生成教学方案")
@@ -318,17 +381,18 @@ public class AiTeachingPlanServiceImpl implements AiTeachingPlanService {
                 || !StringUtils.hasText(appMapProperties.getLlmServiceBaseUrl())) {
             return Flux.concat(
                     generationStarted,
-                    Flux.just(
-                            finalEvent(finalizeResponse(null, context)),
-                            sse("done", Map.of("status", "completed"))
-                    )
+                    onBlockingScheduler(() -> persistFinalResponse(
+                                    context, finalizeResponse(null, context), actorRole))
+                            .flatMapMany(response -> Flux.just(
+                                    finalEvent(response),
+                                    sse("done", Map.of("status", "completed"))))
             );
         }
 
         AtomicBoolean finalEventSent = new AtomicBoolean(false);
         Flux<ServerSentEvent<Map<String, Object>>> forwarded = agentRuntimeClient
                 .stream(buildAgentTaskRequest(context))
-                .concatMap(event -> forwardAgentEvent(event, context))
+                .concatMap(event -> forwardAgentEvent(event, context, actorRole))
                 .doOnNext(event -> {
                     if ("final".equals(event.event())) {
                         finalEventSent.set(true);
@@ -339,14 +403,26 @@ public class AiTeachingPlanServiceImpl implements AiTeachingPlanService {
                 forwarded,
                 Flux.defer(() -> finalEventSent.get()
                         ? Flux.empty()
-                        : onBlockingScheduler(() -> finalizeResponse(null, context))
+                        : onBlockingScheduler(() -> persistFinalResponse(
+                                        context, finalizeResponse(null, context), actorRole))
                                 .map(this::finalEvent)
                                 .flux()),
                 Flux.just(sse("done", Map.of("status", "completed")))
         ).onErrorResume(error -> {
             log.warn("Teaching-plan stream failed: {}", error.getMessage(), error);
+            if (Exceptions.unwrap(error) instanceof TeachingPlanGenerationPersistenceException) {
+                return Flux.just(
+                        sse("error", Map.of(
+                                "code", "generation_record_save_failed",
+                                "message", "教学方案生成记录保存失败",
+                                "retryable", true
+                        )),
+                        sse("done", Map.of("status", "failed"))
+                );
+            }
             if (!finalEventSent.get()) {
-                return onBlockingScheduler(() -> finalizeResponse(null, context))
+                return onBlockingScheduler(() -> persistFinalResponse(
+                                context, finalizeResponse(null, context), actorRole))
                         .flatMapMany(response -> Flux.just(
                                 finalEvent(response),
                                 sse("done", Map.of("status", "degraded"))
@@ -365,7 +441,8 @@ public class AiTeachingPlanServiceImpl implements AiTeachingPlanService {
 
     private Flux<ServerSentEvent<Map<String, Object>>> forwardAgentEvent(
             AgentRuntimeClient.StreamEvent event,
-            TeachingPlanContextVO context) {
+            TeachingPlanContextVO context,
+            String actorRole) {
         String eventName = event.event();
         Map<String, Object> payload = event.safeData();
         if ("final".equals(eventName)) {
@@ -382,7 +459,10 @@ public class AiTeachingPlanServiceImpl implements AiTeachingPlanService {
             );
             response.setThreadId(textValue(payload.get("threadId"), textValue(responseMap.get("threadId"), "")));
             applyMemoryMetadata(response, responseMap);
-            return Flux.just(finalEvent(finalizeResponse(response, context)));
+            GeneratedTeachingPlanResponse finalized = finalizeResponse(response, context);
+            return onBlockingScheduler(() -> persistFinalResponse(context, finalized, actorRole))
+                    .map(this::finalEvent)
+                    .flux();
         }
         if ("run.started".equals(eventName) || "model.started".equals(eventName)) {
             return Flux.just(sse("stage", Map.of(
@@ -525,13 +605,17 @@ public class AiTeachingPlanServiceImpl implements AiTeachingPlanService {
         Throwable unwrapped = Exceptions.unwrap(error);
         String code = unwrapped instanceof AgentBusyException
                 ? "agent_busy"
+                : unwrapped instanceof TeachingPlanGenerationPersistenceException
+                ? "generation_record_save_failed"
                 : unwrapped instanceof AgentUpstreamException upstream
                 ? upstream.getCode()
                 : unwrapped instanceof IllegalArgumentException
                 ? "request_invalid"
                 : "teaching_plan_stream_interrupted";
         boolean retryable = !(unwrapped instanceof IllegalArgumentException);
-        String message = unwrapped instanceof IllegalArgumentException
+        String message = unwrapped instanceof TeachingPlanGenerationPersistenceException
+                ? "教学方案生成记录保存失败"
+                : unwrapped instanceof IllegalArgumentException
                 && unwrapped.getMessage() != null
                 ? unwrapped.getMessage()
                 : "教学方案流式生成失败";

@@ -8,6 +8,8 @@ import java.util.List;
 @Data
 public class GeneratedTeachingPlanSaveRequest {
 
+    private Long generationId;
+
     private Long schoolId;
 
     private Long resourceId;
