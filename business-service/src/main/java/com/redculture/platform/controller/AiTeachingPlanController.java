@@ -3,24 +3,34 @@ package com.redculture.platform.controller;
 import com.redculture.platform.common.ApiResponse;
 import com.redculture.platform.common.PageResult;
 import com.redculture.platform.config.AuthContext;
+import com.redculture.platform.exception.TeachingPlanFeedbackException;
+import com.redculture.platform.exception.TeachingPlanGenerationPersistenceException;
 import com.redculture.platform.service.AiTeachingPlanService;
 import com.redculture.platform.service.TeachingActivityPlanService;
+import com.redculture.platform.service.TeachingPlanFeedbackService;
 import com.redculture.platform.service.agent.AgentBusyException;
 import com.redculture.platform.service.agent.AgentUpstreamException;
 import com.redculture.platform.vo.AuthCurrentUserVO;
 import com.redculture.platform.vo.GeneratedTeachingPlanResponse;
 import com.redculture.platform.vo.TeachingActivityPlanAdminVO;
+import com.redculture.platform.vo.TeachingPlanFeedbackVO;
+import com.redculture.platform.vo.TeachingPlanGenerationVO;
 import com.redculture.platform.vo.request.GeneratedTeachingPlanSaveRequest;
+import com.redculture.platform.vo.request.TeachingPlanFeedbackRequest;
 import com.redculture.platform.vo.request.TeachingPlanGenerateRequest;
 import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.http.MediaType;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.codec.ServerSentEvent;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
@@ -38,11 +48,20 @@ public class AiTeachingPlanController {
      */
     private final AiTeachingPlanService aiTeachingPlanService;
     private final TeachingActivityPlanService teachingActivityPlanService;
+    private final TeachingPlanFeedbackService teachingPlanFeedbackService;
+
+    @Autowired
+    public AiTeachingPlanController(AiTeachingPlanService aiTeachingPlanService,
+                                    TeachingActivityPlanService teachingActivityPlanService,
+                                    TeachingPlanFeedbackService teachingPlanFeedbackService) {
+        this.aiTeachingPlanService = aiTeachingPlanService;
+        this.teachingActivityPlanService = teachingActivityPlanService;
+        this.teachingPlanFeedbackService = teachingPlanFeedbackService;
+    }
 
     public AiTeachingPlanController(AiTeachingPlanService aiTeachingPlanService,
                                     TeachingActivityPlanService teachingActivityPlanService) {
-        this.aiTeachingPlanService = aiTeachingPlanService;
-        this.teachingActivityPlanService = teachingActivityPlanService;
+        this(aiTeachingPlanService, teachingActivityPlanService, null);
     }
 
     //同步生成教学方案。等待 AI 完整生成后，一次性返回结果。
@@ -56,6 +75,7 @@ public class AiTeachingPlanController {
             return aiTeachingPlanService.generatePlan(
                     request,
                     user.getAccountId(),
+                    user.getRoleCode(),
                     request == null ? null : request.getThreadId()
             );
         }).map(value -> ResponseEntity.ok(ApiResponse.success(value)))
@@ -69,6 +89,10 @@ public class AiTeachingPlanController {
                 .onErrorResume(AgentUpstreamException.class, error -> Mono.just(
                         ResponseEntity.status(HttpStatus.BAD_GATEWAY)
                                 .body(ApiResponse.fail(502, error.getCode()))
+                ))
+                .onErrorResume(TeachingPlanGenerationPersistenceException.class, error -> Mono.just(
+                        ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                                .body(ApiResponse.fail(500, "generation_record_save_failed"))
                 ));
     }
 
@@ -83,6 +107,7 @@ public class AiTeachingPlanController {
             return aiTeachingPlanService.generatePlanStream(
                     request,
                     user.getAccountId(),
+                    user.getRoleCode(),
                     request == null ? null : request.getThreadId()
             );
         });
@@ -94,9 +119,13 @@ public class AiTeachingPlanController {
                                                               HttpServletRequest servletRequest) {
         try {
             requireSchoolAccess(request == null ? null : request.getSchoolId(), AuthContext.requireUser(servletRequest));
-            return ApiResponse.success("draft activity plan created", aiTeachingPlanService.saveDraft(request));
+            AuthCurrentUserVO user = AuthContext.requireUser(servletRequest);
+            return ApiResponse.success("draft activity plan created",
+                    aiTeachingPlanService.saveDraft(request, user.getAccountId()));
         } catch (IllegalArgumentException exception) {
             return ApiResponse.fail(exception.getMessage());
+        } catch (TeachingPlanFeedbackException exception) {
+            return ApiResponse.fail(exception.getStatus().value(), exception.getMessage());
         }
     }
 
@@ -108,6 +137,36 @@ public class AiTeachingPlanController {
             return ApiResponse.fail("school account is required");
         }
         return ApiResponse.success(teachingActivityPlanService.listBySchoolId(user.getSchoolId(), 1L, 50L));
+    }
+
+    @GetMapping("/generations/mine")
+    public ResponseEntity<ApiResponse<PageResult<TeachingPlanGenerationVO>>> generationHistory(
+            @RequestParam(required = false) String feedbackStatus,
+            @RequestParam(required = false) Long pageNum,
+            @RequestParam(required = false) Long pageSize,
+            HttpServletRequest servletRequest) {
+        try {
+            return ResponseEntity.ok(ApiResponse.success(teachingPlanFeedbackService.mine(
+                    AuthContext.requireUser(servletRequest), feedbackStatus, pageNum, pageSize)));
+        } catch (TeachingPlanFeedbackException exception) {
+            return ResponseEntity.status(exception.getStatus())
+                    .body(ApiResponse.fail(exception.getStatus().value(), exception.getMessage()));
+        }
+    }
+
+    @PutMapping("/generations/{generationId}/feedback")
+    public ResponseEntity<ApiResponse<TeachingPlanFeedbackVO>> submitFeedback(
+            @PathVariable Long generationId,
+            @RequestBody TeachingPlanFeedbackRequest request,
+            HttpServletRequest servletRequest) {
+        try {
+            TeachingPlanFeedbackVO feedback = teachingPlanFeedbackService.submitFeedback(
+                    generationId, request, AuthContext.requireUser(servletRequest));
+            return ResponseEntity.ok(ApiResponse.success("teaching plan feedback saved", feedback));
+        } catch (TeachingPlanFeedbackException exception) {
+            return ResponseEntity.status(exception.getStatus())
+                    .body(ApiResponse.fail(exception.getStatus().value(), exception.getMessage()));
+        }
     }
 
     //核心权限校验方法
