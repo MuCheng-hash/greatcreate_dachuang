@@ -13,6 +13,8 @@ import com.redculture.platform.vo.SchoolResourceItemVO;
 @Data
 public class GeneratedTeachingPlanResponse {
 
+    private Long generationId;
+
     private String threadId;
 
     private String generationStatus;

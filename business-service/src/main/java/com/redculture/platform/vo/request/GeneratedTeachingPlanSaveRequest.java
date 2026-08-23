@@ -9,6 +9,8 @@ import java.util.ArrayList;
 @Data
 public class GeneratedTeachingPlanSaveRequest {
 
+    private Long generationId;
+
     private Long schoolId;
 
     private Long resourceId;

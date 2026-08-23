@@ -5,6 +5,7 @@ import com.redculture.platform.controller.AiTeachingPlanController;
 import com.redculture.platform.service.AgentQaService;
 import com.redculture.platform.service.AiTeachingPlanService;
 import com.redculture.platform.service.TeachingActivityPlanService;
+import com.redculture.platform.service.TeachingPlanFeedbackService;
 import com.redculture.platform.vo.AgentQaResponse;
 import com.redculture.platform.vo.AuthCurrentUserVO;
 import com.redculture.platform.vo.request.AgentQaRequest;
@@ -80,6 +81,9 @@ class AgentAsyncMvcContextTest {
     @MockBean
     private TeachingActivityPlanService teachingActivityPlanService;
 
+    @MockBean
+    private TeachingPlanFeedbackService teachingPlanFeedbackService;
+
     @Test
     void bindsTheBoundedApplicationExecutorToSpringMvcAsyncHandling() {
         Object configuredExecutor = ReflectionTestUtils.getField(handlerAdapter, "taskExecutor");
@@ -154,6 +158,7 @@ class AgentAsyncMvcContextTest {
         when(aiTeachingPlanService.generatePlanStream(
                 any(TeachingPlanGenerateRequest.class),
                 eq(user.getAccountId()),
+                eq(user.getRoleCode()),
                 eq("thread-plan")
         )).thenReturn(Flux.just(
                 event("stage", Map.of("stage", "context_ready")),

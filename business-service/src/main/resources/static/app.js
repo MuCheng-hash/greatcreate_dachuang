@@ -2262,6 +2262,7 @@ async function saveGeneratedPlanDraft() {
     try {
         const resources = state.currentSchoolDetail.resources || [];
         const payload = {
+            generationId: plan.generationId || null,
             schoolId: state.currentSchoolDetail.school.schoolId,
             resourceId: resources[0]?.resourceId || null,
             theme: plan.theme,
