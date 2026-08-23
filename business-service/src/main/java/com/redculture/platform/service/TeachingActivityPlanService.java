@@ -7,6 +7,7 @@ import com.redculture.platform.enums.ReviewStatus;
 import com.redculture.platform.vo.TeachingActivityPlanAdminVO;
 import com.redculture.platform.vo.request.TeachingActivityPlanCreateRequest;
 import com.redculture.platform.vo.request.TeachingActivityPlanUpdateRequest;
+import com.redculture.platform.vo.AuthCurrentUserVO;
 
 public interface TeachingActivityPlanService extends IService<TeachingActivityPlan> {
 
@@ -25,4 +26,12 @@ public interface TeachingActivityPlanService extends IService<TeachingActivityPl
                                                       Long pageSize);
 
     PageResult<TeachingActivityPlanAdminVO> listBySchoolId(Long schoolId, Long pageNum, Long pageSize);
+
+    PageResult<TeachingActivityPlanAdminVO> listMine(Long accountId, Long schoolId, Long pageNum, Long pageSize);
+
+    TeachingActivityPlanAdminVO getMine(Long planId, AuthCurrentUserVO user);
+
+    TeachingActivityPlanAdminVO updateMine(Long planId, TeachingActivityPlanUpdateRequest request, AuthCurrentUserVO user);
+
+    TeachingActivityPlanAdminVO copyMine(Long planId, AuthCurrentUserVO user);
 }

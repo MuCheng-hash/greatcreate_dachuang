@@ -29,6 +29,7 @@ import com.redculture.platform.vo.ai.TeachingPlanContextVO;
 import com.redculture.platform.vo.request.GeneratedTeachingPlanSaveRequest;
 import com.redculture.platform.vo.request.TeachingActivityPlanCreateRequest;
 import com.redculture.platform.vo.request.TeachingPlanGenerateRequest;
+import com.redculture.platform.mapper.TeachingActivityPlanResourceMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -84,6 +85,7 @@ public class AiTeachingPlanServiceImpl implements AiTeachingPlanService {
     private final AgentRuntimeClient agentRuntimeClient;
     private final ObjectMapper objectMapper;
     private final Scheduler agentBlockingScheduler;
+    private final TeachingActivityPlanResourceMapper planResourceMapper;
 
     @Autowired
     public AiTeachingPlanServiceImpl(SchoolMapService schoolMapService,
@@ -92,7 +94,8 @@ public class AiTeachingPlanServiceImpl implements AiTeachingPlanService {
                                      AppMapProperties appMapProperties,
                                      AgentRuntimeClient agentRuntimeClient,
                                      ObjectMapper objectMapper,
-                                     @Qualifier("agentBlockingScheduler") Scheduler agentBlockingScheduler) {
+                                     @Qualifier("agentBlockingScheduler") Scheduler agentBlockingScheduler,
+                                     TeachingActivityPlanResourceMapper planResourceMapper) {
         this.schoolMapService = schoolMapService;
         this.teachingActivityPlanService = teachingActivityPlanService;
         this.knowledgeRetriever = knowledgeRetriever;
@@ -100,6 +103,7 @@ public class AiTeachingPlanServiceImpl implements AiTeachingPlanService {
         this.agentRuntimeClient = agentRuntimeClient;
         this.objectMapper = objectMapper;
         this.agentBlockingScheduler = agentBlockingScheduler;
+        this.planResourceMapper = planResourceMapper;
     }
 
     public AiTeachingPlanServiceImpl(SchoolMapService schoolMapService,
@@ -115,7 +119,8 @@ public class AiTeachingPlanServiceImpl implements AiTeachingPlanService {
                 appMapProperties,
                 agentRuntimeClient,
                 objectMapper,
-                Schedulers.immediate()
+                Schedulers.immediate(),
+                null
         );
     }
 
@@ -125,7 +130,7 @@ public class AiTeachingPlanServiceImpl implements AiTeachingPlanService {
                                      AppMapProperties appMapProperties,
                                      ObjectMapper objectMapper) {
         this(schoolMapService, teachingActivityPlanService, knowledgeRetriever,
-                appMapProperties, null, objectMapper, Schedulers.immediate());
+                appMapProperties, null, objectMapper, Schedulers.immediate(), null);
     }
 
     @Override
@@ -193,8 +198,22 @@ public class AiTeachingPlanServiceImpl implements AiTeachingPlanService {
 
     @Override
     public TeachingActivityPlanAdminVO saveDraft(GeneratedTeachingPlanSaveRequest request) {
+        return saveDraft(request, request == null ? null : request.getOwnerAccountId());
+    }
+
+    @Override
+    public TeachingActivityPlanAdminVO saveDraft(GeneratedTeachingPlanSaveRequest request, Long accountId) {
         validateSaveRequest(request);
         SchoolMapDetailVO detail = requireApprovedSchool(request.getSchoolId());
+        List<Long> requestedResourceIds = request.getResourceIds() == null ? new ArrayList<>() : request.getResourceIds().stream().filter(java.util.Objects::nonNull).distinct().toList();
+        if (request.getResourceId() != null && requestedResourceIds.isEmpty()) {
+            requestedResourceIds = List.of(request.getResourceId());
+        }
+        Set<Long> accessibleResourceIds = (detail.getResources() == null ? List.<SchoolResourceItemVO>of() : detail.getResources()).stream()
+                .map(SchoolResourceItemVO::getResourceId).filter(java.util.Objects::nonNull).collect(Collectors.toSet());
+        if (!accessibleResourceIds.containsAll(requestedResourceIds)) {
+            throw new IllegalArgumentException("one or more resources are not accessible for this school");
+        }
 
         TeachingActivityPlanCreateRequest createRequest = new TeachingActivityPlanCreateRequest();
         createRequest.setPlanCode(generatePlanCode());
@@ -209,8 +228,15 @@ public class AiTeachingPlanServiceImpl implements AiTeachingPlanService {
         createRequest.setSafetyText(joinLines(request.getSafetyNotes(), "安全提示待完善。"));
         createRequest.setExpectedOutcome(joinLines(mergeLists(request.getReflection(), request.getEvaluation()), "形成学习记录、交流展示和反思评价。"));
         createRequest.setDurationMinutes(request.getDurationMinutes());
+        createRequest.setOwnerAccountId(accountId);
+        createRequest.setPlanPayload(request.getPlanPayload());
+        createRequest.setGenerationSource(StringUtils.hasText(request.getGenerationSource()) ? request.getGenerationSource() : "ai");
+        createRequest.setAiRunId(request.getAiRunId());
+        createRequest.setResourceIds(requestedResourceIds);
 
-        if (request.getResourceId() == null && detail.getResources() != null && !detail.getResources().isEmpty()) {
+        if (request.getResourceId() == null && request.getResourceIds() != null && !request.getResourceIds().isEmpty()) {
+            createRequest.setResourceId(request.getResourceIds().get(0));
+        } else if (request.getResourceId() == null && detail.getResources() != null && !detail.getResources().isEmpty()) {
             createRequest.setResourceId(detail.getResources().get(0).getResourceId());
         }
 
@@ -230,7 +256,19 @@ public class AiTeachingPlanServiceImpl implements AiTeachingPlanService {
         context.setActor(actor);
         context.setSessionId(sessionId);
         context.setSchool(detail.getSchool());
-        context.setResources(buildResourceContexts(detail.getResources()));
+        List<SchoolResourceItemVO> accessible = detail.getResources() == null ? List.of() : detail.getResources();
+        List<Long> requestedResourceIds = request.getResourceIds() == null ? new ArrayList<>() : request.getResourceIds();
+        if (request.getResourceId() != null && requestedResourceIds.isEmpty()) {
+            requestedResourceIds.add(request.getResourceId());
+        }
+        List<SchoolResourceItemVO> selected = requestedResourceIds.isEmpty()
+                ? accessible
+                : accessible.stream().filter(item -> requestedResourceIds.contains(item.getResourceId())).toList();
+        if (!requestedResourceIds.isEmpty() && selected.size() != requestedResourceIds.stream().distinct().count()) {
+            throw new IllegalArgumentException("one or more resources are not accessible for this school");
+        }
+        context.setResources(buildResourceContexts(accessible));
+        context.setSelectedResources(buildResourceContexts(selected));
         context.setExistingPlans(detail.getActivityPlans() == null ? Collections.emptyList() : detail.getActivityPlans());
         applyRetrievedKnowledge(context, retrieveKnowledge(request));
         return context;
@@ -258,7 +296,7 @@ public class AiTeachingPlanServiceImpl implements AiTeachingPlanService {
 
     private KnowledgeRetrieveResult retrieveKnowledge(TeachingPlanGenerateRequest request) {
         KnowledgeRetrieveRequest retrieveRequest = new KnowledgeRetrieveRequest();
-        retrieveRequest.setQuery(Stream.of(request.getTheme(), request.getGrade(), enumValue(request.getActivityType()))
+        retrieveRequest.setQuery(Stream.of(request.getTheme(), request.getGrade(), request.getObjectives(), enumValue(request.getActivityType()))
                 .filter(StringUtils::hasText)
                 .collect(Collectors.joining(" ")));
         retrieveRequest.setTheme(request.getTheme());
@@ -266,6 +304,7 @@ public class AiTeachingPlanServiceImpl implements AiTeachingPlanService {
         retrieveRequest.setScopeType(KnowledgeScopeType.SCHOOL);
         retrieveRequest.setScopeId(request.getSchoolId());
         retrieveRequest.setTopK(MAX_CONTENT_CHUNKS);
+        retrieveRequest.setResourceIds(request.getResourceIds());
         KnowledgeRetrieveResult result = knowledgeRetriever.retrieve(retrieveRequest);
         return result == null ? KnowledgeRetrieveResult.degraded() : result;
     }
@@ -557,6 +596,15 @@ public class AiTeachingPlanServiceImpl implements AiTeachingPlanService {
         Map<String, Object> trustedContext = new LinkedHashMap<>();
         trustedContext.put("school", context.getSchool());
         trustedContext.put("resources", context.getResources());
+        Map<String, Object> teachingContext = new LinkedHashMap<>();
+        teachingContext.put("school", context.getSchool());
+        teachingContext.put("grade", context.getRequest().getGrade());
+        teachingContext.put("theme", context.getRequest().getTheme());
+        teachingContext.put("objectives", context.getRequest().getObjectives());
+        teachingContext.put("durationMinutes", context.getRequest().getDurationMinutes());
+        teachingContext.put("practiceRequired", context.getRequest().getPracticeRequired());
+        teachingContext.put("selectedResources", context.getSelectedResources());
+        trustedContext.put("teachingContext", teachingContext);
         Map<String, Object> retrieval = new LinkedHashMap<>();
         retrieval.put("retrievalStatus", context.getRetrievalStatus());
         retrieval.put("chunks", context.getContentChunks());
@@ -692,12 +740,29 @@ public class AiTeachingPlanServiceImpl implements AiTeachingPlanService {
         response.setReflection(safeList(response.getReflection()));
         response.setEvaluation(safeList(response.getEvaluation()));
         response.setRelatedResources(response.getRelatedResources() == null || response.getRelatedResources().isEmpty()
-                ? context.getResources().stream()
+                ? context.getSelectedResources().stream()
                 .map(item -> item.getResource() == null ? null : item.getResource().getResourceName())
                 .filter(StringUtils::hasText)
                 .limit(5)
                 .collect(Collectors.toList())
                 : response.getRelatedResources());
+        response.setSelectedResources(context.getSelectedResources().stream().map(item -> {
+            SchoolResourceItemVO value = new SchoolResourceItemVO();
+            value.setResourceId(item.getResourceId());
+            value.setDistanceMeters(item.getDistanceMeters());
+            value.setRelationType(item.getRelationType());
+            value.setEducationThemeSummary(item.getEducationThemeSummary());
+            value.setResource(item.getResource());
+            return value;
+        }).toList());
+        Map<String, Object> appliedContext = new LinkedHashMap<>();
+        appliedContext.put("school", context.getSchool());
+        appliedContext.put("grade", request.getGrade());
+        appliedContext.put("theme", request.getTheme());
+        appliedContext.put("objectives", request.getObjectives());
+        appliedContext.put("durationMinutes", request.getDurationMinutes());
+        appliedContext.put("practiceRequired", request.getPracticeRequired());
+        response.setAppliedContext(appliedContext);
         response.setFollowUpSuggestions(response.getFollowUpSuggestions() == null ? Collections.emptyList() : response.getFollowUpSuggestions());
         response.setCitations(response.getCitations() == null ? Collections.emptyList() : response.getCitations());
         return response;
@@ -787,6 +852,18 @@ public class AiTeachingPlanServiceImpl implements AiTeachingPlanService {
         }
         if (!StringUtils.hasText(request.getTheme())) {
             throw new IllegalArgumentException("theme is required");
+        }
+        if (request.getGrade() != null && request.getGrade().length() > 100) {
+            throw new IllegalArgumentException("grade is too long");
+        }
+        if (request.getTheme().length() > 200) {
+            throw new IllegalArgumentException("theme is too long");
+        }
+        if (request.getObjectives() != null && request.getObjectives().length() > 2000) {
+            throw new IllegalArgumentException("objectives is too long");
+        }
+        if (request.getResourceIds() != null && request.getResourceIds().size() > 20) {
+            throw new IllegalArgumentException("at most 20 resources can be selected");
         }
         if (request.getDurationMinutes() != null && request.getDurationMinutes() <= 0) {
             throw new IllegalArgumentException("durationMinutes must be positive");

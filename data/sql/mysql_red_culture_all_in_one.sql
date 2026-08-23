@@ -675,6 +675,8 @@ CREATE TABLE IF NOT EXISTS school (
   school_name            VARCHAR(200) NOT NULL,
   school_alias           VARCHAR(200) NULL,
   region_id              BIGINT NULL,
+  province_region_id     BIGINT NULL,
+  city_region_id         BIGINT NULL,
   county_region_id       BIGINT NULL,
   township_region_id     BIGINT NULL,
   village_region_id      BIGINT NULL,
@@ -837,6 +839,11 @@ CREATE TABLE IF NOT EXISTS teaching_activity_plan (
   expected_outcome       TEXT NULL,
   duration_minutes       INT NULL,
   source_id              BIGINT NULL,
+  owner_account_id       BIGINT NULL,
+  plan_payload           LONGTEXT NULL,
+  generation_source      VARCHAR(30) NULL,
+  ai_run_id              BIGINT NULL,
+  published_status       VARCHAR(20) NOT NULL DEFAULT 'draft',
   review_status          ENUM('draft', 'pending', 'approved', 'rejected') NOT NULL DEFAULT 'draft',
   is_active              TINYINT(1) NOT NULL DEFAULT 1,
   created_at             DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -852,6 +859,16 @@ CREATE TABLE IF NOT EXISTS teaching_activity_plan (
   KEY idx_teaching_activity_plan_resource (resource_id),
   KEY idx_teaching_activity_plan_theme (theme),
   KEY idx_teaching_activity_plan_status (review_status, is_active)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS teaching_activity_plan_resource (
+  plan_id BIGINT NOT NULL,
+  resource_id BIGINT NOT NULL,
+  sort_order INT NOT NULL DEFAULT 0,
+  is_primary TINYINT(1) NOT NULL DEFAULT 0,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (plan_id, resource_id),
+  KEY idx_plan_resource_resource (resource_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- 7. Optional sample seed records for pilot schools
@@ -1332,7 +1349,7 @@ ON DUPLICATE KEY UPDATE
   token_count = VALUES(token_count),
   embedding_status = VALUES(embedding_status);
 
-CREATE TABLE catalog_import_batch (
+CREATE TABLE IF NOT EXISTS catalog_import_batch (
   batch_id BIGINT PRIMARY KEY AUTO_INCREMENT,
   file_name VARCHAR(255) NOT NULL,
   created_by BIGINT NULL,
@@ -1345,7 +1362,7 @@ CREATE TABLE catalog_import_batch (
   updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
-CREATE TABLE catalog_import_row (
+CREATE TABLE IF NOT EXISTS catalog_import_row (
   row_id BIGINT PRIMARY KEY AUTO_INCREMENT,
   batch_id BIGINT NOT NULL,
   sheet_name VARCHAR(64) NOT NULL,
@@ -1360,7 +1377,7 @@ CREATE TABLE catalog_import_row (
   CONSTRAINT fk_catalog_import_row_batch FOREIGN KEY (batch_id) REFERENCES catalog_import_batch(batch_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
-CREATE TABLE catalog_projection_task (
+CREATE TABLE IF NOT EXISTS catalog_projection_task (
   task_id BIGINT PRIMARY KEY AUTO_INCREMENT,
   entity_type VARCHAR(64) NOT NULL,
   entity_id BIGINT NOT NULL,

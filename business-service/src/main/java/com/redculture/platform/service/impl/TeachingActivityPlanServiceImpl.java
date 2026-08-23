@@ -16,7 +16,11 @@ import com.redculture.platform.service.TeachingActivityPlanService;
 import com.redculture.platform.vo.TeachingActivityPlanAdminVO;
 import com.redculture.platform.vo.request.TeachingActivityPlanCreateRequest;
 import com.redculture.platform.vo.request.TeachingActivityPlanUpdateRequest;
+import com.redculture.platform.mapper.TeachingActivityPlanResourceMapper;
+import com.redculture.platform.vo.AuthCurrentUserVO;
+import java.util.List;
 import org.springframework.stereotype.Service;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.util.StringUtils;
 
 @Service
@@ -29,11 +33,20 @@ public class TeachingActivityPlanServiceImpl extends ServiceImpl<TeachingActivit
 
     private final SchoolService schoolService;
     private final LocalEduResourceService localEduResourceService;
+    private final TeachingActivityPlanResourceMapper planResourceMapper;
 
     public TeachingActivityPlanServiceImpl(SchoolService schoolService,
                                            LocalEduResourceService localEduResourceService) {
+        this(schoolService, localEduResourceService, null);
+    }
+
+    @Autowired
+    public TeachingActivityPlanServiceImpl(SchoolService schoolService,
+                                           LocalEduResourceService localEduResourceService,
+                                           TeachingActivityPlanResourceMapper planResourceMapper) {
         this.schoolService = schoolService;
         this.localEduResourceService = localEduResourceService;
+        this.planResourceMapper = planResourceMapper;
     }
 
     @Override
@@ -47,6 +60,11 @@ public class TeachingActivityPlanServiceImpl extends ServiceImpl<TeachingActivit
         plan.setPlanCode(request.getPlanCode().trim());
         plan.setSchoolId(request.getSchoolId());
         plan.setResourceId(request.getResourceId());
+        plan.setOwnerAccountId(request.getOwnerAccountId());
+        plan.setPlanPayload(request.getPlanPayload());
+        plan.setGenerationSource(request.getGenerationSource());
+        plan.setAiRunId(request.getAiRunId());
+        plan.setPublishedStatus("draft");
         plan.setTheme(clean(request.getTheme()));
         plan.setActivityType(defaultActivityType(request.getActivityType()));
         plan.setSuitableGrade(clean(request.getSuitableGrade()));
@@ -60,6 +78,7 @@ public class TeachingActivityPlanServiceImpl extends ServiceImpl<TeachingActivit
         plan.setReviewStatus(ReviewStatus.DRAFT);
         plan.setActive(true);
         save(plan);
+        replaceResources(plan.getPlanId(), request.getResourceIds(), request.getSchoolId());
         return buildAdminVO(getById(plan.getPlanId()));
     }
 
@@ -81,10 +100,14 @@ public class TeachingActivityPlanServiceImpl extends ServiceImpl<TeachingActivit
         plan.setSafetyText(valueOrOriginal(request.getSafetyText(), plan.getSafetyText()));
         plan.setExpectedOutcome(valueOrOriginal(request.getExpectedOutcome(), plan.getExpectedOutcome()));
         plan.setDurationMinutes(valueOrOriginal(request.getDurationMinutes(), plan.getDurationMinutes()));
+        plan.setPlanPayload(valueOrOriginal(request.getPlanPayload(), plan.getPlanPayload()));
         plan.setSourceId(valueOrOriginal(request.getSourceId(), plan.getSourceId()));
         plan.setReviewStatus(valueOrOriginal(request.getReviewStatus(), plan.getReviewStatus()));
         plan.setActive(valueOrOriginal(request.getActive(), plan.getActive()));
         updateById(plan);
+        if (request.getResourceIds() != null) {
+            replaceResources(plan.getPlanId(), request.getResourceIds(), plan.getSchoolId());
+        }
         return buildAdminVO(getById(planId));
     }
 
@@ -133,6 +156,88 @@ public class TeachingActivityPlanServiceImpl extends ServiceImpl<TeachingActivit
             throw new IllegalArgumentException("schoolId is required");
         }
         return pagePlans(schoolId, null, null, null, null, pageNum, pageSize);
+    }
+
+    @Override
+    public PageResult<TeachingActivityPlanAdminVO> listMine(Long accountId, Long schoolId, Long pageNum, Long pageSize) {
+        if (accountId == null || schoolId == null) throw new IllegalArgumentException("authenticated school account is required");
+        long safePageNum = pageNum == null || pageNum <= 0 ? DEFAULT_PAGE_NUM : pageNum;
+        long safePageSize = pageSize == null || pageSize <= 0 ? DEFAULT_PAGE_SIZE : Math.min(pageSize, MAX_PAGE_SIZE);
+        LambdaQueryWrapper<TeachingActivityPlan> wrapper = new LambdaQueryWrapper<TeachingActivityPlan>()
+                .eq(TeachingActivityPlan::getOwnerAccountId, accountId)
+                .eq(TeachingActivityPlan::getSchoolId, schoolId)
+                .orderByDesc(TeachingActivityPlan::getUpdatedAt);
+        Page<TeachingActivityPlan> page = page(new Page<>(safePageNum, safePageSize), wrapper);
+        return PageResult.of(page.getRecords().stream().map(this::buildAdminVO).toList(), page.getTotal(), safePageNum, safePageSize);
+    }
+
+    @Override
+    public TeachingActivityPlanAdminVO getMine(Long planId, AuthCurrentUserVO user) {
+        TeachingActivityPlan plan = requireOwned(planId, user);
+        return buildAdminVO(plan);
+    }
+
+    @Override
+    public TeachingActivityPlanAdminVO updateMine(Long planId, TeachingActivityPlanUpdateRequest request, AuthCurrentUserVO user) {
+        TeachingActivityPlan plan = requireOwned(planId, user);
+        TeachingActivityPlanAdminVO value = updatePlan(planId, request);
+        if (plan.getReviewStatus() != ReviewStatus.DRAFT) {
+            plan.setReviewStatus(ReviewStatus.DRAFT);
+            plan.setPublishedStatus("draft");
+            updateById(plan);
+            value = buildAdminVO(plan);
+        }
+        return value;
+    }
+
+    @Override
+    public TeachingActivityPlanAdminVO copyMine(Long planId, AuthCurrentUserVO user) {
+        TeachingActivityPlan source = requireOwned(planId, user);
+        TeachingActivityPlan copy = new TeachingActivityPlan();
+        copy.setPlanCode("COPY_" + System.currentTimeMillis());
+        copy.setSchoolId(source.getSchoolId());
+        copy.setResourceId(source.getResourceId());
+        copy.setOwnerAccountId(user.getAccountId());
+        copy.setTheme(source.getTheme() + "（副本）");
+        copy.setActivityType(source.getActivityType());
+        copy.setSuitableGrade(source.getSuitableGrade());
+        copy.setObjectiveText(source.getObjectiveText());
+        copy.setActivityContent(source.getActivityContent());
+        copy.setPreparationText(source.getPreparationText());
+        copy.setSafetyText(source.getSafetyText());
+        copy.setExpectedOutcome(source.getExpectedOutcome());
+        copy.setDurationMinutes(source.getDurationMinutes());
+        copy.setPlanPayload(source.getPlanPayload());
+        copy.setGenerationSource(source.getGenerationSource());
+        copy.setPublishedStatus("draft");
+        copy.setReviewStatus(ReviewStatus.DRAFT);
+        copy.setActive(true);
+        save(copy);
+        if (planResourceMapper != null) replaceResources(copy.getPlanId(), planResourceMapper.selectResourceIds(source.getPlanId()), copy.getSchoolId());
+        return buildAdminVO(copy);
+    }
+
+    private TeachingActivityPlan requireOwned(Long planId, AuthCurrentUserVO user) {
+        if (user == null || user.getAccountId() == null || user.getSchoolId() == null) throw new IllegalArgumentException("authentication required");
+        TeachingActivityPlan plan = getById(planId);
+        if (plan == null || !user.getAccountId().equals(plan.getOwnerAccountId()) || !user.getSchoolId().equals(plan.getSchoolId())) {
+            throw new IllegalArgumentException("plan not found");
+        }
+        return plan;
+    }
+
+    private void replaceResources(Long planId, List<Long> resourceIds, Long schoolId) {
+        if (planResourceMapper == null || planId == null) return;
+        if (resourceIds == null) return;
+        List<Long> ids = resourceIds.stream().filter(java.util.Objects::nonNull).distinct().toList();
+        for (Long id : ids) ensureResourceExistsIfNeeded(id);
+        planResourceMapper.deleteByPlanId(planId);
+        for (int i = 0; i < ids.size(); i++) {
+            Long id = ids.get(i);
+            com.redculture.platform.entity.TeachingActivityPlanResource relation = new com.redculture.platform.entity.TeachingActivityPlanResource();
+            relation.setPlanId(planId); relation.setResourceId(id); relation.setSortOrder(i); relation.setPrimary(i == 0);
+            planResourceMapper.insert(relation);
+        }
     }
 
     private void validateCreateRequest(TeachingActivityPlanCreateRequest request) {
@@ -197,6 +302,12 @@ public class TeachingActivityPlanServiceImpl extends ServiceImpl<TeachingActivit
         vo.setSchoolId(plan.getSchoolId());
         vo.setSchoolName(school == null ? null : school.getSchoolName());
         vo.setResourceId(plan.getResourceId());
+        vo.setOwnerAccountId(plan.getOwnerAccountId());
+        vo.setPlanPayload(plan.getPlanPayload());
+        vo.setGenerationSource(plan.getGenerationSource());
+        vo.setAiRunId(plan.getAiRunId());
+        vo.setPublishedStatus(plan.getPublishedStatus());
+        if (planResourceMapper != null) vo.setResourceIds(planResourceMapper.selectResourceIds(plan.getPlanId()));
         vo.setResourceName(resource == null ? null : resource.getResourceName());
         vo.setTheme(plan.getTheme());
         vo.setActivityType(enumValue(plan.getActivityType()));

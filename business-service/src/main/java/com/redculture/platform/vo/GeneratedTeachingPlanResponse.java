@@ -6,6 +6,9 @@ import lombok.Data;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.LinkedHashMap;
+import com.redculture.platform.vo.SchoolResourceItemVO;
 
 @Data
 public class GeneratedTeachingPlanResponse {
@@ -67,6 +70,10 @@ public class GeneratedTeachingPlanResponse {
     private List<GeneratedTeachingPlanCitationVO> citations = new ArrayList<>();
 
     private List<String> relatedResources = new ArrayList<>();
+
+    private List<SchoolResourceItemVO> selectedResources = new ArrayList<>();
+
+    private Map<String, Object> appliedContext = new LinkedHashMap<>();
 
     private List<String> followUpSuggestions = new ArrayList<>();
 }

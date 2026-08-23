@@ -28,6 +28,8 @@ public class KnowledgeRetrieveRequest {
 
     private Integer maxDistanceMeters;
 
+    private List<Long> resourceIds = new ArrayList<>();
+
     private Integer topK;
 
     /** Optional hypothetical answer used only as an additional dense retrieval query. */

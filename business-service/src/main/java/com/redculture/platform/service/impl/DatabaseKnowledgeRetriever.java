@@ -637,6 +637,10 @@ public class DatabaseKnowledgeRetriever implements KnowledgeRetriever {
                 && !request.getResourceCategory().equalsIgnoreCase(item.getResource().getResourceCategory())) {
             return false;
         }
+        if (request.getResourceIds() != null && !request.getResourceIds().isEmpty()
+                && !request.getResourceIds().contains(item.getResourceId())) {
+            return false;
+        }
         return request.getMaxDistanceMeters() == null
                 || (item.getDistanceMeters() != null && item.getDistanceMeters() <= request.getMaxDistanceMeters());
     }

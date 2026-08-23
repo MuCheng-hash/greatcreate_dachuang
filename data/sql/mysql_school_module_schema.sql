@@ -8,6 +8,70 @@ SET NAMES utf8mb4;
 -- 1. Extend shared polymorphic tables so school/resource/activity data
 -- can reuse tags, media, sources, content chunks, and audit logs.
 
+-- Idempotent migration helpers. They make this module safe to run against
+-- both a fresh database and an existing installation.
+DELIMITER $$
+
+DROP PROCEDURE IF EXISTS school_add_column_if_missing $$
+CREATE PROCEDURE school_add_column_if_missing(
+  IN p_table_name VARCHAR(64),
+  IN p_column_name VARCHAR(64),
+  IN p_column_definition TEXT
+)
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM information_schema.tables
+    WHERE table_schema = DATABASE() AND table_name = p_table_name
+  ) AND NOT EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema = DATABASE()
+      AND table_name = p_table_name
+      AND column_name = p_column_name
+  ) THEN
+    SET @school_ddl = CONCAT('ALTER TABLE `', p_table_name,
+      '` ADD COLUMN `', p_column_name, '` ', p_column_definition);
+    PREPARE school_stmt FROM @school_ddl;
+    EXECUTE school_stmt;
+    DEALLOCATE PREPARE school_stmt;
+  END IF;
+END $$
+
+DROP PROCEDURE IF EXISTS school_rebuild_content_chunk_fulltext_index $$
+CREATE PROCEDURE school_rebuild_content_chunk_fulltext_index()
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM information_schema.tables
+    WHERE table_schema = DATABASE() AND table_name = 'content_chunk'
+  ) AND EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema = DATABASE()
+      AND table_name = 'content_chunk'
+      AND column_name = 'retrieval_text'
+  ) THEN
+    IF EXISTS (
+      SELECT 1 FROM information_schema.statistics
+      WHERE table_schema = DATABASE()
+        AND table_name = 'content_chunk'
+        AND index_name = 'ft_chunk_text'
+    ) THEN
+      ALTER TABLE content_chunk DROP INDEX ft_chunk_text;
+    END IF;
+    CREATE FULLTEXT INDEX ft_chunk_text
+      ON content_chunk (chunk_title, chunk_text, retrieval_text)
+      WITH PARSER ngram;
+  END IF;
+END $$
+
+DELIMITER ;
+
+CALL school_add_column_if_missing('content_chunk', 'retrieval_text', 'LONGTEXT NULL AFTER `chunk_text`');
+CALL school_add_column_if_missing('content_chunk', 'embedding_hash', 'CHAR(64) NULL AFTER `embedding_status`');
+CALL school_add_column_if_missing('content_chunk', 'embedding_model', 'VARCHAR(100) NULL AFTER `embedding_hash`');
+CALL school_add_column_if_missing('content_chunk', 'embedding_dimensions', 'INT NULL AFTER `embedding_model`');
+CALL school_add_column_if_missing('content_chunk', 'embedding_index_version', 'VARCHAR(32) NULL AFTER `embedding_dimensions`');
+CALL school_add_column_if_missing('content_chunk', 'embedded_at', 'DATETIME NULL AFTER `embedding_index_version`');
+CALL school_rebuild_content_chunk_fulltext_index();
+
 ALTER TABLE entity_tag_rel
 MODIFY COLUMN entity_type ENUM('site', 'hero', 'event', 'memorial', 'story', 'school', 'resource', 'activity_plan') NOT NULL;
 
@@ -19,19 +83,6 @@ MODIFY COLUMN entity_type ENUM('site', 'hero', 'event', 'memorial', 'story', 'sc
 
 ALTER TABLE content_chunk
 MODIFY COLUMN entity_type ENUM('site', 'hero', 'event', 'memorial', 'story', 'school', 'resource', 'activity_plan') NOT NULL;
-
--- Existing installations: rebuild the Chinese-capable FULLTEXT index once.
-ALTER TABLE content_chunk
-  ADD COLUMN retrieval_text LONGTEXT NULL AFTER chunk_text,
-  ADD COLUMN embedding_hash CHAR(64) NULL AFTER embedding_status,
-  ADD COLUMN embedding_model VARCHAR(100) NULL AFTER embedding_hash,
-  ADD COLUMN embedding_dimensions INT NULL AFTER embedding_model,
-  ADD COLUMN embedding_index_version VARCHAR(32) NULL AFTER embedding_dimensions,
-  ADD COLUMN embedded_at DATETIME NULL AFTER embedding_index_version,
-  DROP INDEX ft_chunk_text;
-CREATE FULLTEXT INDEX ft_chunk_text
-  ON content_chunk (chunk_title, chunk_text, retrieval_text)
-  WITH PARSER ngram;
 
 ALTER TABLE audit_log
 MODIFY COLUMN entity_type ENUM('region', 'site', 'hero', 'event', 'memorial', 'story', 'tag', 'school', 'resource', 'activity_plan') NOT NULL;
@@ -47,6 +98,8 @@ CREATE TABLE IF NOT EXISTS school (
   school_name            VARCHAR(200) NOT NULL,
   school_alias           VARCHAR(200) NULL,
   region_id              BIGINT NULL,
+  province_region_id     BIGINT NULL,
+  city_region_id         BIGINT NULL,
   county_region_id       BIGINT NULL,
   township_region_id     BIGINT NULL,
   village_region_id      BIGINT NULL,
@@ -209,6 +262,11 @@ CREATE TABLE IF NOT EXISTS teaching_activity_plan (
   expected_outcome       TEXT NULL,
   duration_minutes       INT NULL,
   source_id              BIGINT NULL,
+  owner_account_id       BIGINT NULL,
+  plan_payload           LONGTEXT NULL,
+  generation_source      VARCHAR(30) NULL,
+  ai_run_id              BIGINT NULL,
+  published_status       VARCHAR(20) NOT NULL DEFAULT 'draft',
   review_status          ENUM('draft', 'pending', 'approved', 'rejected') NOT NULL DEFAULT 'draft',
   is_active              TINYINT(1) NOT NULL DEFAULT 1,
   created_at             DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -224,6 +282,16 @@ CREATE TABLE IF NOT EXISTS teaching_activity_plan (
   KEY idx_teaching_activity_plan_resource (resource_id),
   KEY idx_teaching_activity_plan_theme (theme),
   KEY idx_teaching_activity_plan_status (review_status, is_active)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS teaching_activity_plan_resource (
+  plan_id BIGINT NOT NULL,
+  resource_id BIGINT NOT NULL,
+  sort_order INT NOT NULL DEFAULT 0,
+  is_primary TINYINT(1) NOT NULL DEFAULT 0,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (plan_id, resource_id),
+  KEY idx_plan_resource_resource (resource_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- 7. Administrator catalog import and projection records
@@ -295,3 +363,6 @@ CREATE TABLE IF NOT EXISTS rag_web_source (
 --   ('SCH_SJZ_GC_0001', '石家庄市藁城区常安镇里庄小学', NULL, NULL, 'primary', '村小', 'public',
 --    1, 0, '河北省石家庄市藁城区常安镇里庄村振兴大街西220号', 114.9537180, 38.0271030, 'amap_poi',
 --    '石家庄市藁城区常安镇里庄小学', '科教文化服务;学校;小学', 'high', 0, 'draft', 1);
+
+DROP PROCEDURE IF EXISTS school_add_column_if_missing;
+DROP PROCEDURE IF EXISTS school_rebuild_content_chunk_fulltext_index;

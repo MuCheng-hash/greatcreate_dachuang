@@ -337,6 +337,8 @@ END $$
 
 DELIMITER ;
 
+CALL add_column_if_missing('school', 'province_region_id', 'BIGINT NULL COMMENT ''省级行政区ID'' AFTER `region_id`');
+CALL add_column_if_missing('school', 'city_region_id', 'BIGINT NULL COMMENT ''市级行政区ID'' AFTER `province_region_id`');
 CALL add_column_if_missing('school', 'logo_url', 'VARCHAR(255) NULL COMMENT ''学校Logo地址''');
 CALL add_column_if_missing('school', 'website_url', 'VARCHAR(255) NULL COMMENT ''学校官网地址''');
 CALL add_column_if_missing('school', 'contact_email', 'VARCHAR(100) NULL COMMENT ''联系邮箱''');
@@ -382,6 +384,19 @@ CALL add_column_if_missing('teaching_activity_plan', 'generation_source', 'VARCH
 CALL add_column_if_missing('teaching_activity_plan', 'ai_run_id', 'BIGINT NULL COMMENT ''AI生成任务ID''');
 CALL add_column_if_missing('teaching_activity_plan', 'published_status', 'VARCHAR(20) NOT NULL DEFAULT ''draft'' COMMENT ''发布状态：draft/published/archived''');
 CALL add_column_if_missing('teaching_activity_plan', 'published_at', 'DATETIME NULL COMMENT ''发布时间''');
+CALL add_column_if_missing('teaching_activity_plan', 'plan_payload', 'LONGTEXT NULL COMMENT ''完整结构化方案 JSON''');
+
+CREATE TABLE IF NOT EXISTS teaching_activity_plan_resource (
+  plan_id BIGINT NOT NULL,
+  resource_id BIGINT NOT NULL,
+  sort_order INT NOT NULL DEFAULT 0,
+  is_primary TINYINT(1) NOT NULL DEFAULT 0,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (plan_id, resource_id),
+  KEY idx_plan_resource_resource (resource_id),
+  CONSTRAINT fk_plan_resource_plan FOREIGN KEY (plan_id) REFERENCES teaching_activity_plan(plan_id),
+  CONSTRAINT fk_plan_resource_resource FOREIGN KEY (resource_id) REFERENCES local_edu_resource(resource_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- =========================================================
 -- 六、建议索引

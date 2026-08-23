@@ -23,6 +23,8 @@ public class TeachingPlanContextVO {
 
     private List<ResourceContextVO> resources = new ArrayList<>();
 
+    private List<ResourceContextVO> selectedResources = new ArrayList<>();
+
     private List<TeachingActivityPlanVO> existingPlans = new ArrayList<>();
 
     private List<ContentChunkContextVO> contentChunks = new ArrayList<>();

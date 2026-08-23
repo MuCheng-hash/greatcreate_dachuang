@@ -106,7 +106,7 @@ INSERT IGNORE INTO school_user_account (
 )
 SELECT
   CONCAT('teacher_', s.school_id, '_', t.no),
-  '$2a$10$Dow1Ykw1Dx3BF2hLfFtUSuCE7t/iOnCfjaJrKf2s72Q9BmcYorLd2',
+  '$2b$10$blqD0CahbIA0E08KsiXy0OI8EoFYCFEZuo9CheBrykIqglWSiSoD6',
   'teacher',
   s.school_id,
   t.teacher_name,
@@ -183,7 +183,7 @@ INSERT IGNORE INTO school_user_account (
 )
 SELECT
   CONCAT('student_', s.school_id, '_', LPAD(n.no, 2, '0')),
-  '$2a$10$Dow1Ykw1Dx3BF2hLfFtUSuCE7t/iOnCfjaJrKf2s72Q9BmcYorLd2',
+  '$2b$10$blqD0CahbIA0E08KsiXy0OI8EoFYCFEZuo9CheBrykIqglWSiSoD6',
   'student',
   s.school_id,
   names.student_name,

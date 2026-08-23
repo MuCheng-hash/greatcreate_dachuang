@@ -93,8 +93,9 @@ public class AiTeachingPlanController {
     public ApiResponse<TeachingActivityPlanAdminVO> saveDraft(@RequestBody GeneratedTeachingPlanSaveRequest request,
                                                               HttpServletRequest servletRequest) {
         try {
-            requireSchoolAccess(request == null ? null : request.getSchoolId(), AuthContext.requireUser(servletRequest));
-            return ApiResponse.success("draft activity plan created", aiTeachingPlanService.saveDraft(request));
+            AuthCurrentUserVO user = AuthContext.requireUser(servletRequest);
+            requireSchoolAccess(request == null ? null : request.getSchoolId(), user);
+            return ApiResponse.success("draft activity plan created", aiTeachingPlanService.saveDraft(request, user.getAccountId()));
         } catch (IllegalArgumentException exception) {
             return ApiResponse.fail(exception.getMessage());
         }
@@ -107,7 +108,38 @@ public class AiTeachingPlanController {
         if (user == null || user.getSchoolId() == null) {
             return ApiResponse.fail("school account is required");
         }
-        return ApiResponse.success(teachingActivityPlanService.listBySchoolId(user.getSchoolId(), 1L, 50L));
+        return ApiResponse.success(teachingActivityPlanService.listMine(user.getAccountId(), user.getSchoolId(), 1L, 50L));
+    }
+
+    @GetMapping("/mine/{planId}")
+    public ApiResponse<TeachingActivityPlanAdminVO> mineDetail(@org.springframework.web.bind.annotation.PathVariable Long planId,
+                                                               HttpServletRequest servletRequest) {
+        try {
+            return ApiResponse.success(teachingActivityPlanService.getMine(planId, AuthContext.requireUser(servletRequest)));
+        } catch (IllegalArgumentException exception) {
+            return ApiResponse.fail(exception.getMessage());
+        }
+    }
+
+    @org.springframework.web.bind.annotation.PutMapping("/mine/{planId}")
+    public ApiResponse<TeachingActivityPlanAdminVO> updateMine(@org.springframework.web.bind.annotation.PathVariable Long planId,
+                                                               @RequestBody com.redculture.platform.vo.request.TeachingActivityPlanUpdateRequest request,
+                                                               HttpServletRequest servletRequest) {
+        try {
+            return ApiResponse.success(teachingActivityPlanService.updateMine(planId, request, AuthContext.requireUser(servletRequest)));
+        } catch (IllegalArgumentException exception) {
+            return ApiResponse.fail(exception.getMessage());
+        }
+    }
+
+    @PostMapping("/mine/{planId}/copy")
+    public ApiResponse<TeachingActivityPlanAdminVO> copyMine(@org.springframework.web.bind.annotation.PathVariable Long planId,
+                                                             HttpServletRequest servletRequest) {
+        try {
+            return ApiResponse.success(teachingActivityPlanService.copyMine(planId, AuthContext.requireUser(servletRequest)));
+        } catch (IllegalArgumentException exception) {
+            return ApiResponse.fail(exception.getMessage());
+        }
     }
 
     //核心权限校验方法

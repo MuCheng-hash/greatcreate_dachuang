@@ -3,6 +3,9 @@ package com.redculture.platform.vo.request;
 import com.redculture.platform.enums.ActivityType;
 import lombok.Data;
 
+import java.util.ArrayList;
+import java.util.List;
+
 @Data
 public class TeachingActivityPlanCreateRequest {
 
@@ -11,6 +14,16 @@ public class TeachingActivityPlanCreateRequest {
     private Long schoolId;
 
     private Long resourceId;
+
+    private List<Long> resourceIds = new ArrayList<>();
+
+    private Long ownerAccountId;
+
+    private String planPayload;
+
+    private String generationSource;
+
+    private Long aiRunId;
 
     private String theme;
 

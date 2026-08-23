@@ -4,10 +4,16 @@ import com.redculture.platform.enums.ActivityType;
 import com.redculture.platform.enums.ReviewStatus;
 import lombok.Data;
 
+import java.util.List;
+
 @Data
 public class TeachingActivityPlanUpdateRequest {
 
     private Long resourceId;
+
+    private List<Long> resourceIds;
+
+    private String planPayload;
 
     private String theme;
 

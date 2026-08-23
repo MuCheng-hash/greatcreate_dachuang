@@ -32,4 +32,8 @@ public interface AiTeachingPlanService {
     }
 
     TeachingActivityPlanAdminVO saveDraft(GeneratedTeachingPlanSaveRequest request);
+
+    default TeachingActivityPlanAdminVO saveDraft(GeneratedTeachingPlanSaveRequest request, Long accountId) {
+        return saveDraft(request);
+    }
 }

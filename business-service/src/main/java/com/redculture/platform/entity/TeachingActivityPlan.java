@@ -26,6 +26,21 @@ public class TeachingActivityPlan extends BaseAuditEntity {
     @TableField("resource_id")
     private Long resourceId;
 
+    @TableField("owner_account_id")
+    private Long ownerAccountId;
+
+    @TableField("plan_payload")
+    private String planPayload;
+
+    @TableField("generation_source")
+    private String generationSource;
+
+    @TableField("ai_run_id")
+    private Long aiRunId;
+
+    @TableField("published_status")
+    private String publishedStatus;
+
     @TableField("theme")
     private String theme;
 
