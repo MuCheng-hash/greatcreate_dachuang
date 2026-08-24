@@ -10,6 +10,8 @@ public class SchoolAdminVO {
 
     private Long schoolId;
 
+    private String schoolCode;
+
     private String schoolName;
 
     private Long provinceRegionId;
@@ -21,6 +23,10 @@ public class SchoolAdminVO {
     private Long townshipRegionId;
 
     private String schoolType;
+
+    private String schoolLevel;
+
+    private String schoolNature;
 
     private String address;
 

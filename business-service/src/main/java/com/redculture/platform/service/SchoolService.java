@@ -8,6 +8,7 @@ import com.redculture.platform.vo.request.SchoolCreateRequest;
 import com.redculture.platform.vo.request.SchoolUpdateRequest;
 import com.redculture.platform.vo.request.SchoolCsvImportRequest;
 import com.redculture.platform.vo.SchoolImportResultVO;
+import org.springframework.web.multipart.MultipartFile;
 
 public interface SchoolService extends IService<School> {
 
@@ -28,4 +29,8 @@ public interface SchoolService extends IService<School> {
                                           Long pageSize);
 
     SchoolImportResultVO importCsv(SchoolCsvImportRequest request);
+
+    SchoolImportResultVO importExcel(MultipartFile file);
+
+    byte[] buildImportTemplate();
 }

@@ -17,6 +17,13 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.bind.annotation.RequestPart;
+import org.springframework.web.multipart.MultipartFile;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
+import org.springframework.http.ContentDisposition;
+import java.nio.charset.StandardCharsets;
 
 @RestController
 @RequestMapping({"/api/admin/schools", "/admin/schools"})
@@ -42,6 +49,25 @@ public class SchoolAdminController {
     @PostMapping("/import-csv")
     public ApiResponse<SchoolImportResultVO> importCsv(@RequestBody SchoolCsvImportRequest request) {
         return ApiResponse.success("schools imported", schoolService.importCsv(request));
+    }
+
+    @GetMapping("/import-template")
+    public ResponseEntity<byte[]> importTemplate() {
+        byte[] content = schoolService.buildImportTemplate();
+        return ResponseEntity.ok()
+                .contentType(MediaType.parseMediaType("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"))
+                .header(HttpHeaders.CONTENT_DISPOSITION, ContentDisposition.attachment()
+                        .filename("schools-import-template.xlsx", StandardCharsets.UTF_8).build().toString())
+                .body(content);
+    }
+
+    @PostMapping(value = "/import-excel", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+    public ApiResponse<SchoolImportResultVO> importExcel(@RequestPart("file") MultipartFile file) {
+        try {
+            return ApiResponse.success("schools imported", schoolService.importExcel(file));
+        } catch (IllegalArgumentException exception) {
+            return ApiResponse.fail(400, exception.getMessage());
+        }
     }
 
     //修改某所学校。

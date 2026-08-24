@@ -10,5 +10,5 @@ public class SchoolImportResultVO {
     private int createdCount;
     private int updatedCount;
     private int failedCount;
-    private List<String> errors = new ArrayList<>();
+    private List<SchoolImportErrorVO> errors = new ArrayList<>();
 }

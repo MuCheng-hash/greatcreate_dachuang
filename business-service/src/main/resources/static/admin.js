@@ -118,6 +118,10 @@ const adminElements = {
     schoolKeywordInput: document.querySelector("#schoolKeywordInput"),
     schoolSearchButton: document.querySelector("#schoolSearchButton"),
     schoolRefreshButton: document.querySelector("#schoolRefreshButton"),
+    schoolTemplateButton: document.querySelector("#schoolTemplateButton"),
+    schoolImportButton: document.querySelector("#schoolImportButton"),
+    schoolImportFileInput: document.querySelector("#schoolImportFileInput"),
+    schoolImportResult: document.querySelector("#schoolImportResult"),
     schoolAddButton: document.querySelector("#schoolAddButton"),
     schoolResetButton: document.querySelector("#schoolResetButton"),
     schoolModal: document.querySelector("#schoolModal"),
@@ -838,6 +842,9 @@ function bindAdminEvents() {
     });
     adminElements.schoolSearchButton?.addEventListener("click", () => void loadSchools());
     adminElements.schoolRefreshButton?.addEventListener("click", () => void loadSchools());
+    adminElements.schoolTemplateButton?.addEventListener("click", () => void downloadSchoolImportTemplate());
+    adminElements.schoolImportButton?.addEventListener("click", () => adminElements.schoolImportFileInput?.click());
+    adminElements.schoolImportFileInput?.addEventListener("change", () => void importSchoolsFromExcel());
     adminElements.schoolResetButton?.addEventListener("click", resetSchoolForm);
     adminElements.schoolAddButton?.addEventListener("click", () => void openCreateSchoolModal());
     adminElements.schoolModalCloseButton?.addEventListener("click", closeSchoolModal);
@@ -2090,6 +2097,95 @@ async function loadSchools() {
     if (adminState.activeTab === "school-map" && adminState.selectedSchoolIdForMap) {
         void loadSchoolMapDetail(adminState.selectedSchoolIdForMap, { renderMap: true });
     }
+}
+
+async function downloadSchoolImportTemplate() {
+    const button = adminElements.schoolTemplateButton;
+    if (button) button.disabled = true;
+    try {
+        const response = await fetch("/api/admin/schools/import-template", { credentials: "include" });
+        if (!response.ok) throw new Error("导入模板下载失败");
+        const blob = await response.blob();
+        const url = URL.createObjectURL(blob);
+        const anchor = document.createElement("a");
+        anchor.href = url;
+        anchor.download = "schools-import-template.xlsx";
+        document.body.appendChild(anchor);
+        anchor.click();
+        anchor.remove();
+        URL.revokeObjectURL(url);
+    } catch (error) {
+        showSchoolImportResult(`模板下载失败：${escapeHtml(error.message || "请稍后重试")}`);
+    } finally {
+        if (button) button.disabled = false;
+    }
+}
+
+async function importSchoolsFromExcel() {
+    const input = adminElements.schoolImportFileInput;
+    const file = input?.files?.[0];
+    if (!file) return;
+    if (!file.name.toLowerCase().endsWith(".xlsx")) {
+        showSchoolImportResult("请选择 .xlsx 格式的 Excel 文件。");
+        input.value = "";
+        return;
+    }
+    if (file.size === 0 || file.size > 10 * 1024 * 1024) {
+        showSchoolImportResult("Excel 文件必须大于 0 且不超过 10 MB。");
+        input.value = "";
+        return;
+    }
+    const button = adminElements.schoolImportButton;
+    if (button) {
+        button.disabled = true;
+        button.textContent = "正在导入...";
+    }
+    showSchoolImportResult(`正在导入 ${escapeHtml(file.name)}（${formatFileSize(file.size)}）...`);
+    try {
+        const headers = { Accept: "application/json" };
+        const token = readCookie("XSRF-TOKEN");
+        if (token) headers["X-CSRF-TOKEN"] = token;
+        const body = new FormData();
+        body.append("file", file);
+        const response = await fetch("/api/admin/schools/import-excel", {
+            method: "POST", credentials: "include", headers, body
+        });
+        const payload = await response.json().catch(() => null);
+        if (!response.ok || !payload || payload.code !== 200) {
+            throw new Error(payload?.message || "Excel 导入失败");
+        }
+        const result = payload.data || {};
+        showSchoolImportResult(renderSchoolImportResult(result));
+        if ((result.createdCount || 0) + (result.updatedCount || 0) > 0) {
+            await loadSchools();
+            setGlobalStatus("学校导入完成", `新增 ${result.createdCount || 0} 所，更新 ${result.updatedCount || 0} 所。`);
+        }
+    } catch (error) {
+        showSchoolImportResult(`导入失败：${escapeHtml(error.message || "请检查文件后重试")}`);
+    } finally {
+        input.value = "";
+        if (button) {
+            button.disabled = false;
+            button.textContent = "导入 Excel";
+        }
+    }
+}
+
+function renderSchoolImportResult(result) {
+    const errors = result.errors || [];
+    const errorTable = errors.length ? `<div class="table-shell"><table><thead><tr><th>Excel 行号</th><th>学校编码</th><th>错误原因</th></tr></thead><tbody>${errors.map(error => `<tr><td>${escapeHtml(error.rowNumber || "-")}</td><td>${escapeHtml(error.schoolCode || "-")}</td><td>${escapeHtml(error.message || "导入失败")}</td></tr>`).join("")}</tbody></table></div>` : "";
+    return `<p>导入完成：新增 <strong>${escapeHtml(result.createdCount || 0)}</strong> 所，更新 <strong>${escapeHtml(result.updatedCount || 0)}</strong> 所，失败 <strong>${escapeHtml(result.failedCount || 0)}</strong> 行。</p>${errorTable}`;
+}
+
+function showSchoolImportResult(html) {
+    const box = adminElements.schoolImportResult;
+    if (!box) return;
+    box.hidden = false;
+    box.innerHTML = html;
+}
+
+function formatFileSize(size) {
+    return size < 1024 * 1024 ? `${Math.ceil(size / 1024)} KB` : `${(size / 1024 / 1024).toFixed(1)} MB`;
 }
 
 async function openCreateSchoolModal() {

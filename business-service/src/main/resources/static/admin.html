@@ -212,9 +212,13 @@
                     <input id="schoolKeywordInput" class="line-input" type="search" placeholder="按学校名称、类型、地址搜索">
                     <button class="ghost-button" id="schoolSearchButton" type="button">查询</button>
                     <button class="ghost-button" id="schoolRefreshButton" type="button">刷新列表</button>
+                    <button class="ghost-button" id="schoolTemplateButton" type="button">下载导入模板</button>
+                    <button class="ghost-button" id="schoolImportButton" type="button">导入 Excel</button>
                     <button class="accent-button" id="schoolAddButton" type="button">新增学校</button>
                 </div>
             </div>
+            <input id="schoolImportFileInput" type="file" accept=".xlsx" hidden>
+            <div id="schoolImportResult" class="status-box" hidden></div>
 
             <article class="table-card">
                 <div class="card-topline">

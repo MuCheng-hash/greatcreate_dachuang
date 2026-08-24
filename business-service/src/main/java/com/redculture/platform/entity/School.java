@@ -38,6 +38,12 @@ public class School extends BaseAuditEntity {
     @TableField("school_type")
     private String schoolType;
 
+    @TableField("school_level")
+    private String schoolLevel;
+
+    @TableField("school_nature")
+    private String schoolNature;
+
     @TableField("address")
     private String address;
 
