@@ -44,7 +44,6 @@ public class AdminAccountInitializer {
         account.setDisplayName(StringUtils.hasText(properties.getDisplayName()) ? properties.getDisplayName().trim() : "平台管理员");
         account.setStatus(AccountStatus.ACTIVE);
         account.setSchoolId(null);
-        account.setRegistrationId(null);
 
         if (account.getAccountId() == null) {
             schoolUserAccountService.save(account);

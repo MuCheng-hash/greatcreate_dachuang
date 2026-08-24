@@ -17,6 +17,9 @@ public class School extends BaseAuditEntity {
     @TableId(value = "school_id", type = IdType.AUTO)
     private Long schoolId;
 
+    @TableField("school_code")
+    private String schoolCode;
+
     @TableField("school_name")
     private String schoolName;
 
@@ -55,4 +58,7 @@ public class School extends BaseAuditEntity {
 
     @TableField("is_active")
     private Boolean active;
+
+    @TableField("review_status")
+    private String reviewStatus;
 }

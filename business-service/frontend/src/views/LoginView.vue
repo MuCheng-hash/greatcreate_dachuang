@@ -48,12 +48,12 @@ async function submit() {
       <RouterLink class="back-home-link" to="/">返回总首页 <ArrowRight :size="15" /></RouterLink>
       <form class="auth-form-wrap form-stack" @submit.prevent="submit">
         <div>
-          <p class="auth-kicker">乡村学校教师端</p>
-          <h2>登录工作台</h2>
-          <p class="auth-intro">使用审核通过的学校账号登录。</p>
+          <p class="auth-kicker">红启乡智</p>
+          <h2>账号登录</h2>
+          <p class="auth-intro">使用已绑定学校的学生、教师或管理员账号登录。</p>
         </div>
         <InlineNotice v-if="error" tone="error">{{ error }}</InlineNotice>
-        <label>学校账号<input v-model="form.username" autocomplete="username" placeholder="请输入学校账号" /></label>
+        <label>账号<input v-model="form.username" autocomplete="username" placeholder="请输入账号" /></label>
         <label>
           密码
           <span class="password-field">
@@ -67,7 +67,7 @@ async function submit() {
           <LogIn :size="18" />{{ auth.loading ? "正在登录" : "登录" }}
         </button>
         <div class="auth-links">
-          <RouterLink to="/register">前往注册 <ArrowRight :size="15" /></RouterLink>
+          <RouterLink to="/register">注册学生或教师账号 <ArrowRight :size="15" /></RouterLink>
         </div>
       </form>
     </main>

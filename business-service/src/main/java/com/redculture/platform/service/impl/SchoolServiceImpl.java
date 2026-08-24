@@ -10,9 +10,13 @@ import com.redculture.platform.service.SchoolService;
 import com.redculture.platform.vo.SchoolAdminVO;
 import com.redculture.platform.vo.request.SchoolCreateRequest;
 import com.redculture.platform.vo.request.SchoolUpdateRequest;
+import com.redculture.platform.vo.request.SchoolCsvImportRequest;
+import com.redculture.platform.vo.SchoolImportResultVO;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
+
+import java.math.BigDecimal;
 
 @Service
 public class SchoolServiceImpl extends ServiceImpl<SchoolMapper, School> implements SchoolService {
@@ -29,6 +33,7 @@ public class SchoolServiceImpl extends ServiceImpl<SchoolMapper, School> impleme
         School school = new School();
         fillSchoolForCreate(school, request);
         school.setActive(true);
+        school.setReviewStatus("approved");
         save(school);
         return toSchoolAdminVO(school);
     }
@@ -89,6 +94,43 @@ public class SchoolServiceImpl extends ServiceImpl<SchoolMapper, School> impleme
                 safePageNum,
                 safePageSize
         );
+    }
+
+    @Override
+    @Transactional
+    public SchoolImportResultVO importCsv(SchoolCsvImportRequest request) {
+        if (request == null || !StringUtils.hasText(request.getCsvContent())) {
+            throw new IllegalArgumentException("csvContent is required");
+        }
+        SchoolImportResultVO result = new SchoolImportResultVO();
+        String[] lines = request.getCsvContent().replace("\r", "").split("\n");
+        for (int index = 0; index < lines.length; index++) {
+            String line = lines[index].trim();
+            if (line.isEmpty() || (index == 0 && line.toLowerCase().startsWith("schoolcode,"))) continue;
+            try {
+                String[] columns = line.split(",", -1);
+                if (columns.length < 6 || !StringUtils.hasText(columns[0]) || !StringUtils.hasText(columns[1])) {
+                    throw new IllegalArgumentException("需要 schoolCode,schoolName,schoolType,address,longitude,latitude 六列");
+                }
+                String code = columns[0].trim();
+                School school = getOne(new LambdaQueryWrapper<School>().eq(School::getSchoolCode, code).last("LIMIT 1"));
+                boolean created = school == null;
+                if (created) { school = new School(); school.setSchoolCode(code); }
+                school.setSchoolName(columns[1].trim());
+                school.setSchoolType(emptyToNull(columns[2]));
+                school.setAddress(emptyToNull(columns[3]));
+                school.setLongitude(new BigDecimal(columns[4].trim()));
+                school.setLatitude(new BigDecimal(columns[5].trim()));
+                school.setReviewStatus("approved");
+                school.setActive(true);
+                if (created) { save(school); result.setCreatedCount(result.getCreatedCount() + 1); }
+                else { updateById(school); result.setUpdatedCount(result.getUpdatedCount() + 1); }
+            } catch (RuntimeException exception) {
+                result.setFailedCount(result.getFailedCount() + 1);
+                result.getErrors().add("第 " + (index + 1) + " 行：" + exception.getMessage());
+            }
+        }
+        return result;
     }
 
     private void validateCreateRequest(SchoolCreateRequest request) {
@@ -168,6 +210,11 @@ public class SchoolServiceImpl extends ServiceImpl<SchoolMapper, School> impleme
 
     private String clean(String value) {
         return value == null ? null : value.trim();
+    }
+
+    private String emptyToNull(String value) {
+        String result = clean(value);
+        return StringUtils.hasText(result) ? result : null;
     }
 
     private <T> T valueOrOriginal(T newValue, T originalValue) {

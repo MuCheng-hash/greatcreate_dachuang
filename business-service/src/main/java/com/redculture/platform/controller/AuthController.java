@@ -7,11 +7,10 @@ import com.redculture.platform.service.auth.AuthTokenException;
 import com.redculture.platform.service.auth.AuthTokenService;
 import com.redculture.platform.config.AuthContext;
 import com.redculture.platform.vo.AuthCurrentUserVO;
-import com.redculture.platform.vo.SchoolRegistrationSubmitVO;
 import com.redculture.platform.vo.request.AuthLoginRequest;
 import com.redculture.platform.vo.request.AuthPasswordChangeRequest;
 import com.redculture.platform.vo.request.AuthProfileUpdateRequest;
-import com.redculture.platform.vo.request.SchoolRegisterRequest;
+import com.redculture.platform.vo.request.AccountRegisterRequest;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -40,10 +39,10 @@ public class AuthController {
         this.cookieManager = cookieManager;
     }
 
-    //提交学生注册申请。通常包含学校信息及管理员账号信息，等待平台管理员审核。
-    @PostMapping("/school-register")
-    public ApiResponse<SchoolRegistrationSubmitVO> schoolRegister(@RequestBody SchoolRegisterRequest request) {
-        return ApiResponse.success("registration submitted", authService.registerSchool(request));
+    @PostMapping("/register")
+    public ApiResponse<Void> register(@RequestBody AccountRegisterRequest request) {
+        authService.registerAccount(request);
+        return ApiResponse.success("registration successful", null);
     }
 
     //使用账号密码登录，签发令牌并写入浏览器 Cookie。

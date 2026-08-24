@@ -42,7 +42,7 @@ public class CsrfInterceptor implements org.springframework.web.servlet.HandlerI
     private boolean isExempt(String path) {
         return path.equals("/api/auth/login")
                 || path.equals("/api/auth/refresh")
-                || path.equals("/api/auth/school-register");
+                || path.equals("/api/auth/register");
     }
 
     private String readCookie(HttpServletRequest request, String name) {

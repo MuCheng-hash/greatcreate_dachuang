@@ -30,9 +30,6 @@ public class SchoolUserAccount extends BaseAuditEntity {
     @TableField("school_id")
     private Long schoolId;
 
-    @TableField("registration_id")
-    private Long registrationId;
-
     @TableField("display_name")
     private String displayName;
 

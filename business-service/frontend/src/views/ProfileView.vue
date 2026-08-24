@@ -1,5 +1,5 @@
 <script setup>
-import { onMounted, reactive, ref } from "vue";
+import { computed, onMounted, reactive, ref } from "vue";
 import { Building2, KeyRound, Save, ShieldCheck, UserRound } from "@lucide/vue";
 import AppShell from "@/components/AppShell.vue";
 import InlineNotice from "@/components/InlineNotice.vue";
@@ -18,16 +18,40 @@ const profileSaving = ref(false);
 const passwordSaving = ref(false);
 const profileNotice = reactive({ tone: "", text: "" });
 const passwordNotice = reactive({ tone: "", text: "" });
+const invites = ref([]);
+const inviteNotice = reactive({ tone: "", text: "" });
+const isSchoolAdmin = computed(() => auth.user?.roleCode === "school_admin");
 
 onMounted(async () => {
   await schoolStore.load();
   syncProfile();
+  if (isSchoolAdmin.value) await loadInvites();
 });
 
 function syncProfile() {
   profile.displayName = auth.user?.displayName || "";
   profile.contactName = auth.user?.contactName || "";
   profile.contactPhone = auth.user?.contactPhone || "";
+}
+
+async function loadInvites() {
+  try { invites.value = await api.get("/api/teacher/registration-invites"); }
+  catch (error) { inviteNotice.tone = "error"; inviteNotice.text = error.message || "邀请码加载失败。"; }
+}
+
+async function createInvite() {
+  inviteNotice.text = "";
+  try {
+    const invite = await api.post("/api/teacher/registration-invites");
+    inviteNotice.tone = "success";
+    inviteNotice.text = `新邀请码：${invite.inviteCode}。请立即转交教师，页面刷新后不会再次显示。`;
+    await loadInvites();
+  } catch (error) { inviteNotice.tone = "error"; inviteNotice.text = error.message || "邀请码创建失败。"; }
+}
+
+async function revokeInvite(inviteId) {
+  try { await api.delete(`/api/teacher/registration-invites/${inviteId}`); await loadInvites(); }
+  catch (error) { inviteNotice.tone = "error"; inviteNotice.text = error.message || "邀请码作废失败。"; }
 }
 
 async function saveProfile() {
@@ -93,6 +117,15 @@ function formatDate(value) {
           </form>
         </section>
 
+        <section v-if="isSchoolAdmin" class="page-panel">
+          <div class="panel-header"><div><h2>教师注册邀请码</h2><p>邀请码默认 7 天有效，最多可用于 50 位教师注册。</p></div><button class="secondary-button" type="button" @click="createInvite">生成邀请码</button></div>
+          <div class="panel-body">
+            <InlineNotice v-if="inviteNotice.text" :tone="inviteNotice.tone">{{ inviteNotice.text }}</InlineNotice>
+            <div v-if="invites.length" class="invite-list"><div v-for="item in invites" :key="item.inviteId" class="invite-row"><span>{{ item.status === 'active' ? '有效' : '已作废' }} · 已用 {{ item.usedCount }}/{{ item.maxUses }} · 截止 {{ formatDate(item.expiresAt) }}</span><button v-if="item.status === 'active'" class="text-button" type="button" @click="revokeInvite(item.inviteId)">作废</button></div></div>
+            <p v-else class="muted">暂无教师注册邀请码。</p>
+          </div>
+        </section>
+
         <section class="page-panel">
           <div class="panel-header"><div><h2>绑定学校</h2><p>学校主数据由平台管理员统一维护。</p></div><Building2 :size="21" /></div>
           <dl class="school-info panel-body">
@@ -137,6 +170,7 @@ function formatDate(value) {
 .school-info div { padding: 13px 0; border-bottom: 1px solid var(--line); }
 .school-info dt { color: var(--muted); font-size: 12px; }
 .school-info dd { margin: 5px 0 0; line-height: 1.6; }
+.invite-list { display: grid; gap: 8px; }.invite-row { display: flex; justify-content: space-between; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--line); font-size: 13px; }
 @media (max-width: 980px) { .profile-layout { grid-template-columns: 1fr; } .profile-summary { place-items: start; text-align: left; } }
 @media (max-width: 640px) { .school-info { grid-template-columns: 1fr; } }
 </style>

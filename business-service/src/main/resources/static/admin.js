@@ -1,6 +1,5 @@
 const adminState = {
     activeTab: "dashboard",
-    registrations: [],
     schools: [],
     resources: [],
     schoolProvinceRegions: [],
@@ -966,7 +965,6 @@ async function bootstrapAdmin() {
             loadClientMapConfig(),
             loadSchoolRegionNames(),
             loadSchoolProvinceOptions(),
-            loadRegistrations(),
             loadSchools(),
               loadResources(),
               loadPlans(),

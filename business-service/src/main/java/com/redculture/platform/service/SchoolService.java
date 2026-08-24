@@ -6,6 +6,8 @@ import com.redculture.platform.entity.School;
 import com.redculture.platform.vo.SchoolAdminVO;
 import com.redculture.platform.vo.request.SchoolCreateRequest;
 import com.redculture.platform.vo.request.SchoolUpdateRequest;
+import com.redculture.platform.vo.request.SchoolCsvImportRequest;
+import com.redculture.platform.vo.SchoolImportResultVO;
 
 public interface SchoolService extends IService<School> {
 
@@ -24,4 +26,6 @@ public interface SchoolService extends IService<School> {
                                           Long townshipRegionId,
                                           Long pageNum,
                                           Long pageSize);
+
+    SchoolImportResultVO importCsv(SchoolCsvImportRequest request);
 }

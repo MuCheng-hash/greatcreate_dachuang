@@ -6,6 +6,8 @@ import com.redculture.platform.service.SchoolService;
 import com.redculture.platform.vo.SchoolAdminVO;
 import com.redculture.platform.vo.request.SchoolCreateRequest;
 import com.redculture.platform.vo.request.SchoolUpdateRequest;
+import com.redculture.platform.vo.request.SchoolCsvImportRequest;
+import com.redculture.platform.vo.SchoolImportResultVO;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -35,6 +37,11 @@ public class SchoolAdminController {
         } catch (IllegalArgumentException exception) {
             return ApiResponse.fail(exception.getMessage());
         }
+    }
+
+    @PostMapping("/import-csv")
+    public ApiResponse<SchoolImportResultVO> importCsv(@RequestBody SchoolCsvImportRequest request) {
+        return ApiResponse.success("schools imported", schoolService.importCsv(request));
     }
 
     //修改某所学校。
