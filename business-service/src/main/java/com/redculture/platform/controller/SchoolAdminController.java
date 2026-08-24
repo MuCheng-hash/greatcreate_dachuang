@@ -17,7 +17,7 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 @RestController
-@RequestMapping("/api/admin/schools")
+@RequestMapping({"/api/admin/schools", "/admin/schools"})
 //管理员维护学校：新增、编辑、删除、详情和分页查询。
 public class SchoolAdminController {
 

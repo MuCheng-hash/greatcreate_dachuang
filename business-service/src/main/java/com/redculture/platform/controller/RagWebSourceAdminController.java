@@ -15,7 +15,7 @@ import org.springframework.web.bind.annotation.RestController;
 import java.util.List;
 
 @RestController
-@RequestMapping("/api/admin/rag/web-sources")
+@RequestMapping({"/api/admin/rag/web-sources", "/admin/rag/web-sources"})
 public class RagWebSourceAdminController {
 
     private final RagWebSourceService service;

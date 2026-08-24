@@ -31,6 +31,9 @@ public class TemplateAnswerGenerator implements AnswerGenerator {
             case RELATION_QUERY -> relationAnswer(context);
             case UNKNOWN -> unknownAnswer();
         };
+        if (context.isStudentMode()) {
+            answer = "我们可以这样理解：\n" + answer;
+        }
         if (retrieval != null && retrieval.getRetrievalStatus() != null
                 && retrieval.getRetrievalStatus().getValue().equals("degraded")) {
             answer += "\n\n提示：部分知识检索能力暂不可用，以上内容仅基于当前业务数据和可用证据。";

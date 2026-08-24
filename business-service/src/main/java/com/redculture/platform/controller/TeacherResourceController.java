@@ -7,7 +7,7 @@ import com.redculture.platform.vo.request.TeacherResourceQueryRequest;
 import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.web.bind.annotation.*;
 import java.util.List;
-@RestController @RequestMapping("/api/teacher/resources") public class TeacherResourceController {
+@RestController @RequestMapping({"/api/teacher/resources", "/teacher/resources"}) public class TeacherResourceController {
  private final TeacherResourceService service; public TeacherResourceController(TeacherResourceService service){this.service=service;}
  @GetMapping("/nearby") public ApiResponse<List<TeacherResourceVO>> nearby(TeacherResourceQueryRequest query,HttpServletRequest request){return run(()->service.nearby(query,AuthContext.requireUser(request)));}
  @GetMapping("/favorites") public ApiResponse<List<TeacherResourceVO>> favorites(HttpServletRequest request){return run(()->service.favorites(AuthContext.requireUser(request)));}

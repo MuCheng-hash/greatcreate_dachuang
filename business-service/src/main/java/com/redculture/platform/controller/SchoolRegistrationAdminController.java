@@ -16,7 +16,7 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 @RestController
-@RequestMapping("/api/admin/registrations")
+@RequestMapping({"/api/admin/registrations", "/admin/registrations"})
 //管理员审核学校注册申请：查询申请、查看详情、通过或拒绝。
 public class SchoolRegistrationAdminController {
 

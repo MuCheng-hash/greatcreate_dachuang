@@ -152,6 +152,7 @@ export interface AssistantResponseSnapshot {
   citations?: AgentCitation[];
   relatedResources?: string[];
   followUpQuestions?: string[];
+  exploreSuggestions?: Array<Record<string, unknown>>;
   provider?: string | null;
   model?: string | null;
   fallbackLevel?: number | string | null;
@@ -198,6 +199,7 @@ export interface AgentQaResponse {
   relatedResources?: string[];
   citations?: Array<AgentCitation | string>;
   followUpQuestions?: string[];
+  exploreSuggestions?: Array<Record<string, unknown>>;
   clarificationRequired?: boolean;
   clarificationMessage?: string;
   clarificationOptions?: string[];
@@ -224,6 +226,10 @@ export interface TeachingContext {
   theme?: string | null;
   resourceCategory?: string | null;
   maxDistanceMeters?: number | null;
+  resourceId?: number | null;
+  taskId?: number | null;
+  studentMode?: boolean;
+  taskTitle?: string | null;
 }
 
 export interface AgentThreadMessage {
@@ -269,6 +275,8 @@ export interface AgentQaRequestPayload {
   theme?: string | null;
   resourceCategory?: string | null;
   maxDistanceMeters?: number | null;
+  resourceId?: number | null;
+  taskId?: number | null;
   topK?: number;
   modelId?: string | null;
   debug?: boolean;

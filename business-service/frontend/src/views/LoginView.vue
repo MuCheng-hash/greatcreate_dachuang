@@ -24,9 +24,10 @@ async function submit() {
       window.location.assign("/admin.html");
       return;
     }
+    const defaultPath = user?.roleCode === "student" ? "/student/home" : "/teacher/map";
     const redirect = typeof route.query.redirect === "string" && route.query.redirect.startsWith("/")
       ? route.query.redirect
-      : "/map";
+      : defaultPath;
     await router.replace(redirect);
   } catch (requestError) {
     error.value = requestError.message || "登录失败，请核对账号信息。";
@@ -44,6 +45,7 @@ async function submit() {
       </div>
     </section>
     <main class="auth-form-side">
+      <RouterLink class="back-home-link" to="/">返回总首页 <ArrowRight :size="15" /></RouterLink>
       <form class="auth-form-wrap form-stack" @submit.prevent="submit">
         <div>
           <p class="auth-kicker">乡村学校教师端</p>
@@ -78,4 +80,8 @@ async function submit() {
 .password-toggle { position: absolute; top: 2px; right: 2px; width: 38px; height: 38px; display: grid; place-items: center; border: 0; background: transparent; color: #667169; }
 .auth-links { justify-content: flex-end; }
 .auth-links a:last-child { display: inline-flex; align-items: center; gap: 4px; }
+.auth-form-side { position: relative; }
+.back-home-link { position: absolute; top: 28px; right: 34px; display: inline-flex; align-items: center; gap: 5px; color: #52705e; font-size: 13px; font-weight: 700; }
+.back-home-link:hover { color: var(--red); }
+@media (max-width: 900px) { .back-home-link { top: 18px; right: 22px; } }
 </style>

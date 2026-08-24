@@ -659,6 +659,17 @@ public class AgentRuntimeClient {
         }
         trusted.put("region", context.getRegionDetail());
         trusted.put("resource", context.getResource());
+        trusted.put("studentMode", context.isStudentMode());
+        if (context.isStudentMode()) {
+            trusted.put("audienceInstruction", "面向学生回答：使用通俗短句，不能编造事实，只能使用可信证据，并在回答末尾给出继续探索建议。");
+            Map<String, Object> studentContext = new LinkedHashMap<>();
+            studentContext.put("resourceId", context.getResourceId());
+            studentContext.put("taskId", context.getTaskId());
+            studentContext.put("taskTitle", context.getTaskTitle());
+            studentContext.put("taskDescription", context.getTaskDescription());
+            studentContext.put("taskResourceIds", context.getTaskResourceIds());
+            trusted.put("studentContext", studentContext);
+        }
         trusted.put("retrieval", context.getRetrieval());
         trusted.put("citationCandidates", context.getRetrieval() == null
                 ? List.of() : context.getRetrieval().getCitationCandidates());

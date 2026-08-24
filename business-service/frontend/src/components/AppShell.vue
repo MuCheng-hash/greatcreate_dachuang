@@ -1,7 +1,7 @@
 <script setup>
 import { computed } from "vue";
 import { useRoute, useRouter } from "vue-router";
-import { Bot, Bug, ClipboardList, Compass, GraduationCap, LogOut, Map, NotebookPen, UserRound } from "@lucide/vue";
+import { Bot, Bug, ClipboardList, Compass, GraduationCap, History, LogOut, Map, NotebookPen, UserRound } from "@lucide/vue";
 import { useAuthStore } from "@/stores/auth";
 
 defineProps({ title: { type: String, required: true }, subtitle: { type: String, default: "" } });
@@ -9,16 +9,26 @@ defineProps({ title: { type: String, required: true }, subtitle: { type: String,
 const route = useRoute();
 const router = useRouter();
 const auth = useAuthStore();
-const navItems = [
-  { to: "/map", label: "地图资源", icon: Map },
-  { to: "/teaching-plans", label: "教学方案", icon: NotebookPen },
-  { to: "/classes", label: "班级管理", icon: GraduationCap },
-  { to: "/tasks", label: "学习任务", icon: ClipboardList },
-  { to: "/resource-discovery", label: "资源发现", icon: Compass },
-  { to: "/assistant", label: "智能问答", icon: Bot },
-  { to: "/agent-debug", label: "Agent 调试", icon: Bug },
-  { to: "/profile", label: "个人中心", icon: UserRound }
+const teacherNavItems = [
+  { to: "/teacher/map", label: "地图资源", icon: Map },
+  { to: "/teacher/teaching-plans", label: "教学方案", icon: NotebookPen },
+  { to: "/teacher/classes", label: "班级管理", icon: GraduationCap },
+  { to: "/teacher/tasks", label: "学习任务", icon: ClipboardList },
+  { to: "/teacher/resource-discovery", label: "资源发现", icon: Compass },
+  { to: "/teacher/assistant", label: "智能问答", icon: Bot },
+  { to: "/teacher/agent-debug", label: "Agent 调试", icon: Bug },
+  { to: "/teacher/profile", label: "个人中心", icon: UserRound }
 ];
+const studentNavItems = [
+  { to: "/student/home", label: "学生首页", icon: GraduationCap },
+  { to: "/student/learning-footprint", label: "学习足迹", icon: History },
+  { to: "/student/tasks", label: "学习任务", icon: ClipboardList },
+  { to: "/student/resource-discovery", label: "资源发现", icon: Compass },
+  { to: "/student/assistant", label: "智能问答", icon: Bot },
+  { to: "/student/map", label: "地图资源", icon: Map },
+  { to: "/student/profile", label: "个人中心", icon: UserRound }
+];
+const navItems = computed(() => auth.user?.roleCode === "student" ? studentNavItems : teacherNavItems);
 const initials = computed(() => auth.schoolLabel.slice(0, 1));
 
 async function logout() {
@@ -33,7 +43,7 @@ async function logout() {
 <template>
   <div class="app-layout">
     <aside class="app-sidebar">
-      <RouterLink class="side-brand" to="/map" aria-label="乡村学校思政资源工作台">
+      <RouterLink class="side-brand" :to="auth.user?.roleCode === 'student' ? '/student/home' : '/teacher/map'" aria-label="乡村学校思政资源工作台">
         <span class="brand-symbol">乡</span>
         <span><strong>思政资源工作台</strong><small>乡村学校教师端</small></span>
       </RouterLink>
@@ -56,7 +66,7 @@ async function logout() {
           <p v-if="subtitle">{{ subtitle }}</p>
         </div>
         <div class="topbar-actions">
-          <RouterLink class="icon-button" to="/profile" title="个人中心" aria-label="个人中心"><UserRound :size="19" /></RouterLink>
+          <RouterLink class="icon-button" :to="auth.user?.roleCode === 'student' ? '/student/profile' : '/teacher/profile'" title="个人中心" aria-label="个人中心"><UserRound :size="19" /></RouterLink>
           <button class="icon-button" type="button" title="退出登录" aria-label="退出登录" @click="logout"><LogOut :size="19" /></button>
         </div>
       </header>

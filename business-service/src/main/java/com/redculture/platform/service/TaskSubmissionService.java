@@ -10,6 +10,7 @@ import java.util.List;
 
 public interface TaskSubmissionService {
     record DownloadAttachment(Resource resource, String filename, String contentType) { }
+    StudentTaskPageVO studentTaskPage(String status, Long pageNum, Long pageSize, AuthCurrentUserVO user);
     StudentTaskDetailVO studentTaskDetail(Long taskId, AuthCurrentUserVO user);
     StudentTaskSubmissionVO createSubmission(Long taskId, StudentTaskSubmissionRequest request, AuthCurrentUserVO user);
     StudentTaskAttachmentVO uploadAttachment(Long submissionId, MultipartFile file, AuthCurrentUserVO user);

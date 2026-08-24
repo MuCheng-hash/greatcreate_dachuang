@@ -20,4 +20,7 @@ public class ClassTaskVO {
     private long completedCount;
     private long overdueCount;
     private String studentStatus;
+    private long resourceCount;
+    private java.time.LocalDateTime completedAt;
+    private java.time.LocalDateTime submittedAt;
 }

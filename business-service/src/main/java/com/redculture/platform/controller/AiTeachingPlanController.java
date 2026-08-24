@@ -22,6 +22,13 @@ import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.format.annotation.DateTimeFormat;
+import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.time.LocalTime;
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
@@ -103,12 +110,49 @@ public class AiTeachingPlanController {
 
     //查询当前登录用户所在学校的教学活动方案，最多返回前 50 条。
     @GetMapping("/mine")
-    public ApiResponse<PageResult<TeachingActivityPlanAdminVO>> mine(HttpServletRequest servletRequest) {
+    public ResponseEntity<?> mine(
+            @RequestParam(required = false) String grade,
+            @RequestParam(required = false) String theme,
+            @RequestParam(required = false) Long resourceId,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate createdFrom,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate createdTo,
+            @RequestParam(required = false) Long pageNum,
+            @RequestParam(required = false) Long pageSize,
+            HttpServletRequest servletRequest) {
         AuthCurrentUserVO user = AuthContext.currentUser(servletRequest);
         if (user == null || user.getSchoolId() == null) {
-            return ApiResponse.fail("school account is required");
+            return ResponseEntity.badRequest().body(ApiResponse.fail(400, "school account is required"));
         }
-        return ApiResponse.success(teachingActivityPlanService.listMine(user.getAccountId(), user.getSchoolId(), 1L, 50L));
+        try {
+            LocalDateTime from = createdFrom == null ? null : createdFrom.atStartOfDay();
+            LocalDateTime to = createdTo == null ? null : createdTo.atTime(LocalTime.MAX);
+            return ResponseEntity.ok(ApiResponse.success(teachingActivityPlanService.listMine(user, grade, theme, resourceId, from, to, pageNum, pageSize)));
+        } catch (IllegalArgumentException exception) {
+            return ResponseEntity.badRequest().body(ApiResponse.fail(400, exception.getMessage()));
+        }
+    }
+
+    @GetMapping("/mine/{planId}/export")
+    public ResponseEntity<?> exportMine(@org.springframework.web.bind.annotation.PathVariable Long planId,
+                                        HttpServletRequest servletRequest) {
+        try {
+            TeachingActivityPlanAdminVO plan = teachingActivityPlanService.getMine(planId, AuthContext.requireUser(servletRequest));
+            byte[] content = teachingActivityPlanService.exportMine(planId, AuthContext.requireUser(servletRequest));
+            String fileName = "教学方案-" + safeFilePart(plan.getTheme()) + ".docx";
+            return ResponseEntity.ok()
+                    .contentType(MediaType.parseMediaType("application/vnd.openxmlformats-officedocument.wordprocessingml.document"))
+                    .header("Content-Disposition", "attachment; filename*=UTF-8''" + URLEncoder.encode(fileName, StandardCharsets.UTF_8))
+                    .body(content);
+        } catch (IllegalArgumentException exception) {
+            return ResponseEntity.status(HttpStatus.NOT_FOUND).body(ApiResponse.fail(exception.getMessage()));
+        } catch (java.io.IOException exception) {
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(ApiResponse.fail("DOCX export failed"));
+        }
+    }
+
+    private String safeFilePart(String value) {
+        String safe = value == null ? "教学方案" : value.replaceAll("[\\\\/:*?\"<>|\\r\\n]", "_").trim();
+        return safe.isEmpty() ? "教学方案" : safe.substring(0, Math.min(80, safe.length()));
     }
 
     @GetMapping("/mine/{planId}")

@@ -413,6 +413,11 @@ export const api = {
   delete<T = unknown>(path: string, options: ApiRequestOptions = {}): Promise<T> {
     return apiRequest<T>(path, { ...options, method: "DELETE" });
   },
+  async download(path: string, options: ApiRequestOptions = {}): Promise<Blob> {
+    const response = await fetch(path, { ...options, method: "GET", credentials: "include", headers: prepareHeaders(options, "GET") });
+    if (!response.ok) throw new ApiError(`下载失败（HTTP ${response.status}）`, response.status);
+    return response.blob();
+  },
   stream(path: string, body: unknown, options: StreamRequestOptions = {}): Promise<AgentSseEvent | undefined> {
     return streamRequest(path, body, options);
   },

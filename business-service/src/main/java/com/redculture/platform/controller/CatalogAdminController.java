@@ -15,7 +15,7 @@ import org.springframework.web.multipart.MultipartFile;
 import java.util.List;
 
 @RestController
-@RequestMapping("/api/admin/catalog")
+@RequestMapping({"/api/admin/catalog", "/admin/catalog"})
 public class CatalogAdminController {
     private final CatalogAdminService catalogService;
     private final CatalogProjectionService projectionService;

@@ -2,13 +2,35 @@ USE red_culture_platform;
 
 SET NAMES utf8mb4;
 
-ALTER TABLE local_edu_resource
-  ADD COLUMN external_provider VARCHAR(30) NULL AFTER source_id,
-  ADD COLUMN external_place_id VARCHAR(100) NULL AFTER external_provider,
-  ADD COLUMN source_checked_at DATETIME NULL AFTER external_place_id;
+DELIMITER $$
+DROP PROCEDURE IF EXISTS add_resource_discovery_column_if_missing $$
+CREATE PROCEDURE add_resource_discovery_column_if_missing(
+  IN column_name_param VARCHAR(64), IN column_definition_param TEXT
+)
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'local_edu_resource' AND COLUMN_NAME = column_name_param) THEN
+    SET @ddl = CONCAT('ALTER TABLE local_edu_resource ADD COLUMN `', column_name_param, '` ', column_definition_param);
+    PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+  END IF;
+END $$
+DELIMITER ;
 
-CREATE UNIQUE INDEX uk_local_resource_external_place
-  ON local_edu_resource (external_provider, external_place_id);
+CALL add_resource_discovery_column_if_missing('external_provider', 'VARCHAR(30) NULL AFTER source_id');
+CALL add_resource_discovery_column_if_missing('external_place_id', 'VARCHAR(100) NULL AFTER external_provider');
+CALL add_resource_discovery_column_if_missing('source_checked_at', 'DATETIME NULL AFTER external_place_id');
+DROP PROCEDURE IF EXISTS add_resource_discovery_column_if_missing;
+
+SET @resource_discovery_index_exists = (
+  SELECT COUNT(*) FROM INFORMATION_SCHEMA.STATISTICS
+  WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'local_edu_resource'
+    AND INDEX_NAME = 'uk_local_resource_external_place'
+);
+SET @resource_discovery_ddl = IF(@resource_discovery_index_exists = 0,
+  'CREATE UNIQUE INDEX uk_local_resource_external_place ON local_edu_resource (external_provider, external_place_id)',
+  'SELECT 1');
+PREPARE resource_discovery_stmt FROM @resource_discovery_ddl;
+EXECUTE resource_discovery_stmt;
+DEALLOCATE PREPARE resource_discovery_stmt;
 
 CREATE TABLE IF NOT EXISTS resource_discovery_run (
   run_id                 BIGINT PRIMARY KEY AUTO_INCREMENT,

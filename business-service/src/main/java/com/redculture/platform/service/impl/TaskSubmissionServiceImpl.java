@@ -34,7 +34,78 @@ public class TaskSubmissionServiceImpl implements TaskSubmissionService {
         this.taskMapper = taskMapper; this.progressMapper = progressMapper; this.submissionMapper = submissionMapper; this.attachmentMapper = attachmentMapper; this.reviewMapper = reviewMapper; this.taskResourceMapper = taskResourceMapper; this.resourceMapper = resourceMapper; this.studentMapper = studentMapper; this.teacherMapper = teacherMapper; this.memberMapper = memberMapper; this.classTeacherMapper = classTeacherMapper; this.storage = storage;
     }
 
-    @Override public StudentTaskDetailVO studentTaskDetail(Long taskId, AuthCurrentUserVO user) { StudentProfile student = requireStudent(user); ClassLearningTask task = requirePublishedTask(taskId); requireActiveMember(task, student.getStudentId()); return taskDetail(task, currentSubmission(taskId, student.getStudentId())); }
+    @Override
+    public StudentTaskPageVO studentTaskPage(String status, Long pageNum, Long pageSize, AuthCurrentUserVO user) {
+        StudentProfile student = requireStudent(user);
+        String normalizedStatus = StringUtils.hasText(status) ? status.trim().toLowerCase(Locale.ROOT) : "";
+        if (!normalizedStatus.isEmpty() && !Set.of("pending", "submitted", "completed", "overdue").contains(normalizedStatus)) {
+            throw new IllegalArgumentException("unsupported task status");
+        }
+        long page = pageNum == null || pageNum < 1 ? 1 : pageNum;
+        long size = pageSize == null || pageSize < 1 ? 20 : Math.min(pageSize, 100);
+        Set<Long> activeClassIds = memberMapper.selectList(new LambdaQueryWrapper<ClassMember>()
+                        .eq(ClassMember::getStudentId, student.getStudentId()).eq(ClassMember::getStatus, "active"))
+                .stream().map(ClassMember::getClassId).collect(Collectors.toSet());
+        StudentTaskPageVO result = new StudentTaskPageVO();
+        result.setPageNum(page); result.setPageSize(size);
+        if (activeClassIds.isEmpty()) return result;
+
+        Map<Long, StudentTaskProgress> progressByTask = progressMapper.selectList(new LambdaQueryWrapper<StudentTaskProgress>()
+                        .eq(StudentTaskProgress::getStudentId, student.getStudentId()))
+                .stream().collect(Collectors.toMap(StudentTaskProgress::getTaskId, Function.identity(), (first, ignored) -> first));
+        List<ClassLearningTask> assignedTasks = taskMapper.selectList(new LambdaQueryWrapper<ClassLearningTask>()
+                        .in(ClassLearningTask::getClassId, activeClassIds).eq(ClassLearningTask::getStatus, "published"))
+                .stream().filter(task -> progressByTask.containsKey(task.getTaskId())).toList();
+        if (assignedTasks.isEmpty()) return result;
+
+        List<Long> taskIds = assignedTasks.stream().map(ClassLearningTask::getTaskId).toList();
+        Map<Long, StudentTaskSubmission> submissions = submissionMapper.selectList(new LambdaQueryWrapper<StudentTaskSubmission>()
+                        .eq(StudentTaskSubmission::getStudentId, student.getStudentId())
+                        .in(StudentTaskSubmission::getTaskId, taskIds).eq(StudentTaskSubmission::getCurrent, true))
+                .stream().collect(Collectors.toMap(StudentTaskSubmission::getTaskId, Function.identity(), (first, ignored) -> first));
+        Map<Long, Long> resourceCounts = taskResourceMapper.selectList(new LambdaQueryWrapper<TaskResourceRel>()
+                        .in(TaskResourceRel::getTaskId, taskIds)).stream()
+                .collect(Collectors.groupingBy(TaskResourceRel::getTaskId, Collectors.counting()));
+
+        List<ClassTaskVO> all = assignedTasks.stream().map(task -> {
+            ClassTaskVO vo = new ClassTaskVO(); fillTask(vo, task);
+            vo.setTaskType(task.getTaskType()); vo.setSubmissionRule(task.getSubmissionRule());
+            vo.setAllowLateSubmission(Boolean.TRUE.equals(task.getAllowLateSubmission()));
+            StudentTaskProgress progress = progressByTask.get(task.getTaskId());
+            vo.setStudentStatus(studentStatus(task, progress));
+            vo.setCompletedAt(progress == null ? null : progress.getCompletedAt());
+            StudentTaskSubmission current = submissions.get(task.getTaskId());
+            vo.setSubmittedAt(current == null ? null : current.getSubmittedAt());
+            vo.setResourceCount(resourceCounts.getOrDefault(task.getTaskId(), 0L));
+            return vo;
+        }).toList();
+        StudentTaskSummaryVO summary = result.getSummary();
+        all.forEach(task -> {
+            switch (task.getStudentStatus()) {
+                case "submitted" -> summary.setSubmittedCount(summary.getSubmittedCount() + 1);
+                case "completed" -> summary.setCompletedCount(summary.getCompletedCount() + 1);
+                case "overdue" -> summary.setOverdueCount(summary.getOverdueCount() + 1);
+                default -> summary.setPendingCount(summary.getPendingCount() + 1);
+            }
+        });
+        Comparator<ClassTaskVO> byDueAscending = Comparator.comparing(ClassTaskVO::getDueAt, Comparator.nullsLast(Comparator.naturalOrder()));
+        Comparator<ClassTaskVO> byDueDescending = Comparator.comparing(ClassTaskVO::getDueAt, Comparator.nullsLast(Comparator.reverseOrder()));
+        Comparator<ClassTaskVO> byPublishedDescending = Comparator.comparing(ClassTaskVO::getPublishedAt, Comparator.nullsLast(Comparator.reverseOrder()));
+        Comparator<ClassTaskVO> bySubmittedDescending = Comparator.comparing(ClassTaskVO::getSubmittedAt, Comparator.nullsLast(Comparator.reverseOrder()));
+        List<ClassTaskVO> filtered = all.stream().filter(task -> matchesStatus(task.getStudentStatus(), normalizedStatus)).sorted((left, right) -> {
+            String leftStatus = left.getStudentStatus(); String rightStatus = right.getStudentStatus();
+            if ("overdue".equals(leftStatus) && "overdue".equals(rightStatus)) return byDueDescending.compare(left, right);
+            if ("submitted".equals(leftStatus) && "submitted".equals(rightStatus)) return bySubmittedDescending.thenComparing(byPublishedDescending).compare(left, right);
+            if ("completed".equals(leftStatus) && "completed".equals(rightStatus)) return Comparator.comparing(ClassTaskVO::getCompletedAt, Comparator.nullsLast(Comparator.reverseOrder())).thenComparing(byPublishedDescending).compare(left, right);
+            return byDueAscending.thenComparing(byPublishedDescending).compare(left, right);
+        }).toList();
+        int from = (int) Math.min((page - 1) * size, filtered.size());
+        int to = (int) Math.min(from + size, filtered.size());
+        result.setRecords(filtered.subList(from, to)); result.setTotal(filtered.size());
+        return result;
+    }
+
+    @Override public StudentTaskDetailVO studentTaskDetail(Long taskId, AuthCurrentUserVO user) { StudentProfile student = requireStudent(user); ClassLearningTask task = requirePublishedTask(taskId); requireActiveMember(task, student.getStudentId()); StudentTaskDetailVO detail = taskDetail(task, currentSubmission(taskId, student.getStudentId())); StudentTaskProgress progress = requireProgress(taskId, student.getStudentId()); detail.setStudentStatus(studentStatus(task, progress)); detail.setCompletedAt(progress.getCompletedAt()); return detail; }
 
     @Override @Transactional public StudentTaskSubmissionVO createSubmission(Long taskId, StudentTaskSubmissionRequest request, AuthCurrentUserVO user) {
         StudentProfile student = requireStudent(user); ClassLearningTask task = requirePublishedTask(taskId); requireActiveMember(task, student.getStudentId());
@@ -69,7 +140,7 @@ public class TaskSubmissionServiceImpl implements TaskSubmissionService {
         if ("returned".equals(request.getReviewAction()) && !StringUtils.hasText(request.getComment())) throw new IllegalArgumentException("a return comment is required");
         if (StringUtils.hasText(request.getGrade()) && !GRADES.contains(request.getGrade())) throw new IllegalArgumentException("unsupported grade");
         StudentTaskReview review = new StudentTaskReview(); review.setSubmissionId(submissionId); review.setTeacherId(teacher.getTeacherId()); review.setReviewAction(request.getReviewAction()); review.setComment(request.getComment()); review.setGrade(request.getGrade()); review.setReviewedAt(LocalDateTime.now()); reviewMapper.insert(review);
-        submission.setStatus("approved".equals(request.getReviewAction()) ? "completed" : "returned"); submissionMapper.updateById(submission); StudentTaskProgress progress = requireProgress(submission.getTaskId(), submission.getStudentId()); progress.setStatus(submission.getStatus()); progressMapper.updateById(progress); return submissionVO(submission);
+        submission.setStatus("approved".equals(request.getReviewAction()) ? "completed" : "returned"); submissionMapper.updateById(submission); StudentTaskProgress progress = requireProgress(submission.getTaskId(), submission.getStudentId()); progress.setStatus(submission.getStatus()); if ("completed".equals(submission.getStatus())) progress.setCompletedAt(LocalDateTime.now()); progressMapper.updateById(progress); return submissionVO(submission);
     }
 
     @Override public TaskStatisticsVO statistics(Long taskId, AuthCurrentUserVO user) { requirePublisher(taskId, user); List<StudentTaskProgress> progress = progressMapper.selectList(new LambdaQueryWrapper<StudentTaskProgress>().eq(StudentTaskProgress::getTaskId, taskId)); ClassLearningTask task = requireTask(taskId); TaskStatisticsVO vo = new TaskStatisticsVO(); vo.setTaskId(taskId); vo.setPendingCount(progress.stream().filter(item -> "pending".equals(item.getStatus())).count()); vo.setSubmittedCount(progress.stream().filter(item -> "submitted".equals(item.getStatus())).count()); vo.setReturnedCount(progress.stream().filter(item -> "returned".equals(item.getStatus())).count()); vo.setCompletedCount(progress.stream().filter(item -> "completed".equals(item.getStatus())).count()); vo.setOverdueCount(task.getDueAt() != null && task.getDueAt().isBefore(LocalDateTime.now()) ? vo.getPendingCount() : 0); vo.setLateSubmissionCount(submissionMapper.selectCount(new LambdaQueryWrapper<StudentTaskSubmission>().eq(StudentTaskSubmission::getTaskId, taskId).eq(StudentTaskSubmission::getCurrent, true).eq(StudentTaskSubmission::getLate, true))); return vo; }
@@ -80,6 +151,12 @@ public class TaskSubmissionServiceImpl implements TaskSubmissionService {
     private void validateSubmission(ClassLearningTask task, StudentTaskSubmission submission) { String rule = task.getSubmissionRule() == null ? "text_required" : task.getSubmissionRule(); if (!RULES.contains(rule)) throw new IllegalStateException("task submission rule is invalid"); boolean text = StringUtils.hasText(submission.getContent()); long attachments = attachmentMapper.selectCount(new LambdaQueryWrapper<StudentTaskAttachment>().eq(StudentTaskAttachment::getSubmissionId, submission.getSubmissionId())); if (("text_required".equals(rule) || "text_and_attachment".equals(rule)) && !text) throw new IllegalArgumentException("task requires written content"); if (("attachment_required".equals(rule) || "text_and_attachment".equals(rule)) && attachments == 0) throw new IllegalArgumentException("task requires an attachment"); if ("map_exploration".equals(task.getTaskType())) { Set<Long> allowed = taskResourceMapper.selectList(new LambdaQueryWrapper<TaskResourceRel>().eq(TaskResourceRel::getTaskId, task.getTaskId())).stream().map(TaskResourceRel::getResourceId).collect(Collectors.toSet()); Set<Long> selected = selectedIds(submission.getSelectedResourceIds()); if (selected.isEmpty() || !allowed.containsAll(selected)) throw new IllegalArgumentException("select at least one assigned map resource"); } if (task.getDueAt() != null && task.getDueAt().isBefore(LocalDateTime.now()) && !Boolean.TRUE.equals(task.getAllowLateSubmission())) throw new IllegalArgumentException("late submission is not allowed"); }
     private StudentTaskDetailVO taskDetail(ClassLearningTask task, StudentTaskSubmission submission) { StudentTaskDetailVO vo = new StudentTaskDetailVO(); fillTask(vo, task); vo.setTaskType(task.getTaskType()); vo.setSubmissionRule(task.getSubmissionRule()); vo.setAllowLateSubmission(Boolean.TRUE.equals(task.getAllowLateSubmission())); List<Long> resourceIds = taskResourceMapper.selectList(new LambdaQueryWrapper<TaskResourceRel>().eq(TaskResourceRel::getTaskId, task.getTaskId()).orderByAsc(TaskResourceRel::getSortOrder)).stream().map(TaskResourceRel::getResourceId).toList(); if (!resourceIds.isEmpty()) vo.setResources(resourceMapper.selectBatchIds(resourceIds).stream().map(this::resourceVO).toList()); if (submission != null) vo.setCurrentSubmission(submissionVO(submission)); return vo; }
     private void fillTask(ClassTaskVO vo, ClassLearningTask task) { vo.setTaskId(task.getTaskId()); vo.setClassId(task.getClassId()); vo.setTitle(task.getTitle()); vo.setDescription(task.getDescription()); vo.setPublishedAt(task.getPublishedAt()); vo.setDueAt(task.getDueAt()); vo.setStatus(task.getStatus()); }
+    private String studentStatus(ClassLearningTask task, StudentTaskProgress progress) {
+        String progressStatus = progress == null ? "pending" : progress.getStatus();
+        if ("completed".equals(progressStatus) || "submitted".equals(progressStatus) || "returned".equals(progressStatus)) return progressStatus;
+        return task.getDueAt() != null && task.getDueAt().isBefore(LocalDateTime.now()) ? "overdue" : "pending";
+    }
+    private boolean matchesStatus(String actual, String requested) { return requested.isEmpty() || requested.equals(actual) || ("pending".equals(requested) && "returned".equals(actual)); }
     private TaskResourceVO resourceVO(LocalEduResource resource) { TaskResourceVO vo = new TaskResourceVO(); vo.setResourceId(resource.getResourceId()); vo.setResourceName(resource.getResourceName()); vo.setAddress(resource.getAddress()); vo.setLongitude(resource.getLongitude()); vo.setLatitude(resource.getLatitude()); vo.setIntro(resource.getIntro()); vo.setEducationValue(resource.getEducationValue()); vo.setSafetyNote(resource.getSafetyNote()); return vo; }
     private StudentTaskSubmissionVO submissionVO(StudentTaskSubmission entity) { StudentTaskSubmissionVO vo = new StudentTaskSubmissionVO(); vo.setSubmissionId(entity.getSubmissionId()); vo.setTaskId(entity.getTaskId()); vo.setStudentId(entity.getStudentId()); StudentProfile student = studentMapper.selectById(entity.getStudentId()); vo.setStudentName(student == null ? null : student.getStudentName()); vo.setVersionNo(entity.getVersionNo()); vo.setContent(entity.getContent()); vo.setSelectedResourceIds(new ArrayList<>(selectedIds(entity.getSelectedResourceIds()))); vo.setSubmittedAt(entity.getSubmittedAt()); vo.setLate(Boolean.TRUE.equals(entity.getLate())); vo.setStatus(entity.getStatus()); vo.setCurrent(Boolean.TRUE.equals(entity.getCurrent())); vo.setAttachments(attachmentMapper.selectList(new LambdaQueryWrapper<StudentTaskAttachment>().eq(StudentTaskAttachment::getSubmissionId, entity.getSubmissionId())).stream().map(this::attachmentVO).toList()); vo.setReviews(reviewMapper.selectList(new LambdaQueryWrapper<StudentTaskReview>().eq(StudentTaskReview::getSubmissionId, entity.getSubmissionId()).orderByAsc(StudentTaskReview::getReviewedAt)).stream().map(this::reviewVO).toList()); return vo; }
     private StudentTaskAttachmentVO attachmentVO(StudentTaskAttachment entity) { StudentTaskAttachmentVO vo = new StudentTaskAttachmentVO(); vo.setAttachmentId(entity.getAttachmentId()); vo.setOriginalFilename(entity.getOriginalFilename()); vo.setContentType(entity.getContentType()); vo.setFileSize(entity.getFileSize()); return vo; }

@@ -30,6 +30,10 @@ public class AgentQaRequest {
 
     private Integer maxDistanceMeters;
 
+    private Long resourceId;
+
+    private Long taskId;
+
     private Integer topK;
 
     private Boolean debug = false;

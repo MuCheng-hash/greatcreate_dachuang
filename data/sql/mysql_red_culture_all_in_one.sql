@@ -640,7 +640,7 @@ VALUES
 
 -- ============================================================
 -- School module schema
--- Source: mysql_school_module_schema.sql
+-- Merged school module schema (formerly mysql_school_module_schema.sql)
 -- ============================================================
 USE red_culture_platform;
 
@@ -885,7 +885,7 @@ CREATE TABLE IF NOT EXISTS teaching_activity_plan_resource (
 
 -- ============================================================
 -- School auth module schema
--- Source: mysql_school_auth_module_schema.sql
+-- Merged school authentication schema (formerly mysql_school_auth_module_schema.sql)
 -- ============================================================
 USE red_culture_platform;
 
@@ -940,16 +940,21 @@ CREATE TABLE IF NOT EXISTS school_user_account (
   display_name           VARCHAR(120) NULL,
   contact_name           VARCHAR(100) NULL,
   contact_phone          VARCHAR(50) NULL,
+  real_name              VARCHAR(100) NULL,
+  email                  VARCHAR(100) NULL,
+  account_type           VARCHAR(30) NULL,
+  force_password_change  TINYINT(1) NOT NULL DEFAULT 0,
+  password_updated_at    DATETIME NULL,
   status                 ENUM('pending_activation', 'active', 'disabled') NOT NULL DEFAULT 'active',
   last_login_at          DATETIME NULL,
   created_at             DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at             DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   CONSTRAINT uk_school_user_account_username UNIQUE (username),
-  CONSTRAINT uk_school_user_account_school UNIQUE (school_id),
   CONSTRAINT fk_school_user_account_school
     FOREIGN KEY (school_id) REFERENCES school(school_id),
   CONSTRAINT fk_school_user_account_registration
     FOREIGN KEY (registration_id) REFERENCES school_registration(registration_id),
+  KEY idx_school_user_account_school_id (school_id),
   KEY idx_school_user_account_status (status),
   KEY idx_school_user_account_role (role_code)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
@@ -1060,7 +1065,7 @@ CREATE TABLE resource_discovery_run_item (
 
 -- ============================================================
 -- School module sample data
--- Source: mysql_school_module_sample_data.sql
+-- Merged school module sample data (formerly mysql_school_module_sample_data.sql)
 -- ============================================================
 USE red_culture_platform;
 

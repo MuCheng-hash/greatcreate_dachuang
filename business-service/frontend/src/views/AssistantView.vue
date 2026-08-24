@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
+import { useRoute, useRouter } from "vue-router";
 import { Archive, ArchiveRestore, Bot, BrainCircuit, Check, ChevronDown, Clock3, Copy, History, ImagePlus, LoaderCircle, MessageCircleQuestion, Mic, Plus, Send, Sparkles, Trash2, UserRound, Volume2, VolumeX, Wrench, X } from "@lucide/vue";
 import DOMPurify from "dompurify";
 import { marked } from "marked";
@@ -102,6 +103,11 @@ interface SpeechRecognitionLike {
 type HistoryMode = "active" | "archived";
 
 const auth = useAuthStore();
+const route = (useRoute() || { query: {} }) as { query: Record<string, string | string[] | undefined> };
+const router = (useRouter() || { push: () => Promise.resolve() }) as { push: (to: string) => Promise<unknown> };
+const studentMode = computed(() => auth.user?.roleCode === "student");
+const linkedResourceId = ref<number | null>(route.query.resourceId ? Number(route.query.resourceId) : null);
+const linkedTaskId = ref<number | null>(route.query.taskId ? Number(route.query.taskId) : null);
 const schoolStore = useSchoolStore();
 const question = ref<string>("");
 const loading = ref<boolean>(false);
@@ -227,7 +233,7 @@ onMounted(async () => {
   sessionStorage.setItem(conversationStorageKey(), conversationId.value);
   if (threadId.value) sessionStorage.setItem(threadStorageKey(), threadId.value);
   if (!messages.value.length) {
-    messages.value.push({ role: "assistant", answer: `你好，我可以结合${schoolStore.school?.schoolName || "本校"}的周边资源，协助你进行教学讲解和活动设计。`, citations: [] });
+    messages.value.push({ role: "assistant", answer: studentMode.value ? `你好！我可以用更容易理解的方式，和你一起了解红色文化资源、人物故事、历史事件和班级任务。` : `你好，我可以结合${schoolStore.school?.schoolName || "本校"}的周边资源，协助你进行教学讲解和活动设计。`, citations: [] });
   }
 });
 
@@ -465,7 +471,8 @@ function threadStorageKey() {
 }
 
 function loadThreadId() {
-  return sessionStorage.getItem(threadStorageKey()) || "";
+  const queryThreadId = typeof route.query.threadId === "string" ? route.query.threadId.trim() : "";
+  return queryThreadId || sessionStorage.getItem(threadStorageKey()) || "";
 }
 
 async function explain() {
@@ -573,6 +580,8 @@ async function requestAssistant(
       theme: teachingContext.value.theme || null,
       resourceCategory: teachingContext.value.resourceCategory || null,
       maxDistanceMeters: teachingContext.value.maxDistanceMeters || null,
+      resourceId: linkedResourceId.value,
+      taskId: linkedTaskId.value,
     };
     if (attachments.length) requestBody.attachments = attachments;
     if (selectedModelId.value) requestBody.modelId = selectedModelId.value;
@@ -837,6 +846,7 @@ function applyAssistantResult(message: AssistantMessage, result: Partial<AgentQa
   Object.assign(message, {
     answer: result?.answer || "服务未返回回答。",
     relatedResources,
+    exploreSuggestions: Array.isArray(result?.exploreSuggestions) ? result.exploreSuggestions : [],
     citations: result?.citations || [],
     followUpQuestions: serverFollowUps.length ? serverFollowUps : buildFollowUpQuestions(userText, relatedResources),
     retrievalStatus: result?.retrievalStatus || null,
@@ -1684,7 +1694,7 @@ function clearChat(): void {
               <p v-if="message.appliedContext" class="applied-context"><strong>本次限定：</strong>{{ appliedContextLabel(message.appliedContext) }}</p>
               <p v-if="message.generationStatus" class="generation-status" :class="generationStatusClass(message.generationStatus)">{{ generationStatusLabel(message.generationStatus) }}</p>
               <div v-if="message.clarificationRequired" class="clarification"><strong>需要补充：</strong>{{ message.clarificationMessage || "请补充具体学校名称。" }}<span v-if="message.clarificationOptions?.length">可选：{{ message.clarificationOptions.join("、") }}</span></div>
-              <p v-if="message.relatedResources?.length" class="related"><strong>关联资源：</strong>{{ message.relatedResources.join("、") }}</p>
+              <div v-if="message.relatedResources?.length" class="related"><strong>相关资源</strong><div class="related-actions"><button v-for="item in message.relatedResources" :key="item" type="button" @click="router.push(`/resource-discovery?keyword=${encodeURIComponent(item)}`)">{{ item }} <ChevronDown :size="13" /></button></div></div>
               <div v-if="message.citations?.length" class="chat-citations" aria-label="引用来源">
                 <span class="chat-citations-label">来源</span>
                 <div class="chat-citation-list">
@@ -1695,6 +1705,7 @@ function clearChat(): void {
                 <span class="follow-ups-label">你还可以问</span>
                 <div class="follow-up-actions"><button v-for="item in message.followUpQuestions" :key="item" type="button" :disabled="readOnlyConversation" @click="ask(item)">{{ item }}</button></div>
               </div>
+              <div v-if="message.role === 'assistant' && message.exploreSuggestions?.length" class="explore-suggestions"><span>继续探索</span><button v-for="item in message.exploreSuggestions" :key="String(item.title)" type="button" @click="item.path ? router.push(String(item.path)) : null">{{ item.title }}</button></div>
               <div v-if="message.role === 'assistant' && message.answer" class="message-actions">
                 <button class="message-action" :class="{ copied: copiedIndex === index }" type="button" :title="copiedIndex === index ? '已复制' : '复制回答'" :aria-label="copiedIndex === index ? '已复制' : '复制回答'" @click="copyAnswer(message.answer, index)">
                   <Check v-if="copiedIndex === index" :size="15" /><Copy v-else :size="15" />
@@ -1709,7 +1720,7 @@ function clearChat(): void {
           <div v-if="!messages.length && !loading" class="empty-state"><MessageCircleQuestion :size="42" /><span>选择建议问题或输入你想了解的内容</span></div>
           </div>
         </div>
-        <section class="teaching-context-panel" :class="{ 'teaching-context-readonly': readOnlyConversation }" aria-label="教学场景限定">
+        <section v-if="!studentMode" class="teaching-context-panel" :class="{ 'teaching-context-readonly': readOnlyConversation }" aria-label="教学场景限定">
           <div class="teaching-context-heading">
             <div><strong>教学场景</strong><span>限定本次问答使用的学校、年级与资源范围</span></div>
             <small>{{ teachingContextSummary }}</small>

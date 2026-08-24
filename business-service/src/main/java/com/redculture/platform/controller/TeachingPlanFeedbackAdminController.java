@@ -14,7 +14,7 @@ import org.springframework.web.bind.annotation.RestController;
 import java.time.LocalDate;
 
 @RestController
-@RequestMapping("/api/admin/teaching-plan-feedback")
+@RequestMapping({"/api/admin/teaching-plan-feedback", "/admin/teaching-plan-feedback"})
 public class TeachingPlanFeedbackAdminController {
 
     private final TeachingPlanFeedbackService feedbackService;

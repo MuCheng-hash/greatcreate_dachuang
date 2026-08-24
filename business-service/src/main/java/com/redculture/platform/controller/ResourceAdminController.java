@@ -18,7 +18,7 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 @RestController
-@RequestMapping("/api/admin/resources")
+@RequestMapping({"/api/admin/resources", "/admin/resources"})
 //管理员维护思政教育资源：新增、编辑、详情、分页检索、提交审核、通过和驳回。
 public class ResourceAdminController {
 

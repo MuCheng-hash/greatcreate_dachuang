@@ -18,7 +18,7 @@ import java.util.List;
 import java.util.Map;
 
 @RestController
-@RequestMapping("/api/admin/agent")
+@RequestMapping({"/api/admin/agent", "/admin/agent"})
 //AI Agent 运维后台：查看调用摘要、调用链路、工具执行记录、记忆指标和提示词版本/效果，并可切换提示词版本。
 public class AgentAdminController {
 

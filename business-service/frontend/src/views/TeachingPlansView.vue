@@ -1,6 +1,6 @@
 <script setup>
 import { computed, onMounted, reactive, ref } from "vue";
-import { BookOpenCheck, Copy, FilePlus2, Save, Sparkles, Square, RefreshCw } from "@lucide/vue";
+import { BookOpenCheck, Copy, Download, FilePlus2, Save, Search, Sparkles, Square, RefreshCw } from "@lucide/vue";
 import AppShell from "@/components/AppShell.vue";
 import InlineNotice from "@/components/InlineNotice.vue";
 import LoadingBlock from "@/components/LoadingBlock.vue";
@@ -28,6 +28,11 @@ const effectiveModel = ref("");
 const modelStatusVisible = ref(false);
 const selectedPlanId = ref(null);
 const editing = ref(false);
+const filters = reactive({ grade: "", theme: "", resourceId: "", createdFrom: "", createdTo: "" });
+const pageNum = ref(1);
+const pageSize = ref(20);
+const totalPlans = ref(0);
+const exportingPlanId = ref(null);
 
 const visiblePlan = computed(() => loading.value ? draftPlan.value : generated.value);
 const sections = computed(() => visiblePlan.value ? [
@@ -82,13 +87,33 @@ function updateSection(field, event) {
 async function loadPlans() {
   historyLoading.value = true;
   try {
-    const result = await api.get("/api/ai/teaching-plans/mine");
+    const params = new URLSearchParams({ pageNum: String(pageNum.value), pageSize: String(pageSize.value) });
+    Object.entries(filters).forEach(([key, value]) => { if (value) params.set(key, value); });
+    const result = await api.get(`/api/ai/teaching-plans/mine?${params.toString()}`);
     plans.value = result?.records || [];
+    totalPlans.value = result?.total || 0;
   } catch (error) {
     notice.tone = "error"; notice.text = error.message;
   } finally {
     historyLoading.value = false;
   }
+}
+
+function searchPlans() { pageNum.value = 1; loadPlans(); }
+function resetPlanFilters() { Object.keys(filters).forEach(key => { filters[key] = ""; }); pageNum.value = 1; loadPlans(); }
+function changePage(next) { if (next < 1 || next > Math.ceil(totalPlans.value / pageSize.value)) return; pageNum.value = next; loadPlans(); }
+function formatDate(value) { return value ? String(value).replace("T", " ").slice(0, 16) : "-"; }
+
+async function exportPlan(planId, theme) {
+  if (exportingPlanId.value) return;
+  exportingPlanId.value = planId;
+  try {
+    const blob = await api.download(`/api/ai/teaching-plans/mine/${planId}/export`);
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a"); anchor.href = url; anchor.download = `教学方案-${(theme || "方案").replace(/[\\/:*?"<>|]/g, "_")}.docx`; anchor.click(); URL.revokeObjectURL(url);
+    notice.tone = "success"; notice.text = "方案已导出。";
+  } catch (error) { notice.tone = "error"; notice.text = error.message || "导出失败。"; }
+  finally { exportingPlanId.value = null; }
 }
 
 async function generate() {
@@ -180,13 +205,14 @@ async function saveDraft() {
       theme: generated.value.theme, activityType: generated.value.activityType || form.activityType,
       grade: generated.value.grade, durationMinutes: generated.value.durationMinutes,
       ownerAccountId: auth.user.accountId, planPayload: JSON.stringify(generated.value), generationSource: "ai",
+      ...(generated.value.generationId ? { generationId: generated.value.generationId } : {}),
       objectives: generated.value.objectives || [], activityFlow: generated.value.activityFlow || [],
       preparation: generated.value.preparation || [], safetyNotes: generated.value.safetyNotes || [],
       reflection: generated.value.reflection || [], evaluation: generated.value.evaluation || [],
       resourceBasis: generated.value.resourceBasis || [], fieldTasks: generated.value.fieldTasks || [],
       relatedResources: generated.value.relatedResources || [], citations: generated.value.citations || []
     });
-    notice.tone = "success"; notice.text = "草稿已保存到学校方案库。";
+    notice.tone = "success"; notice.text = "草稿已保存到我的方案。";
     await loadPlans();
   } catch (error) {
     notice.tone = "error"; notice.text = error.message || "保存失败。";
@@ -280,10 +306,11 @@ function statusLabel(status) {
     </div>
 
     <section class="page-panel plan-library">
-      <div class="panel-header"><div><h2>学校方案库</h2><p>包含已保存草稿与经过审核的教学方案。</p></div><span class="badge">{{ plans.length }} 条</span></div>
+      <div class="panel-header"><div><h2>我的方案</h2><p>查看、编辑、复制和导出本人保存的教学方案。</p></div><span class="badge">{{ plans.length }} 条</span></div>
       <LoadingBlock v-if="historyLoading" />
-      <div v-else-if="plans.length" class="plan-table-wrap"><table><thead><tr><th>主题</th><th>年级</th><th>类型</th><th>时长</th><th>状态</th><th>操作</th></tr></thead><tbody><tr v-for="plan in plans" :key="plan.planId"><td><strong>{{ plan.theme }}</strong></td><td>{{ plan.suitableGrade || "-" }}</td><td>{{ plan.activityType || "-" }}</td><td>{{ plan.durationMinutes ? `${plan.durationMinutes} 分钟` : "-" }}</td><td><span class="badge" :class="plan.reviewStatus?.toLowerCase() === 'approved' ? 'badge-green' : ''">{{ statusLabel(plan.reviewStatus) }}</span></td><td><button class="icon-button" title="查看并编辑" @click="loadPlan(plan.planId)"><FilePlus2 :size="15" /></button><button class="icon-button" title="复制方案" @click="copyPlan(plan.planId)"><Copy :size="15" /></button></td></tr></tbody></table></div>
-      <div v-else class="empty-state">尚未保存教学方案</div>
+      <div class="plan-filters"><input v-model="filters.grade" placeholder="年级" /><input v-model="filters.theme" placeholder="主题关键词" /><select v-model="filters.resourceId"><option value="">全部资源</option><option v-for="item in schoolStore.resources" :key="item.resourceId" :value="item.resourceId">{{ item.resource?.resourceName || '未命名资源' }}</option></select><input v-model="filters.createdFrom" type="date" /><input v-model="filters.createdTo" type="date" /><button class="secondary-button" type="button" @click="searchPlans"><Search :size="15" />查询</button><button class="ghost-button" type="button" @click="resetPlanFilters">重置</button></div>
+      <div v-if="!historyLoading && plans.length" class="plan-table-wrap"><table><thead><tr><th>主题</th><th>年级</th><th>资源</th><th>创建时间</th><th>状态</th><th>操作</th></tr></thead><tbody><tr v-for="plan in plans" :key="plan.planId"><td><strong>{{ plan.theme }}</strong></td><td>{{ plan.suitableGrade || "-" }}</td><td>{{ plan.resourceName || (plan.resourceIds?.length ? `${plan.resourceIds.length} 个资源` : "-") }}</td><td>{{ formatDate(plan.createdAt) }}</td><td><span class="badge" :class="plan.reviewStatus?.toLowerCase() === 'approved' ? 'badge-green' : ''">{{ statusLabel(plan.reviewStatus) }}</span></td><td><button class="icon-button" title="查看并编辑" @click="loadPlan(plan.planId)"><FilePlus2 :size="15" /></button><button class="icon-button" title="复制方案" @click="copyPlan(plan.planId)"><Copy :size="15" /></button><button class="icon-button" :title="exportingPlanId === plan.planId ? '导出中' : '导出 Word'" :disabled="Boolean(exportingPlanId)" @click="exportPlan(plan.planId, plan.theme)"><Download :size="15" /></button></td></tr></tbody></table><div class="pagination"><button class="ghost-button" :disabled="pageNum <= 1" @click="changePage(pageNum - 1)">上一页</button><span>{{ pageNum }} / {{ Math.max(1, Math.ceil(totalPlans / pageSize)) }}</span><button class="ghost-button" :disabled="pageNum >= Math.ceil(totalPlans / pageSize)" @click="changePage(pageNum + 1)">下一页</button></div></div>
+      <div v-else-if="!historyLoading" class="empty-state">尚未保存教学方案</div>
     </section>
   </AppShell>
 </template>
@@ -321,6 +348,9 @@ function statusLabel(status) {
 .citation-list article { padding: 12px; border-left: 3px solid var(--red); background: #f8f9f7; }
 .citation-list p { margin: 6px 0 0; color: var(--muted); font-size: 13px; line-height: 1.6; }
 .plan-library { margin-top: 16px; }
+.plan-filters { display: flex; flex-wrap: wrap; gap: 8px; padding: 0 18px 14px; }
+.plan-filters input, .plan-filters select { min-height: 34px; border: 1px solid var(--line); padding: 0 9px; background: #fff; }
+.pagination { display: flex; justify-content: center; align-items: center; gap: 14px; padding: 14px; }
 .plan-table-wrap { overflow-x: auto; }
 table { width: 100%; border-collapse: collapse; min-width: 680px; }
 th, td { padding: 13px 18px; border-bottom: 1px solid var(--line); text-align: left; font-size: 14px; }

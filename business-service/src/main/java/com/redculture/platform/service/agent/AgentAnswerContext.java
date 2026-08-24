@@ -8,6 +8,8 @@ import com.redculture.platform.vo.ai.KnowledgeRetrieveResult;
 import com.redculture.platform.vo.ai.KnowledgeScopeType;
 import com.redculture.platform.entity.LocalEduResource;
 import lombok.Data;
+import java.util.ArrayList;
+import java.util.List;
 
 @Data
 public class AgentAnswerContext {
@@ -27,6 +29,20 @@ public class AgentAnswerContext {
     private String resourceCategory;
 
     private Integer maxDistanceMeters;
+
+    private boolean studentMode;
+
+    private Long accountId;
+
+    private Long resourceId;
+
+    private Long taskId;
+
+    private String taskTitle;
+
+    private String taskDescription;
+
+    private List<Long> taskResourceIds = new ArrayList<>();
 
     private SchoolMapDetailVO schoolDetail;
 

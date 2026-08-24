@@ -10,7 +10,7 @@ import org.springframework.web.bind.annotation.*;
 import java.util.List;
 
 @RestController
-@RequestMapping("/api/admin")
+@RequestMapping({"/api/admin", "/admin"})
 //用户与权限后台：账号、个人档案、角色、权限、班级管理，以及学生批量导入。
 public class UserManagementAdminController {
 

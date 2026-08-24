@@ -24,7 +24,7 @@ import java.util.Map;
 import java.util.Set;
 
 @RestController
-@RequestMapping("/api/admin/rag")
+@RequestMapping({"/api/admin/rag", "/admin/rag"})
 //RAG 知识库后台管理：查看索引状态、重建索引、测试检索结果。
 public class RagAdminController {
 

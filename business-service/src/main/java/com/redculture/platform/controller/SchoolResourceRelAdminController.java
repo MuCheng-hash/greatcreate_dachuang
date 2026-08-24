@@ -19,7 +19,7 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 @RestController
-@RequestMapping("/api/admin")
+@RequestMapping({"/api/admin", "/admin"})
 //管理“学校—教育资源”关联关系：新增、修改、删除、推荐候选资源、批量关联及双向查询
 public class SchoolResourceRelAdminController {
 

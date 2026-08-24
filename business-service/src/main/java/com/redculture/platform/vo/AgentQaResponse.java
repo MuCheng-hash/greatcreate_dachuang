@@ -52,6 +52,8 @@ public class AgentQaResponse {
 
     private List<String> followUpQuestions = new ArrayList<>();
 
+    private List<Map<String, Object>> exploreSuggestions = new ArrayList<>();
+
     private boolean clarificationRequired;
 
     private String clarificationMessage;

@@ -8,7 +8,8 @@ describe("portal route access", () => {
   });
 
   it("redirects authenticated school users away from login", () => {
-    expect(resolveRouteAccess({ meta: { public: true }, fullPath: "/login" }, { isAdmin: false, isAuthenticated: true })).toBe("/map");
+    expect(resolveRouteAccess({ meta: { public: true }, fullPath: "/login" }, { isAdmin: false, isAuthenticated: true })).toBe("/teacher/map");
+    expect(resolveRouteAccess({ meta: { public: true }, fullPath: "/login" }, { isAdmin: false, isAuthenticated: true, isStudent: true })).toBe("/student/home");
   });
 
   it("sends platform administrators to the existing admin console", () => {

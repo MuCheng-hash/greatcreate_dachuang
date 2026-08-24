@@ -1,5 +1,6 @@
 <script setup>
 import { computed, onMounted, reactive, ref } from "vue";
+import { useRouter } from "vue-router";
 import { CheckCircle2, ClipboardList, KeyRound, Plus, RotateCw, UserPlus, Users } from "@lucide/vue";
 import AppShell from "@/components/AppShell.vue";
 import InlineNotice from "@/components/InlineNotice.vue";
@@ -8,6 +9,7 @@ import { api } from "@/services/api";
 import { useAuthStore } from "@/stores/auth";
 
 const auth = useAuthStore();
+const router = useRouter();
 const isStudent = computed(() => auth.user?.roleCode === "student");
 const classes = ref([]);
 const teachers = ref([]);
@@ -21,6 +23,7 @@ const joinCode = ref("");
 const importNumbers = ref("");
 const taskForm = reactive({ title: "", description: "", dueAt: "" });
 const classForm = reactive({ className: "", gradeName: "", classType: "administrative", headTeacherId: "", subjectTeacherIds: [] });
+const studentDetail = ref(null); const studentTasks = ref([]); const activities = ref([]); const studentSelectedId = ref(null); const studentLoading = ref(false);
 
 onMounted(load);
 
@@ -28,7 +31,9 @@ async function load() {
   loading.value = true;
   try {
     if (isStudent.value) {
-      classes.value = await api.get("/api/student/class-tasks");
+      classes.value = await api.get("/api/student/classes");
+      if (studentSelectedId.value) await selectStudentClass(studentSelectedId.value);
+      else if (classes.value.length) await selectStudentClass(classes.value[0].classId);
     } else {
       const [items, teacherItems] = await Promise.all([
         api.get("/api/teacher/classes/mine"), api.get("/api/teacher/classes/available-teachers")
@@ -43,6 +48,8 @@ async function load() {
     loading.value = false;
   }
 }
+
+async function selectStudentClass(classId) { studentSelectedId.value = classId; studentLoading.value = true; try { const [detail, taskPage, activityPage] = await Promise.all([api.get(`/api/student/classes/${classId}`), api.get(`/api/student/classes/${classId}/tasks?pageNum=1&pageSize=20`), api.get(`/api/student/classes/${classId}/activities?pageNum=1&pageSize=20`)]); studentDetail.value = detail; studentTasks.value = taskPage.records || []; activities.value = activityPage.records || []; } catch (error) { showError(error); } finally { studentLoading.value = false; } }
 
 async function selectClass(classId) {
   selectedId.value = classId;
@@ -123,6 +130,8 @@ async function completeTask(taskId) {
 function showError(error) { notice.tone = "error"; notice.text = error?.message || "操作失败"; }
 function classType(type) { return type === "teaching" ? "教学班" : "行政班"; }
 function taskStatus(task) { return { completed: "已完成", overdue: "已逾期", pending: "待完成" }[task.studentStatus] || task.status; }
+function openTask(taskId) { router.push(`/tasks?taskId=${taskId}`); }
+function askTask(taskId) { router.push(`/assistant?taskId=${taskId}`); }
 </script>
 
 <template>
@@ -131,8 +140,9 @@ function taskStatus(task) { return { completed: "已完成", overdue: "已逾期
     <LoadingBlock v-if="loading" />
 
     <template v-else-if="isStudent">
-      <section class="page-panel join-panel"><div class="panel-header"><div><h2>加入班级</h2><p>输入班主任提供的邀请码</p></div><KeyRound :size="20" /></div><form class="panel-body invite-form" @submit.prevent="joinByInvite"><input v-model="joinCode" placeholder="班级邀请码" /><button class="primary-button" type="submit">加入</button></form></section>
-      <section class="page-panel task-panel"><div class="panel-header"><div><h2>学习任务</h2><p>按截止时间排序</p></div><ClipboardList :size="20" /></div><div v-if="classes.length" class="task-list"><article v-for="task in classes" :key="task.taskId" class="task-row"><div><span class="badge" :class="task.studentStatus === 'completed' ? 'badge-green' : task.studentStatus === 'overdue' ? 'badge-red' : ''">{{ taskStatus(task) }}</span><h3>{{ task.title }}</h3><p>{{ task.description || '暂无任务说明' }}</p><small>截止：{{ task.dueAt || '未设置' }}</small></div><button v-if="task.studentStatus !== 'completed'" class="primary-button" type="button" @click="completeTask(task.taskId)"><CheckCircle2 :size="17" />完成</button></article></div><div v-else class="empty-state">暂无学习任务</div></section>
+      <section class="page-panel join-panel"><div class="panel-header"><div><h2>加入班级</h2><p>输入班主任提供的邀请码</p></div><KeyRound :size="20" /></div><form class="panel-body invite-form" @submit.prevent="joinByInvite"><input v-model="joinCode" placeholder="班级邀请码" maxlength="32" /><button class="primary-button" type="submit">加入</button></form></section>
+      <div class="student-class-layout"><section class="page-panel"><div class="panel-header"><div><h2>我的班级</h2><p>{{ classes.length }} 个已加入班级</p></div><Users :size="20" /></div><div class="class-list"><button v-for="item in classes" :key="item.classId" type="button" class="class-card" :class="{ active: studentSelectedId === item.classId }" @click="selectStudentClass(item.classId)"><strong>{{ item.className }}</strong><span>{{ item.gradeName || '未设置年级' }}<em v-if="item.primary"> · 主班级</em></span><small>{{ item.teacherCount }} 位教师 · 待完成 {{ item.pendingTaskCount }} 项</small></button><div v-if="!classes.length" class="empty-state">暂未加入班级</div></div></section>
+        <section class="page-panel student-detail"><LoadingBlock v-if="studentLoading" /><template v-else-if="studentDetail"><div class="panel-header"><div><h2>{{ studentDetail.className }}</h2><p>{{ studentDetail.gradeName || '未设置年级' }} · {{ classType(studentDetail.classType) }} · {{ studentDetail.studentCount }} 名学生</p></div><span v-if="studentDetail.primary" class="badge badge-green">主班级</span></div><div class="student-detail-body"><section><h3>任课教师</h3><div class="teacher-tags"><span v-for="teacher in studentDetail.teachers" :key="teacher.teacherId" class="badge">{{ teacher.teacherName }} · {{ teacher.teacherRole === 'head_teacher' ? '班主任' : '任课教师' }}</span><span v-if="!studentDetail.teachers?.length" class="muted">暂无教师信息</span></div></section><section><h3>学习进度</h3><div class="student-stats"><span>待完成 <strong>{{ studentDetail.taskSummary.pendingCount }}</strong></span><span>待评价 <strong>{{ studentDetail.taskSummary.submittedCount }}</strong></span><span>已完成 <strong>{{ studentDetail.taskSummary.completedCount }}</strong></span><span>已逾期 <strong>{{ studentDetail.taskSummary.overdueCount }}</strong></span></div></section></div><section class="student-tasks"><div class="task-heading"><h3>班级学习任务</h3></div><div v-if="studentTasks.length" class="task-list"><article v-for="task in studentTasks" :key="task.taskId" class="task-row"><div><span class="badge" :class="task.studentStatus === 'completed' ? 'badge-green' : task.studentStatus === 'overdue' ? 'badge-red' : ''">{{ taskStatus(task) }}</span><h3>{{ task.title }}</h3><p>{{ task.description || '暂无任务说明' }}</p><small>截止：{{ task.dueAt || '未设置' }} · 关联资源 {{ task.resourceCount || 0 }} 个</small></div><div class="task-actions"><button class="secondary-button" type="button" @click="openTask(task.taskId)">查看任务</button><button class="text-button" type="button" @click="askTask(task.taskId)">询问任务</button></div></article></div><div v-else class="empty-state">暂无已发布任务</div></section><section class="student-activities"><div class="task-heading"><h3>学习动态</h3><button class="text-button" type="button" @click="selectStudentClass(studentSelectedId)">刷新</button></div><div v-if="activities.length" class="activity-list"><article v-for="item in activities" :key="`${item.activityType}-${item.relatedTaskId}-${item.createdAt}`"><span class="activity-dot"></span><div><strong>{{ item.title }}</strong><p>{{ item.content }}</p><small>{{ item.createdAt ? String(item.createdAt).replace('T', ' ').slice(0, 16) : '-' }}</small></div></article></div><div v-else class="empty-state">暂时没有学习动态</div></section></template><div v-else class="empty-state">选择班级查看详情</div></section></div>
     </template>
 
     <template v-else>
@@ -169,5 +179,6 @@ function taskStatus(task) { return { completed: "已完成", overdue: "已逾期
 .task-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 14px; border: 1px solid var(--line); border-radius: 6px; }
 .task-row h3 { margin: 8px 0 5px; font-size: 15px; }.task-row p, .task-row small { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.55; }
 .join-panel { margin-bottom: 16px; }.invite-form { display: grid; grid-template-columns: 1fr auto; gap: 10px; }
-@media (max-width: 900px) { .class-layout, .detail-grid { grid-template-columns: 1fr; } .task-form { grid-template-columns: 1fr; } .task-form textarea { grid-column: auto; } }
+.student-class-layout { display:grid; grid-template-columns:minmax(250px,.72fr) minmax(0,1.5fr); gap:16px; }.student-detail-body { display:grid; grid-template-columns:1fr 1fr; gap:18px; padding:18px 20px; }.student-detail-body h3,.student-tasks h3,.student-activities h3 { margin:0 0 10px; font-size:15px; }.student-stats { display:grid; grid-template-columns:repeat(2,1fr); gap:8px; }.student-stats span { padding:9px; border:1px solid var(--line); border-radius:6px; color:var(--muted); font-size:13px; }.student-stats strong { display:block; color:var(--text); font-size:18px; }.student-tasks,.student-activities { padding:0 20px 20px; }.task-actions { display:flex; align-items:center; gap:8px; }.activity-list { display:grid; gap:10px; }.activity-list article { display:grid; grid-template-columns:14px 1fr; gap:9px; padding:10px 0; border-bottom:1px solid var(--line); }.activity-dot { width:8px; height:8px; margin-top:6px; border-radius:50%; background:var(--red); }.activity-list p,.activity-list small { margin:4px 0 0; color:var(--muted); font-size:13px; }.class-card em { font-style:normal; color:var(--red); }
+@media (max-width: 900px) { .class-layout, .detail-grid, .student-class-layout, .student-detail-body { grid-template-columns: 1fr; } .task-form { grid-template-columns: 1fr; } .task-form textarea { grid-column: auto; } }
 </style>

@@ -114,6 +114,13 @@ DELIMITER ;
 -- 用户管理允许同一学校下存在多个账号，移除旧版“一校一账号”的唯一索引。
 CALL normalize_school_account_school_index();
 
+-- 兼容基础认证表：补齐用户管理与学生档案所需的账号扩展字段。
+CALL add_column_if_missing('school_user_account', 'real_name', 'VARCHAR(100) NULL COMMENT ''真实姓名'' AFTER `contact_phone`');
+CALL add_column_if_missing('school_user_account', 'email', 'VARCHAR(100) NULL COMMENT ''邮箱'' AFTER `real_name`');
+CALL add_column_if_missing('school_user_account', 'account_type', 'VARCHAR(30) NULL COMMENT ''账号类型：admin/teacher/student/other'' AFTER `email`');
+CALL add_column_if_missing('school_user_account', 'force_password_change', 'TINYINT(1) NOT NULL DEFAULT 0 COMMENT ''是否强制修改密码'' AFTER `account_type`');
+CALL add_column_if_missing('school_user_account', 'password_updated_at', 'DATETIME NULL COMMENT ''密码更新时间'' AFTER `force_password_change`');
+
 CREATE TABLE IF NOT EXISTS user_profile (
   profile_id BIGINT NOT NULL AUTO_INCREMENT COMMENT '统一档案ID',
   account_id BIGINT NOT NULL COMMENT '关联账号ID',

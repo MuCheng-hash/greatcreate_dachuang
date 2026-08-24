@@ -17,7 +17,7 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 @RestController
-@RequestMapping("/api/admin")
+@RequestMapping({"/api/admin", "/admin"})
 //管理员维护教学活动方案：新增、修改、详情、分页查询、按学校查询。
 public class TeachingActivityPlanAdminController {
 

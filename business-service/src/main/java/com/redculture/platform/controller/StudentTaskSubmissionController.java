@@ -6,6 +6,7 @@ import com.redculture.platform.service.TaskSubmissionService;
 import com.redculture.platform.vo.StudentTaskAttachmentVO;
 import com.redculture.platform.vo.StudentTaskDetailVO;
 import com.redculture.platform.vo.StudentTaskSubmissionVO;
+import com.redculture.platform.vo.StudentTaskPageVO;
 import com.redculture.platform.vo.request.StudentTaskSubmissionRequest;
 import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.http.ContentDisposition;
@@ -19,10 +20,11 @@ import java.nio.charset.StandardCharsets;
 import java.util.List;
 
 @RestController
-@RequestMapping("/api/student")
+@RequestMapping({"/api/student", "/student"})
 public class StudentTaskSubmissionController {
     private final TaskSubmissionService service;
     public StudentTaskSubmissionController(TaskSubmissionService service) { this.service = service; }
+    @GetMapping("/tasks") public ApiResponse<StudentTaskPageVO> tasks(@RequestParam(required = false) String status, @RequestParam(required = false) Long pageNum, @RequestParam(required = false) Long pageSize, HttpServletRequest request) { return run(() -> service.studentTaskPage(status, pageNum, pageSize, AuthContext.requireUser(request))); }
     @GetMapping("/tasks/{taskId}") public ApiResponse<StudentTaskDetailVO> detail(@PathVariable Long taskId, HttpServletRequest request) { return run(() -> service.studentTaskDetail(taskId, AuthContext.requireUser(request))); }
     @PostMapping("/tasks/{taskId}/submissions") public ApiResponse<StudentTaskSubmissionVO> create(@PathVariable Long taskId, @RequestBody StudentTaskSubmissionRequest body, HttpServletRequest request) { return run(() -> service.createSubmission(taskId, body, AuthContext.requireUser(request))); }
     @PostMapping(value = "/submissions/{submissionId}/attachments", consumes = MediaType.MULTIPART_FORM_DATA_VALUE) public ApiResponse<StudentTaskAttachmentVO> upload(@PathVariable Long submissionId, @RequestParam("file") MultipartFile file, HttpServletRequest request) { return run(() -> service.uploadAttachment(submissionId, file, AuthContext.requireUser(request))); }

@@ -6,6 +6,7 @@ import InlineNotice from "@/components/InlineNotice.vue";
 import LoadingBlock from "@/components/LoadingBlock.vue";
 import { loadAmap } from "@/services/amap";
 import { useSchoolStore } from "@/stores/school";
+import { api } from "@/services/api";
 
 const schoolStore = useSchoolStore();
 const mapCanvas = ref(null);
@@ -145,6 +146,7 @@ async function selectResource(item) {
     map.setZoomAndCenter(16, [Number(resource.longitude), Number(resource.latitude)]);
   }
   selected.value = { kind: "resource", item, detail: resource };
+  api.post(`/api/student/resources/${item.resourceId}/view`, {}).catch(() => {});
   drawerOpen.value = true;
   detailLoading.value = true;
   try {

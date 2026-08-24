@@ -8,10 +8,10 @@ import org.springframework.web.bind.annotation.GetMapping;
 public class PortalRouteController {
 
 
-    //访问根地址localhost:8080时，返回的是登录页面，让客户先登陆
+    //访问根地址时进入公共项目总首页；首页中的登录按钮再进入 /login。
     @GetMapping({"/", "/index.html"})
     public String root() {
-        return "redirect:/login";
+        return "forward:/portal/index.html";
     }
 
     //统一处理 Vue 前端的多个页面地址
@@ -26,7 +26,12 @@ public class PortalRouteController {
 /profile	个人中心页
 这里是“服务器内部转发”，不是浏览器重定向
      */
-    @GetMapping({"/login", "/register", "/map", "/teaching-plans", "/assistant", "/agent-debug", "/profile"})
+    @GetMapping({
+            "/login", "/register",
+            "/map", "/teaching-plans", "/classes", "/tasks", "/resource-discovery", "/assistant", "/agent-debug", "/profile",
+            "/student", "/student/home", "/student/learning-footprint", "/student/tasks", "/student/resource-discovery", "/student/assistant", "/student/map", "/student/profile", "/student-home", "/learning-footprint",
+            "/teacher", "/teacher/map", "/teacher/teaching-plans", "/teacher/classes", "/teacher/tasks", "/teacher/resource-discovery", "/teacher/assistant", "/teacher/agent-debug", "/teacher/profile"
+    })
     public String portal() {
         return "forward:/portal/index.html";
     }

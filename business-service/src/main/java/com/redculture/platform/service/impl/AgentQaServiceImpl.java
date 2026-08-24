@@ -2,7 +2,19 @@ package com.redculture.platform.service.impl;
 
 import com.redculture.platform.config.AgentProperties;
 import com.redculture.platform.entity.LocalEduResource;
+import com.redculture.platform.entity.ClassLearningTask;
+import com.redculture.platform.entity.ClassMember;
+import com.redculture.platform.entity.StudentProfile;
+import com.redculture.platform.entity.StudentTaskProgress;
+import com.redculture.platform.entity.TaskResourceRel;
 import com.redculture.platform.enums.ReviewStatus;
+import com.redculture.platform.mapper.ClassLearningTaskMapper;
+import com.redculture.platform.mapper.ClassMemberMapper;
+import com.redculture.platform.mapper.StudentProfileMapper;
+import com.redculture.platform.mapper.StudentTaskProgressMapper;
+import com.redculture.platform.mapper.TaskResourceRelMapper;
+import com.redculture.platform.mapper.SchoolResourceRelMapper;
+import com.redculture.platform.entity.SchoolResourceRel;
 import com.redculture.platform.service.AgentQaService;
 import com.redculture.platform.service.KnowledgeRetriever;
 import com.redculture.platform.service.LocalEduResourceService;
@@ -81,6 +93,13 @@ public class AgentQaServiceImpl implements AgentQaService {
     private final AgentRuntimeClient agentRuntimeClient;
     private final AgentProperties agentProperties;
     private final Scheduler agentBlockingScheduler;
+
+    @Autowired private StudentProfileMapper studentProfileMapper;
+    @Autowired private StudentTaskProgressMapper studentTaskProgressMapper;
+    @Autowired private ClassLearningTaskMapper classLearningTaskMapper;
+    @Autowired private ClassMemberMapper classMemberMapper;
+    @Autowired private TaskResourceRelMapper taskResourceRelMapper;
+    @Autowired private SchoolResourceRelMapper schoolResourceRelMapper;
 
     @Autowired
     public AgentQaServiceImpl(SchoolMapService schoolMapService,
@@ -451,6 +470,11 @@ public class AgentQaServiceImpl implements AgentQaService {
         );
         response.setCitations(validatedCitations(generated, retrieval));
         response.setRelatedResources(textList(responseMap.get("relatedResources")));
+        response.setExploreSuggestions(exploreSuggestions(context));
+        if (context.isStudentMode()) {
+            response.setRelatedResources(relatedResources(context));
+            response.setExploreSuggestions(exploreSuggestions(context));
+        }
         response.setFollowUpQuestions(followUps);
         response.setToolExecutions(toolNames(responseMap.get("toolExecutions")));
         response.setMemoryCandidates(memoryItems(responseMap.get("memoryCandidates")));
@@ -585,6 +609,10 @@ public class AgentQaServiceImpl implements AgentQaService {
         context.setTheme(clean(request.getTheme()));
         context.setResourceCategory(clean(request.getResourceCategory()));
         context.setMaxDistanceMeters(request.getMaxDistanceMeters());
+        context.setStudentMode(currentUser != null && "student".equalsIgnoreCase(currentUser.getRoleCode()));
+        context.setAccountId(currentUser == null ? null : currentUser.getAccountId());
+        context.setResourceId(request.getResourceId());
+        context.setTaskId(request.getTaskId());
         loadBusinessContext(context);
         context.setRetrieval(retrieve(context, request.getTopK()));
         return context;
@@ -809,6 +837,7 @@ public class AgentQaServiceImpl implements AgentQaService {
         response.setScopeType(scope.type());
         response.setScopeId(scope.id());
         response.setRelatedResources(relatedResources(context));
+        response.setExploreSuggestions(exploreSuggestions(context));
         response.setCitations(validatedCitations(generated, retrieval));
         response.setFollowUpQuestions(nonNullList(generated.getFollowUpQuestions()));
         response.setThreadId(remote == null ? request.getThreadId() : remote.getThreadId());
@@ -836,7 +865,21 @@ public class AgentQaServiceImpl implements AgentQaService {
         applied.put("theme", context.getTheme());
         applied.put("resourceCategory", context.getResourceCategory());
         applied.put("maxDistanceMeters", context.getMaxDistanceMeters());
+        applied.put("studentMode", context.isStudentMode());
+        applied.put("resourceId", context.getResourceId());
+        applied.put("taskId", context.getTaskId());
+        applied.put("taskTitle", context.getTaskTitle());
         return applied;
+    }
+
+    private List<Map<String, Object>> exploreSuggestions(AgentAnswerContext context) {
+        if (!context.isStudentMode()) return new ArrayList<>();
+        List<Map<String, Object>> suggestions = new ArrayList<>();
+        relatedResources(context).stream().limit(3).forEach(name -> {
+            Map<String, Object> item = new LinkedHashMap<>(); item.put("type", "RESOURCE"); item.put("title", "继续了解：" + name); suggestions.add(item);
+        });
+        Map<String, Object> map = new LinkedHashMap<>(); map.put("type", "MAP"); map.put("title", "查看学校周边智慧地图"); map.put("path", "/map"); suggestions.add(map);
+        return suggestions;
     }
 
     private void validateRequest(AgentQaRequest request) {
@@ -846,6 +889,8 @@ public class AgentQaServiceImpl implements AgentQaService {
         if (request.getScopeId() != null && request.getScopeId() <= 0) {
             throw new IllegalArgumentException("scopeId must be positive");
         }
+        if (request.getResourceId() != null && request.getResourceId() <= 0) throw new IllegalArgumentException("resourceId must be positive");
+        if (request.getTaskId() != null && request.getTaskId() <= 0) throw new IllegalArgumentException("taskId must be positive");
         if (StringUtils.hasText(request.getTheme()) && request.getTheme().trim().length() > 50) {
             throw new IllegalArgumentException("theme must not exceed 50 characters");
         }
@@ -1005,6 +1050,34 @@ public class AgentQaServiceImpl implements AgentQaService {
     }
 
     private void loadBusinessContext(AgentAnswerContext context) {
+        if (context.isStudentMode()) {
+            if (context.getScopeType() != KnowledgeScopeType.SCHOOL) {
+                throw new IllegalArgumentException("student account can only query its own school");
+            }
+            if (context.getResourceId() != null) {
+                LocalEduResource resource = localEduResourceService.getById(context.getResourceId());
+                if (resource == null || !Boolean.TRUE.equals(resource.getActive()) || resource.getReviewStatus() != ReviewStatus.APPROVED
+                        || !schoolResourceRelMapper.exists(new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<SchoolResourceRel>()
+                        .eq(SchoolResourceRel::getSchoolId, context.getScopeId()).eq(SchoolResourceRel::getResourceId, context.getResourceId()))) {
+                    throw new IllegalArgumentException("resource is not available to this student");
+                }
+                context.setResource(resource);
+            }
+            if (context.getTaskId() != null) {
+                StudentProfile student = studentProfileMapper.selectOne(new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<StudentProfile>()
+                        .eq(StudentProfile::getAccountId, currentAccountId(context)).eq(StudentProfile::getStatus, "active").last("LIMIT 1"));
+                ClassLearningTask task = classLearningTaskMapper.selectById(context.getTaskId());
+                boolean assigned = student != null && task != null && "published".equalsIgnoreCase(task.getStatus())
+                        && classMemberMapper.exists(new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<ClassMember>()
+                        .eq(ClassMember::getStudentId, student.getStudentId()).eq(ClassMember::getClassId, task.getClassId()).eq(ClassMember::getStatus, "active"))
+                        && studentTaskProgressMapper.exists(new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<StudentTaskProgress>()
+                        .eq(StudentTaskProgress::getStudentId, student.getStudentId()).eq(StudentTaskProgress::getTaskId, task.getTaskId()));
+                if (!assigned) throw new IllegalArgumentException("task is not available to this student");
+                context.setTaskTitle(task.getTitle()); context.setTaskDescription(task.getDescription());
+                context.setTaskResourceIds(taskResourceRelMapper.selectList(new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<TaskResourceRel>()
+                        .eq(TaskResourceRel::getTaskId, task.getTaskId()).orderByAsc(TaskResourceRel::getSortOrder)).stream().map(TaskResourceRel::getResourceId).toList());
+            }
+        }
         switch (context.getScopeType()) {
             case SCHOOL -> {
                 SchoolMapDetailVO detail = schoolMapService.getSchoolDetail(context.getScopeId());
@@ -1033,6 +1106,12 @@ public class AgentQaServiceImpl implements AgentQaService {
         }
     }
 
+    private Long currentAccountId(AgentAnswerContext context) {
+        // Student ownership is already established by the authenticated scope; the task lookup
+        // is additionally constrained by the account in prepareAnswer.
+        return context.getAccountId();
+    }
+
     private KnowledgeRetrieveResult retrieve(AgentAnswerContext context, Integer requestedTopK) {
         if (context.getIntent() == AgentIntent.UNKNOWN) {
             return KnowledgeRetrieveResult.empty();
@@ -1047,6 +1126,11 @@ public class AgentQaServiceImpl implements AgentQaService {
         request.setTheme(context.getTheme());
         request.setResourceCategory(context.getResourceCategory());
         request.setMaxDistanceMeters(context.getMaxDistanceMeters());
+        if (context.getResourceId() != null) {
+            request.setResourceIds(List.of(context.getResourceId()));
+        } else if (context.getTaskResourceIds() != null && !context.getTaskResourceIds().isEmpty()) {
+            request.setResourceIds(context.getTaskResourceIds());
+        }
         request.setTopK(normalizeTopK(requestedTopK));
 
         try {

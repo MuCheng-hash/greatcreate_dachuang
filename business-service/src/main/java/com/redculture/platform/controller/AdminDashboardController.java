@@ -9,7 +9,7 @@ import org.springframework.web.bind.annotation.RestController;
 import reactor.core.publisher.Mono;
 
 @RestController
-@RequestMapping("/api/admin/dashboard")
+@RequestMapping({"/api/admin/dashboard", "/admin/dashboard"})
 public class AdminDashboardController {
     private final AdminDashboardService dashboardService;
     public AdminDashboardController(AdminDashboardService dashboardService) { this.dashboardService = dashboardService; }

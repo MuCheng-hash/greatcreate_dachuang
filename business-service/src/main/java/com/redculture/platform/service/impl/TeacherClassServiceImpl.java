@@ -4,6 +4,7 @@ import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.redculture.platform.entity.*;
 import com.redculture.platform.mapper.*;
 import com.redculture.platform.service.TeacherClassService;
+import com.redculture.platform.common.PageResult;
 import com.redculture.platform.vo.*;
 import com.redculture.platform.vo.request.*;
 import org.springframework.stereotype.Service;
@@ -300,6 +301,61 @@ public class TeacherClassServiceImpl implements TeacherClassService {
             progress.setStatus("completed"); progress.setCompletedAt(LocalDateTime.now()); progressMapper.updateById(progress);
         }
     }
+
+    @Override
+    public List<StudentClassSummaryVO> listStudentClasses(AuthCurrentUserVO user) {
+        StudentProfile student = requireStudent(user);
+        Map<Long, ClassMember> members = classMemberMapper.selectList(new LambdaQueryWrapper<ClassMember>()
+                .eq(ClassMember::getStudentId, student.getStudentId()).eq(ClassMember::getStatus, ACTIVE)).stream()
+                .collect(Collectors.toMap(ClassMember::getClassId, item -> item, (a, b) -> a));
+        if (members.isEmpty()) return Collections.emptyList();
+        Map<Long, List<StudentTaskProgress>> progress = progressMapper.selectList(new LambdaQueryWrapper<StudentTaskProgress>()
+                .eq(StudentTaskProgress::getStudentId, student.getStudentId())).stream().collect(Collectors.groupingBy(StudentTaskProgress::getTaskId));
+        Map<Long, ClassLearningTask> tasks = taskMapper.selectList(new LambdaQueryWrapper<ClassLearningTask>().in(ClassLearningTask::getClassId, members.keySet()).eq(ClassLearningTask::getStatus, "published")).stream().collect(Collectors.toMap(ClassLearningTask::getTaskId, item -> item));
+        return classMapper.selectBatchIds(members.keySet()).stream().filter(item -> ACTIVE.equals(item.getStatus())).sorted(Comparator.comparing((ClassInfo item) -> !Boolean.TRUE.equals(members.get(item.getClassId()).getPrimaryClass())).thenComparing(ClassInfo::getGradeName, Comparator.nullsLast(String::compareTo)).thenComparing(ClassInfo::getClassName, Comparator.nullsLast(String::compareTo))).map(item -> {
+            StudentClassSummaryVO vo = new StudentClassSummaryVO(); vo.setClassId(item.getClassId()); vo.setClassName(item.getClassName()); vo.setGradeName(item.getGradeName()); vo.setPrimary(members.get(item.getClassId()).getPrimaryClass());
+            tasks.values().stream().filter(task -> item.getClassId().equals(task.getClassId())).forEach(task -> {
+                StudentTaskProgress taskProgress = progress.getOrDefault(task.getTaskId(), List.of()).stream().findFirst().orElse(null);
+                String status = statusFor(task, taskProgress);
+                if ("completed".equals(status)) vo.setCompletedTaskCount(vo.getCompletedTaskCount() + 1);
+                else if ("overdue".equals(status)) vo.setOverdueTaskCount(vo.getOverdueTaskCount() + 1);
+                else vo.setPendingTaskCount(vo.getPendingTaskCount() + 1);
+            });
+            vo.setTeacherCount(classTeacherMapper.selectCount(new LambdaQueryWrapper<ClassTeacher>().eq(ClassTeacher::getClassId, item.getClassId()).eq(ClassTeacher::getStatus, ACTIVE))); return vo;
+        }).toList();
+    }
+
+    @Override
+    public StudentClassDetailVO studentClassDetail(Long classId, AuthCurrentUserVO user) {
+        ClassInfo entity = requireStudentClass(classId, user); StudentProfile student = requireStudent(user);
+        StudentClassDetailVO detail = new StudentClassDetailVO(); detail.setClassId(entity.getClassId()); detail.setClassName(entity.getClassName()); detail.setGradeName(entity.getGradeName()); detail.setClassType(entity.getClassType()); detail.setSchoolName(user.getSchoolName());
+        ClassMember member = classMemberMapper.selectOne(new LambdaQueryWrapper<ClassMember>().eq(ClassMember::getClassId, classId).eq(ClassMember::getStudentId, student.getStudentId()).eq(ClassMember::getStatus, ACTIVE).last("LIMIT 1")); detail.setPrimary(member != null && Boolean.TRUE.equals(member.getPrimaryClass()));
+        detail.setStudentCount(classMemberMapper.selectCount(new LambdaQueryWrapper<ClassMember>().eq(ClassMember::getClassId, classId).eq(ClassMember::getStatus, ACTIVE)));
+        detail.setTeachers(classTeacherMapper.selectList(new LambdaQueryWrapper<ClassTeacher>().eq(ClassTeacher::getClassId, classId).eq(ClassTeacher::getStatus, ACTIVE)).stream().map(rel -> { TeacherProfile teacher = teacherMapper.selectById(rel.getTeacherId()); ClassTeacherVO vo = new ClassTeacherVO(); vo.setTeacherId(rel.getTeacherId()); vo.setTeacherName(teacher == null ? "教师" : teacher.getTeacherName()); vo.setTeacherRole(rel.getTeacherRole()); return vo; }).toList());
+        studentClassTasks(classId, 1L, 100L, user).getRecords().forEach(task -> { String status = task.getStudentStatus(); if ("completed".equals(status)) detail.getTaskSummary().setCompletedCount(detail.getTaskSummary().getCompletedCount() + 1); else if ("submitted".equals(status)) detail.getTaskSummary().setSubmittedCount(detail.getTaskSummary().getSubmittedCount() + 1); else if ("overdue".equals(status)) detail.getTaskSummary().setOverdueCount(detail.getTaskSummary().getOverdueCount() + 1); else detail.getTaskSummary().setPendingCount(detail.getTaskSummary().getPendingCount() + 1); });
+        return detail;
+    }
+
+    @Override
+    public PageResult<ClassTaskVO> studentClassTasks(Long classId, Long pageNum, Long pageSize, AuthCurrentUserVO user) {
+        ClassInfo entity = requireStudentClass(classId, user); StudentProfile student = requireStudent(user); long page = pageNum == null || pageNum < 1 ? 1 : pageNum; long size = pageSize == null || pageSize < 1 ? 20 : Math.min(pageSize, 100);
+        List<ClassLearningTask> tasks = taskMapper.selectList(new LambdaQueryWrapper<ClassLearningTask>().eq(ClassLearningTask::getClassId, entity.getClassId()).eq(ClassLearningTask::getStatus, "published"));
+        Map<Long, StudentTaskProgress> progress = progressMapper.selectList(new LambdaQueryWrapper<StudentTaskProgress>().eq(StudentTaskProgress::getStudentId, student.getStudentId())).stream().collect(Collectors.toMap(StudentTaskProgress::getTaskId, item -> item, (a, b) -> a));
+        List<ClassTaskVO> records = tasks.stream().map(task -> toTaskVO(task, progress.get(task.getTaskId()))).sorted(Comparator.comparingInt((ClassTaskVO task) -> ("overdue".equals(task.getStudentStatus()) || "pending".equals(task.getStudentStatus())) ? 0 : 1).thenComparing(ClassTaskVO::getDueAt, Comparator.nullsLast(Comparator.naturalOrder())).thenComparing(ClassTaskVO::getPublishedAt, Comparator.nullsLast(Comparator.reverseOrder()))).toList();
+        int from = (int) Math.min((page - 1) * size, records.size()); int to = (int) Math.min(from + size, records.size()); return PageResult.of(records.subList(from, to), records.size(), page, size);
+    }
+
+    @Override
+    public PageResult<StudentClassActivityVO> studentClassActivities(Long classId, Long pageNum, Long pageSize, AuthCurrentUserVO user) {
+        StudentProfile student = requireStudent(user); requireStudentClass(classId, user); List<StudentClassActivityVO> activities = new ArrayList<>();
+        taskMapper.selectList(new LambdaQueryWrapper<ClassLearningTask>().eq(ClassLearningTask::getClassId, classId).eq(ClassLearningTask::getStatus, "published")).forEach(task -> { StudentClassActivityVO item = new StudentClassActivityVO(); item.setActivityType("TASK_PUBLISHED"); item.setTitle("班级发布了新任务"); item.setContent(task.getTitle()); item.setRelatedTaskId(task.getTaskId()); item.setCreatedAt(task.getPublishedAt()); activities.add(item); });
+        progressMapper.selectList(new LambdaQueryWrapper<StudentTaskProgress>().eq(StudentTaskProgress::getStudentId, student.getStudentId()).eq(StudentTaskProgress::getStatus, "completed")).forEach(progress -> { ClassLearningTask task = taskMapper.selectById(progress.getTaskId()); if (task != null && classId.equals(task.getClassId())) { StudentClassActivityVO item = new StudentClassActivityVO(); item.setActivityType("TASK_COMPLETED"); item.setTitle("你完成了学习任务"); item.setContent(task.getTitle()); item.setRelatedTaskId(task.getTaskId()); item.setCreatedAt(progress.getCompletedAt()); activities.add(item); } });
+        activities.sort(Comparator.comparing(StudentClassActivityVO::getCreatedAt, Comparator.nullsLast(Comparator.reverseOrder()))); long page = pageNum == null || pageNum < 1 ? 1 : pageNum; long size = pageSize == null || pageSize < 1 ? 20 : Math.min(pageSize, 100); int from = (int)Math.min((page - 1) * size, activities.size()); int to = (int)Math.min(from + size, activities.size()); return PageResult.of(activities.subList(from, to), activities.size(), page, size);
+    }
+
+    private ClassInfo requireStudentClass(Long classId, AuthCurrentUserVO user) { StudentProfile student = requireStudent(user); ClassInfo entity = requireClass(classId); boolean joined = classMemberMapper.exists(new LambdaQueryWrapper<ClassMember>().eq(ClassMember::getClassId, classId).eq(ClassMember::getStudentId, student.getStudentId()).eq(ClassMember::getStatus, ACTIVE)); if (!joined) throw new IllegalArgumentException("class not found"); return entity; }
+
+    private String statusFor(ClassLearningTask task, StudentTaskProgress progress) { if (progress != null && "completed".equals(progress.getStatus())) return "completed"; return task.getDueAt() != null && task.getDueAt().isBefore(LocalDateTime.now()) ? "overdue" : "pending"; }
 
     private void validateSaveRequest(TeacherClassSaveRequest request, AuthCurrentUserVO user) {
         if (request == null || request.getSchoolId() == null || !StringUtils.hasText(request.getClassName()) || !StringUtils.hasText(request.getClassType()))

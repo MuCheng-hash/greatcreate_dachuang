@@ -4,6 +4,7 @@ import com.redculture.platform.vo.*;
 import com.redculture.platform.vo.request.*;
 
 import java.util.List;
+import com.redculture.platform.common.PageResult;
 
 public interface TeacherClassService {
     List<TeacherClassVO> listMine(AuthCurrentUserVO user);
@@ -23,4 +24,8 @@ public interface TeacherClassService {
     ClassTaskVO publishTask(Long classId, ClassTaskSaveRequest request, AuthCurrentUserVO user);
     List<ClassTaskVO> studentTasks(AuthCurrentUserVO user);
     void completeTask(Long taskId, AuthCurrentUserVO user);
+    List<StudentClassSummaryVO> listStudentClasses(AuthCurrentUserVO user);
+    StudentClassDetailVO studentClassDetail(Long classId, AuthCurrentUserVO user);
+    PageResult<ClassTaskVO> studentClassTasks(Long classId, Long pageNum, Long pageSize, AuthCurrentUserVO user);
+    PageResult<StudentClassActivityVO> studentClassActivities(Long classId, Long pageNum, Long pageSize, AuthCurrentUserVO user);
 }

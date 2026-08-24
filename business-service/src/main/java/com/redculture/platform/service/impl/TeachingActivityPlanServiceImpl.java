@@ -22,6 +22,17 @@ import java.util.List;
 import org.springframework.stereotype.Service;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.util.StringUtils;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.apache.poi.xwpf.usermodel.XWPFDocument;
+import org.apache.poi.xwpf.usermodel.XWPFParagraph;
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.time.LocalDateTime;
+import java.time.LocalDate;
+import java.time.LocalTime;
+import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
 
 @Service
 public class TeachingActivityPlanServiceImpl extends ServiceImpl<TeachingActivityPlanMapper, TeachingActivityPlan>
@@ -34,6 +45,7 @@ public class TeachingActivityPlanServiceImpl extends ServiceImpl<TeachingActivit
     private final SchoolService schoolService;
     private final LocalEduResourceService localEduResourceService;
     private final TeachingActivityPlanResourceMapper planResourceMapper;
+    private final ObjectMapper objectMapper;
 
     public TeachingActivityPlanServiceImpl(SchoolService schoolService,
                                            LocalEduResourceService localEduResourceService) {
@@ -44,9 +56,17 @@ public class TeachingActivityPlanServiceImpl extends ServiceImpl<TeachingActivit
     public TeachingActivityPlanServiceImpl(SchoolService schoolService,
                                            LocalEduResourceService localEduResourceService,
                                            TeachingActivityPlanResourceMapper planResourceMapper) {
+        this(schoolService, localEduResourceService, planResourceMapper, new ObjectMapper());
+    }
+
+    public TeachingActivityPlanServiceImpl(SchoolService schoolService,
+                                           LocalEduResourceService localEduResourceService,
+                                           TeachingActivityPlanResourceMapper planResourceMapper,
+                                           ObjectMapper objectMapper) {
         this.schoolService = schoolService;
         this.localEduResourceService = localEduResourceService;
         this.planResourceMapper = planResourceMapper;
+        this.objectMapper = objectMapper == null ? new ObjectMapper() : objectMapper;
     }
 
     @Override
@@ -159,17 +179,102 @@ public class TeachingActivityPlanServiceImpl extends ServiceImpl<TeachingActivit
     }
 
     @Override
-    public PageResult<TeachingActivityPlanAdminVO> listMine(Long accountId, Long schoolId, Long pageNum, Long pageSize) {
-        if (accountId == null || schoolId == null) throw new IllegalArgumentException("authenticated school account is required");
+    public PageResult<TeachingActivityPlanAdminVO> listMine(AuthCurrentUserVO user, String grade, String theme,
+                                                            Long resourceId, LocalDateTime createdFrom,
+                                                            LocalDateTime createdTo, Long pageNum, Long pageSize) {
+        if (user == null || user.getAccountId() == null || user.getSchoolId() == null) throw new IllegalArgumentException("authenticated school account is required");
+        validateFilters(grade, theme, createdFrom, createdTo);
         long safePageNum = pageNum == null || pageNum <= 0 ? DEFAULT_PAGE_NUM : pageNum;
-        long safePageSize = pageSize == null || pageSize <= 0 ? DEFAULT_PAGE_SIZE : Math.min(pageSize, MAX_PAGE_SIZE);
+        long safePageSize = pageSize == null || pageSize <= 0 ? 20L : Math.min(pageSize, MAX_PAGE_SIZE);
         LambdaQueryWrapper<TeachingActivityPlan> wrapper = new LambdaQueryWrapper<TeachingActivityPlan>()
-                .eq(TeachingActivityPlan::getOwnerAccountId, accountId)
-                .eq(TeachingActivityPlan::getSchoolId, schoolId)
+                .eq(TeachingActivityPlan::getOwnerAccountId, user.getAccountId())
+                .eq(TeachingActivityPlan::getSchoolId, user.getSchoolId())
                 .orderByDesc(TeachingActivityPlan::getUpdatedAt);
+        if (StringUtils.hasText(grade)) wrapper.likeRight(TeachingActivityPlan::getSuitableGrade, grade.trim());
+        if (StringUtils.hasText(theme)) wrapper.like(TeachingActivityPlan::getTheme, theme.trim());
+        if (createdFrom != null) wrapper.ge(TeachingActivityPlan::getCreatedAt, createdFrom);
+        if (createdTo != null) wrapper.le(TeachingActivityPlan::getCreatedAt, createdTo);
+        if (resourceId != null) {
+            wrapper.and(q -> q.eq(TeachingActivityPlan::getResourceId, resourceId)
+                    .or().apply("EXISTS (SELECT 1 FROM teaching_activity_plan_resource r WHERE r.plan_id = teaching_activity_plan.id AND r.resource_id = {0})", resourceId));
+        }
         Page<TeachingActivityPlan> page = page(new Page<>(safePageNum, safePageSize), wrapper);
         return PageResult.of(page.getRecords().stream().map(this::buildAdminVO).toList(), page.getTotal(), safePageNum, safePageSize);
     }
+
+    private void validateFilters(String grade, String theme, LocalDateTime from, LocalDateTime to) {
+        if (StringUtils.hasText(grade) && grade.trim().length() > 100) throw new IllegalArgumentException("grade is too long");
+        if (StringUtils.hasText(theme) && theme.trim().length() > 200) throw new IllegalArgumentException("theme is too long");
+        if (from != null && to != null && from.isAfter(to)) throw new IllegalArgumentException("createdFrom must not be after createdTo");
+    }
+
+    @Override
+    public byte[] exportMine(Long planId, AuthCurrentUserVO user) throws IOException {
+        TeachingActivityPlan plan = requireOwned(planId, user);
+        TeachingActivityPlanAdminVO vo = buildAdminVO(plan);
+        try (XWPFDocument document = new XWPFDocument(); ByteArrayOutputStream output = new ByteArrayOutputStream()) {
+            XWPFParagraph title = document.createParagraph();
+            title.setAlignment(org.apache.poi.xwpf.usermodel.ParagraphAlignment.CENTER);
+            title.createRun().setText(clean(vo.getTheme(), "教学方案"));
+            addLine(document, "学校", vo.getSchoolName());
+            addLine(document, "适用年级", vo.getSuitableGrade());
+            addLine(document, "活动类型", vo.getActivityType());
+            addLine(document, "活动时长", vo.getDurationMinutes() == null ? null : vo.getDurationMinutes() + " 分钟");
+            addLine(document, "实践活动", practiceRequired(vo.getPlanPayload()) ? "包含" : "未标注");
+            addLine(document, "方案编号", vo.getPlanCode());
+            addLine(document, "创建时间", vo.getCreatedAt() == null ? null : vo.getCreatedAt().format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm")));
+            addPayloadOrText(document, vo);
+            document.write(output);
+            return output.toByteArray();
+        }
+    }
+
+    private void addPayloadOrText(XWPFDocument document, TeachingActivityPlanAdminVO vo) {
+        JsonNode payload = null;
+        if (StringUtils.hasText(vo.getPlanPayload())) {
+            try { payload = objectMapper.readTree(vo.getPlanPayload()); } catch (Exception ignored) { }
+        }
+        addSection(document, "教学目标", payload == null ? splitLines(vo.getObjectiveText()) : arrayOrText(payload, "objectives", vo.getObjectiveText()));
+        addSection(document, "资源依据", payload == null ? List.of() : arrayOrText(payload, "resourceBasis", null));
+        addSection(document, "关联资源", resourceNames(vo.getResourceIds()));
+        addSection(document, "教学流程", payload == null ? splitLines(vo.getActivityContent()) : arrayOrText(payload, "activityFlow", vo.getActivityContent()));
+        addSection(document, "课前准备", payload == null ? splitLines(vo.getPreparationText()) : arrayOrText(payload, "preparation", vo.getPreparationText()));
+        addSection(document, "现场任务", payload == null ? List.of() : arrayOrText(payload, "fieldTasks", null));
+        addSection(document, "安全提示", payload == null ? splitLines(vo.getSafetyText()) : arrayOrText(payload, "safetyNotes", vo.getSafetyText()));
+        addSection(document, "课后反思与评价", splitLines(vo.getExpectedOutcome()));
+        addSection(document, "引用来源", payload == null ? List.of() : arrayOrText(payload, "citations", null));
+    }
+
+    private List<String> arrayOrText(JsonNode node, String field, String fallback) {
+        JsonNode value = node.get(field); List<String> result = new ArrayList<>();
+        if (value != null && value.isArray()) value.forEach(item -> result.add(item.isTextual() ? item.asText() : item.toString()));
+        return result.isEmpty() ? splitLines(fallback) : result;
+    }
+
+    private void addSection(XWPFDocument document, String title, List<String> values) {
+        if (values == null || values.isEmpty()) return;
+        document.createParagraph().createRun().setText(title);
+        values.stream().filter(StringUtils::hasText).forEach(value -> document.createParagraph().createRun().setText("• " + value));
+    }
+
+    private void addLine(XWPFDocument document, String label, String value) {
+        if (StringUtils.hasText(value)) document.createParagraph().createRun().setText(label + "：" + value);
+    }
+
+    private List<String> resourceNames(List<Long> resourceIds) {
+        if (resourceIds == null || resourceIds.isEmpty()) return List.of();
+        return resourceIds.stream().map(localEduResourceService::getById).filter(java.util.Objects::nonNull)
+                .map(resource -> resource.getResourceName()).filter(StringUtils::hasText).toList();
+    }
+
+    private boolean practiceRequired(String payload) {
+        if (!StringUtils.hasText(payload)) return false;
+        try { return objectMapper.readTree(payload).path("practiceRequired").asBoolean(false); }
+        catch (Exception ignored) { return false; }
+    }
+
+    private List<String> splitLines(String value) { return StringUtils.hasText(value) ? java.util.Arrays.stream(value.split("\\R")).map(String::trim).filter(StringUtils::hasText).toList() : List.of(); }
+    private String clean(String value, String fallback) { return StringUtils.hasText(value) ? value.trim() : fallback; }
 
     @Override
     public TeachingActivityPlanAdminVO getMine(Long planId, AuthCurrentUserVO user) {
