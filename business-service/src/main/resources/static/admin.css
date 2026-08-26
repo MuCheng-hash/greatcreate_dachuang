@@ -5,38 +5,38 @@
    ============================================================ */
 
 :root {
-  --bg: #f4f6f2;
-  --surface: #ffffff;
-  --surface-muted: #eef1ec;
-  --text: #202a24;
-  --muted: #667169;
-  --line: #dce2dc;
-  --red: #a6382f;
-  --red-dark: #812820;
-  --red-soft: #f7e9e7;
-  --green: #2f6b4f;
-  --green-dark: #245540;
-  --green-soft: #e8f1eb;
-  --blue: #2667a7;
-  --blue-soft: #e8f1f9;
-  --danger: #a92f2f;
+  --bg: #f6f3ea;
+  --surface: #fffdf8;
+  --surface-muted: #efebe1;
+  --text: #21291f;
+  --muted: #6c756c;
+  --line: #e1dccf;
+  --red: #9f3a2e;
+  --red-dark: #7d2b21;
+  --red-soft: #f8e9e5;
+  --green: #2c5e46;
+  --green-dark: #1f4634;
+  --green-soft: #e9f0ea;
+  --blue: #275f96;
+  --blue-soft: #e9f1f8;
+  --danger: #a03030;
   --amber: #96691f;
-  --amber-soft: #f7efdc;
+  --amber-soft: #f5edda;
   --sidebar: 236px;
-  --shadow: 0 12px 32px rgba(31, 48, 38, 0.09);
-  --shadow-sm: 0 2px 10px rgba(31, 48, 38, 0.05);
+  --shadow: 0 18px 44px rgba(31, 45, 36, 0.1);
+  --shadow-sm: 0 3px 12px rgba(31, 45, 36, 0.06);
   --paper-strong: var(--surface);
   --ink: var(--text);
   --accent: var(--red);
   --teal: var(--green);
   --shadow-soft: var(--shadow-sm);
-  --headline: "Georgia", "STSong", "Songti SC", serif;
+  --headline: "STZhongsong", "Noto Serif SC", "Songti SC", "SimSun", Georgia, serif;
+  --font-display: var(--headline);
   font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
   color: var(--text);
   background: var(--bg);
   font-synthesis: none;
 }
-
 * { box-sizing: border-box; }
 html, body { min-width: 320px; min-height: 100%; margin: 0; }
 body { background: var(--bg); color: var(--text); font-size: 14px; line-height: 1.55; }
@@ -1567,3 +1567,38 @@ body.modal-open { overflow: hidden; }
   .school-map-sidebar { max-height: none; }
   .school-map-list { max-height: 420px; }
 }
+
+/* ============================================================
+   2026-08 视觉精修（与门户端设计系统同步）
+   ============================================================ */
+h1, h2, h3, h4 { font-family: var(--headline); }
+body {
+  background:
+    radial-gradient(1200px 500px at 85% -8%, rgba(169,125,47,.08), transparent 60%),
+    radial-gradient(900px 420px at -10% 12%, rgba(44,94,70,.07), transparent 55%),
+    var(--bg);
+}
+.form-card, .table-card, .metric-card { transition: box-shadow 180ms ease, transform 180ms ease; }
+.form-card:hover, .table-card:hover { box-shadow: var(--shadow); }
+.accent-button {
+  background: linear-gradient(180deg, #a94336, #933226);
+  box-shadow: 0 6px 16px rgba(159,58,46,.25);
+}
+.accent-button:hover {
+  background: linear-gradient(180deg, #b14a3d, #9a3729);
+  transform: translateY(-1px); box-shadow: 0 9px 20px rgba(159,58,46,.32);
+}
+.ghost-button, .accent-button, .action-button, .user-section-chip, .tab-chip, .side-link {
+  transition: background 150ms ease, border-color 150ms ease, color 150ms ease, transform 150ms ease, box-shadow 150ms ease;
+}
+.brand-mark {
+  background: linear-gradient(145deg, #b04436, #8a2f24);
+  box-shadow: 0 5px 16px rgba(159,58,46,.35), inset 0 1px 0 rgba(255,255,255,.22);
+}
+.admin-sidebar {
+  background:
+    radial-gradient(420px 260px at 15% 0%, rgba(255,255,255,.05), transparent 60%),
+    linear-gradient(180deg, #213529, #1a2b22);
+}
+.side-link:hover, .tab-chip:hover { background: rgba(255,255,255,.06); color: #fff; }
+input:focus, select:focus, textarea:focus { border-color: var(--green); box-shadow: 0 0 0 3px rgba(44,94,70,.14); }

@@ -28,7 +28,11 @@ const studentNavItems = [
   { to: "/student/map", label: "地图资源", icon: Map },
   { to: "/student/profile", label: "个人中心", icon: UserRound }
 ];
-const navItems = computed(() => auth.user?.roleCode === "student" ? studentNavItems : teacherNavItems);
+const isStudent = computed(() => auth.user?.roleCode === "student");
+const navItems = computed(() => (isStudent.value ? studentNavItems : teacherNavItems));
+const roleLabel = computed(() => (isStudent.value ? "乡村学校学生端" : "乡村学校教师端"));
+const homePath = computed(() => (isStudent.value ? "/student/home" : "/teacher/map"));
+const profilePath = computed(() => (isStudent.value ? "/student/profile" : "/teacher/profile"));
 const initials = computed(() => auth.schoolLabel.slice(0, 1));
 
 async function logout() {
@@ -43,10 +47,11 @@ async function logout() {
 <template>
   <div class="app-layout">
     <aside class="app-sidebar">
-      <RouterLink class="side-brand" :to="auth.user?.roleCode === 'student' ? '/student/home' : '/teacher/map'" aria-label="乡村学校思政资源工作台">
+      <RouterLink class="side-brand" :to="homePath" aria-label="乡村学校思政资源工作台">
         <span class="brand-symbol">乡</span>
-        <span><strong>思政资源工作台</strong><small>乡村学校教师端</small></span>
+        <span><strong>思政资源工作台</strong><small>{{ roleLabel }}</small></span>
       </RouterLink>
+      <p class="side-section-label">主导航</p>
       <nav class="side-nav" aria-label="主导航">
         <RouterLink v-for="item in navItems" :key="item.to" :to="item.to" :class="{ active: route.path === item.to }">
           <component :is="item.icon" :size="19" />
@@ -62,11 +67,12 @@ async function logout() {
     <div class="app-main">
       <header class="app-topbar">
         <div>
+          <p class="eyebrow">红启乡智 · {{ roleLabel }}</p>
           <h1>{{ title }}</h1>
           <p v-if="subtitle">{{ subtitle }}</p>
         </div>
         <div class="topbar-actions">
-          <RouterLink class="icon-button" :to="auth.user?.roleCode === 'student' ? '/student/profile' : '/teacher/profile'" title="个人中心" aria-label="个人中心"><UserRound :size="19" /></RouterLink>
+          <RouterLink class="icon-button" :to="profilePath" title="个人中心" aria-label="个人中心"><UserRound :size="19" /></RouterLink>
           <button class="icon-button" type="button" title="退出登录" aria-label="退出登录" @click="logout"><LogOut :size="19" /></button>
         </div>
       </header>
