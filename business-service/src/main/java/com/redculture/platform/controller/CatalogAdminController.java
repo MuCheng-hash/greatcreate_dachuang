@@ -24,14 +24,8 @@ public class CatalogAdminController {
     public ApiResponse<PageResult<CatalogEntityVO>> page(@RequestParam(required = false) EntityType entityType, @RequestParam(required = false) ResourceCategory resourceCategory, @RequestParam(required = false) Long regionId, @RequestParam(required = false) ReviewStatus reviewStatus, @RequestParam(required = false) Boolean active, @RequestParam(required = false) String keyword, @RequestParam(required = false) Long pageNum, @RequestParam(required = false) Long pageSize) { return ApiResponse.success(catalogService.page(entityType, resourceCategory, regionId, reviewStatus, active, keyword, pageNum, pageSize)); }
     @GetMapping("/entities/{entityType}/{entityId}")
     public ApiResponse<CatalogEntityVO> detail(@PathVariable EntityType entityType,@PathVariable Long entityId){CatalogEntityVO item=catalogService.detail(entityType,entityId);return item==null?ApiResponse.fail("catalog entity not found"):ApiResponse.success(item);}
-    @PostMapping("/entities")
-    public ApiResponse<CatalogEntityVO> create(@RequestBody CatalogEntityRequest request){try{return ApiResponse.success("catalog entity created",catalogService.create(request));}catch(IllegalArgumentException ex){return ApiResponse.fail(ex.getMessage());}}
     @PutMapping("/entities/{entityType}/{entityId}")
     public ApiResponse<CatalogEntityVO> update(@PathVariable EntityType entityType,@PathVariable Long entityId,@RequestBody CatalogEntityRequest request){try{CatalogEntityVO item=catalogService.update(entityType,entityId,request);projectionService.projectEntity(item);return ApiResponse.success("catalog entity updated",item);}catch(IllegalArgumentException ex){return ApiResponse.fail(ex.getMessage());}}
-    @PostMapping("/entities/{entityType}/{entityId}/submit-review")
-    public ApiResponse<CatalogEntityVO> submitForReview(@PathVariable EntityType entityType,@PathVariable Long entityId){try{CatalogEntityVO item=catalogService.submitForReview(entityType,entityId);projectionService.projectEntity(item);return ApiResponse.success("catalog entity submitted",item);}catch(IllegalArgumentException ex){return ApiResponse.fail(ex.getMessage());}}
-    @PostMapping("/entities/{entityType}/{entityId}/approve")
-    public ApiResponse<CatalogEntityVO> approve(@PathVariable EntityType entityType,@PathVariable Long entityId){try{CatalogEntityVO item=catalogService.approve(entityType,entityId);projectEntityAndRelations(entityType, entityId, item);return ApiResponse.success("catalog entity approved",item);}catch(IllegalArgumentException ex){return ApiResponse.fail(ex.getMessage());}}
     @DeleteMapping("/entities/{entityType}/{entityId}")
     public ApiResponse<CatalogEntityVO> deactivate(@PathVariable EntityType entityType,@PathVariable Long entityId){try{CatalogEntityVO item=catalogService.deactivate(entityType,entityId);projectionService.projectEntity(item);return ApiResponse.success("catalog entity deactivated",item);}catch(IllegalArgumentException ex){return ApiResponse.fail(ex.getMessage());}}
     @PostMapping("/entities/{entityType}/{entityId}/media")
@@ -50,9 +44,4 @@ public class CatalogAdminController {
     public ApiResponse<CatalogProjectionTask> retry(@PathVariable Long taskId){try{return ApiResponse.success("projection task queued",projectionService.retry(taskId));}catch(IllegalArgumentException ex){return ApiResponse.fail(ex.getMessage());}}
     @GetMapping("/projection-tasks")
     public ApiResponse<List<CatalogProjectionTask>> projectionTasks(){return ApiResponse.success(projectionService.tasks());}
-
-    private void projectEntityAndRelations(EntityType entityType, Long entityId, CatalogEntityVO item) {
-        projectionService.projectEntity(item);
-        catalogService.relations(entityType, entityId).forEach(projectionService::projectRelation);
-    }
 }

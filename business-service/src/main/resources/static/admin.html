@@ -214,7 +214,6 @@
                     <button class="ghost-button" id="schoolRefreshButton" type="button">刷新列表</button>
                     <button class="ghost-button" id="schoolTemplateButton" type="button">下载导入模板</button>
                     <button class="ghost-button" id="schoolImportButton" type="button">导入 Excel</button>
-                    <button class="accent-button" id="schoolAddButton" type="button">新增学校</button>
                 </div>
             </div>
             <input id="schoolImportFileInput" type="file" accept=".xlsx" hidden>
@@ -324,7 +323,7 @@
             </div>
 
             <div class="workspace-grid">
-                <article class="form-card">
+                <article class="form-card" hidden>
                     <div class="card-topline">
                         <h3>资源表单</h3>
                         <button class="ghost-button" id="resourceResetButton" type="button">清空</button>
@@ -340,10 +339,6 @@
                             <label>
                                 <span>资源名称</span>
                                 <input id="resourceNameInput" type="text" placeholder="输入资源名称">
-                            </label>
-                            <label>
-                                <span>资源别名</span>
-                                <input id="resourceAliasInput" type="text" placeholder="可选">
                             </label>
                             <label>
                                 <span>资源类别</span>
@@ -700,107 +695,6 @@
                 </div>
             </article>
 
-            <div class="workspace-grid">
-                <article class="form-card">
-                    <div class="card-topline">
-                        <h3>活动方案表单</h3>
-                        <button class="ghost-button" id="planResetButton" type="button">清空</button>
-                    </div>
-
-                    <form id="planForm" class="data-form">
-                        <input id="planIdInput" type="hidden">
-                        <div class="field-grid two-col">
-                            <label>
-                                <span>方案编码</span>
-                                <input id="planCodeInput" type="text" placeholder="PLAN_HEB_0001">
-                            </label>
-                            <label>
-                                <span>所属学校</span>
-                                <select id="planSchoolSelect"></select>
-                            </label>
-                            <label>
-                                <span>关联资源</span>
-                                <select id="planResourceSelect"></select>
-                            </label>
-                            <label>
-                                <span>活动类型</span>
-                                <select id="planActivityTypeInput">
-                                    <option value="classroom">课堂活动</option>
-                                    <option value="field_trip">校外参访</option>
-                                    <option value="volunteer_service">志愿服务</option>
-                                    <option value="research_study">研学活动</option>
-                                    <option value="labor_practice">劳动实践</option>
-                                    <option value="club_activity">社团活动</option>
-                                    <option value="school_based_course">校本课程</option>
-                                    <option value="other">其他</option>
-                                </select>
-                            </label>
-                            <label>
-                                <span>主题</span>
-                                <input id="planThemeInput" type="text" placeholder="例如：西柏坡红色记忆主题研学">
-                            </label>
-                            <label>
-                                <span>适用年级</span>
-                                <input id="planSuitableGradeInput" type="text" placeholder="小学高年级 / 初中">
-                            </label>
-                            <label>
-                                <span>活动时长</span>
-                                <input id="planDurationInput" type="number" placeholder="120">
-                            </label>
-                        </div>
-
-                        <label>
-                            <span>教学目标</span>
-                            <textarea id="planObjectiveInput" placeholder="输入活动目标"></textarea>
-                        </label>
-
-                        <label>
-                            <span>活动内容</span>
-                            <textarea id="planContentInput" placeholder="输入活动流程与内容"></textarea>
-                        </label>
-
-                        <label>
-                            <span>前期准备</span>
-                            <textarea id="planPreparationInput" placeholder="输入准备事项"></textarea>
-                        </label>
-
-                        <label>
-                            <span>安全提示</span>
-                            <textarea id="planSafetyInput" placeholder="输入安全提示"></textarea>
-                        </label>
-
-                        <label>
-                            <span>预期成果</span>
-                            <textarea id="planOutcomeInput" placeholder="输入预期成果"></textarea>
-                        </label>
-
-                        <div class="form-actions">
-                            <button class="accent-button" id="planSubmitButton" type="submit">保存方案</button>
-                        </div>
-                    </form>
-                </article>
-
-                <article class="table-card">
-                    <div class="card-topline">
-                        <h3>方案列表</h3>
-                        <span class="mini-stat" id="planListCount">0 条</span>
-                    </div>
-                    <div class="table-shell">
-                        <table>
-                            <thead>
-                            <tr>
-                                <th>编码</th>
-                                <th>主题</th>
-                                <th>学校</th>
-                                <th>类型</th>
-                                <th>操作</th>
-                            </tr>
-                            </thead>
-                            <tbody id="planTableBody"></tbody>
-                        </table>
-                    </div>
-                </article>
-            </div>
         </section>
 
         <section class="workspace-panel agent-ops-panel" data-panel="agent-ops">

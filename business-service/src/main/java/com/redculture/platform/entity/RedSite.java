@@ -26,9 +26,6 @@ public class RedSite extends BaseAuditEntity {
     @TableField("site_name")
     private String siteName;
 
-    @TableField("site_alias")
-    private String siteAlias;
-
     @TableField("region_id")
     private Long regionId;
 

@@ -12,8 +12,6 @@ public class ResourceCreateRequest {
 
     private String resourceName;
 
-    private String resourceAlias;
-
     private ResourceCategory resourceCategory;
 
     private String resourceSubcategory;

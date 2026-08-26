@@ -26,9 +26,6 @@ public class LocalEduResource extends BaseAuditEntity {
     @TableField("resource_name")
     private String resourceName;
 
-    @TableField("resource_alias")
-    private String resourceAlias;
-
     @TableField("resource_category")
     private ResourceCategory resourceCategory;
 

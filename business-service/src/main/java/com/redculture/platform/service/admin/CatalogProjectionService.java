@@ -48,14 +48,13 @@ public class CatalogProjectionService {
                 properties.put("id", entity.getEntityId());
                 properties.put("code", text(entity.getCode()));
                 properties.put("name", text(entity.getName()));
-                properties.put("alias", text(entity.getAlias()));
                 properties.put("summary", text(entity.getSummary()));
                 properties.put("address", text(entity.getAddress()));
                 properties.put("longitude", neo4jNumber(entity.getLongitude()));
                 properties.put("latitude", neo4jNumber(entity.getLatitude()));
                 neo4jClient.query("MERGE (node:" + label + " {id:$id}) SET node.code=$code, node.name=$name, "
-                                + "node.alias=$alias, node.summary=$summary, node.address=$address, node.longitude=$longitude, "
-                                + "node.latitude=$latitude, node.active=true, node.published=true")
+                                + "node.summary=$summary, node.address=$address, node.longitude=$longitude, "
+                                + "node.latitude=$latitude, node.active=true, node.published=true REMOVE node.alias")
                         .bindAll(properties).run();
                 upsertChunk(type, entity);
                 ragIndexService.synchronizeIncrementally();

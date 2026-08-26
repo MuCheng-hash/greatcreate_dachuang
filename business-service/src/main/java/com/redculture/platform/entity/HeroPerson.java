@@ -23,9 +23,6 @@ public class HeroPerson extends BaseAuditEntity {
     @TableField("hero_name")
     private String heroName;
 
-    @TableField("hero_alias")
-    private String heroAlias;
-
     @TableField("gender")
     private Gender gender;
 

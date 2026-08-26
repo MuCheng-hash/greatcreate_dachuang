@@ -12,7 +12,6 @@ public class CatalogEntityVO {
     private Long entityId;
     private String code;
     private String name;
-    private String alias;
     private Long regionId;
     private String address;
     private BigDecimal longitude;

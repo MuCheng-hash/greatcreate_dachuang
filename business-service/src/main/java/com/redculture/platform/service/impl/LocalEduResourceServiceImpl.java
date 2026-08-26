@@ -10,8 +10,6 @@ import com.redculture.platform.enums.ReviewStatus;
 import com.redculture.platform.mapper.LocalEduResourceMapper;
 import com.redculture.platform.service.LocalEduResourceService;
 import com.redculture.platform.vo.ResourceAdminVO;
-import com.redculture.platform.vo.request.ResourceCreateRequest;
-import com.redculture.platform.vo.request.ResourceReviewRequest;
 import com.redculture.platform.vo.request.ResourceUpdateRequest;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -27,23 +25,11 @@ public class LocalEduResourceServiceImpl extends ServiceImpl<LocalEduResourceMap
 
     @Override
     @Transactional
-    public ResourceAdminVO createResource(ResourceCreateRequest request) {
-        validateCreateRequest(request);
-        ensureResourceCodeUnique(request.getResourceCode(), null);
-
-        LocalEduResource resource = new LocalEduResource();
-        fillResourceForCreate(resource, request);
-        resource.setReviewStatus(ReviewStatus.DRAFT);
-        resource.setActive(true);
-        save(resource);
-        return toResourceAdminVO(resource);
-    }
-
-    @Override
-    @Transactional
     public ResourceAdminVO updateResource(Long resourceId, ResourceUpdateRequest request) {
         LocalEduResource resource = requireResource(resourceId);
         fillResourceForUpdate(resource, request);
+        resource.setReviewStatus(ReviewStatus.APPROVED);
+        resource.setActive(true);
         updateById(resource);
         return toResourceAdminVO(getById(resourceId));
     }
@@ -77,8 +63,6 @@ public class LocalEduResourceServiceImpl extends ServiceImpl<LocalEduResourceMap
                     .or()
                     .like(LocalEduResource::getResourceCode, cleanKeyword)
                     .or()
-                    .like(LocalEduResource::getResourceAlias, cleanKeyword)
-                    .or()
                     .like(LocalEduResource::getAddress, cleanKeyword)
                     .or()
                     .like(LocalEduResource::getOrganizationName, cleanKeyword));
@@ -96,56 +80,6 @@ public class LocalEduResourceServiceImpl extends ServiceImpl<LocalEduResourceMap
         );
     }
 
-    @Override
-    @Transactional
-    public ResourceAdminVO submitReview(Long resourceId) {
-        LocalEduResource resource = requireResource(resourceId);
-        resource.setReviewStatus(ReviewStatus.PENDING);
-        updateById(resource);
-        return toResourceAdminVO(getById(resourceId));
-    }
-
-    @Override
-    @Transactional
-    public ResourceAdminVO approve(Long resourceId, ResourceReviewRequest request) {
-        LocalEduResource resource = requireResource(resourceId);
-        resource.setReviewStatus(ReviewStatus.APPROVED);
-        updateById(resource);
-        return toResourceAdminVO(getById(resourceId));
-    }
-
-    @Override
-    @Transactional
-    public ResourceAdminVO reject(Long resourceId, ResourceReviewRequest request) {
-        LocalEduResource resource = requireResource(resourceId);
-        resource.setReviewStatus(ReviewStatus.REJECTED);
-        updateById(resource);
-        return toResourceAdminVO(getById(resourceId));
-    }
-
-    private void validateCreateRequest(ResourceCreateRequest request) {
-        if (request == null) {
-            throw new IllegalArgumentException("request cannot be null");
-        }
-        if (!StringUtils.hasText(request.getResourceCode())) {
-            throw new IllegalArgumentException("resourceCode is required");
-        }
-        if (!StringUtils.hasText(request.getResourceName())) {
-            throw new IllegalArgumentException("resourceName is required");
-        }
-    }
-
-    private void ensureResourceCodeUnique(String resourceCode, Long excludeResourceId) {
-        LambdaQueryWrapper<LocalEduResource> wrapper = new LambdaQueryWrapper<LocalEduResource>()
-                .eq(LocalEduResource::getResourceCode, resourceCode.trim());
-        if (excludeResourceId != null) {
-            wrapper.ne(LocalEduResource::getResourceId, excludeResourceId);
-        }
-        if (count(wrapper) > 0) {
-            throw new IllegalArgumentException("resourceCode already exists");
-        }
-    }
-
     private LocalEduResource requireResource(Long resourceId) {
         if (resourceId == null) {
             throw new IllegalArgumentException("resourceId is required");
@@ -157,37 +91,11 @@ public class LocalEduResourceServiceImpl extends ServiceImpl<LocalEduResourceMap
         return resource;
     }
 
-    private void fillResourceForCreate(LocalEduResource resource, ResourceCreateRequest request) {
-        resource.setResourceCode(request.getResourceCode().trim());
-        resource.setResourceName(clean(request.getResourceName()));
-        resource.setResourceAlias(clean(request.getResourceAlias()));
-        resource.setResourceCategory(defaultCategory(request.getResourceCategory()));
-        resource.setResourceSubcategory(clean(request.getResourceSubcategory()));
-        resource.setRegionId(request.getRegionId());
-        resource.setCountyRegionId(request.getCountyRegionId());
-        resource.setTownshipRegionId(request.getTownshipRegionId());
-        resource.setAddress(clean(request.getAddress()));
-        resource.setLongitude(request.getLongitude());
-        resource.setLatitude(request.getLatitude());
-        resource.setOrganizationName(clean(request.getOrganizationName()));
-        resource.setContactPhone(clean(request.getContactPhone()));
-        resource.setOpeningTimeDesc(clean(request.getOpeningTimeDesc()));
-        resource.setReservationRequired(defaultBoolean(request.getReservationRequired(), false));
-        resource.setRecommendedVisitMinutes(request.getRecommendedVisitMinutes());
-        resource.setIntro(clean(request.getIntro()));
-        resource.setEducationValue(clean(request.getEducationValue()));
-        resource.setActivitySuggestion(clean(request.getActivitySuggestion()));
-        resource.setTargetGrade(clean(request.getTargetGrade()));
-        resource.setSafetyNote(clean(request.getSafetyNote()));
-        resource.setSourceId(request.getSourceId());
-    }
-
     private void fillResourceForUpdate(LocalEduResource resource, ResourceUpdateRequest request) {
         if (request == null) {
             throw new IllegalArgumentException("request cannot be null");
         }
         resource.setResourceName(valueOrOriginal(request.getResourceName(), resource.getResourceName()));
-        resource.setResourceAlias(valueOrOriginal(request.getResourceAlias(), resource.getResourceAlias()));
         resource.setResourceCategory(valueOrOriginal(request.getResourceCategory(), resource.getResourceCategory()));
         resource.setResourceSubcategory(valueOrOriginal(request.getResourceSubcategory(), resource.getResourceSubcategory()));
         resource.setRegionId(valueOrOriginal(request.getRegionId(), resource.getRegionId()));
@@ -215,7 +123,6 @@ public class LocalEduResourceServiceImpl extends ServiceImpl<LocalEduResourceMap
         vo.setResourceId(resource.getResourceId());
         vo.setResourceCode(resource.getResourceCode());
         vo.setResourceName(resource.getResourceName());
-        vo.setResourceAlias(resource.getResourceAlias());
         vo.setResourceCategory(enumValue(resource.getResourceCategory()));
         vo.setResourceSubcategory(resource.getResourceSubcategory());
         vo.setRegionId(resource.getRegionId());
@@ -244,14 +151,6 @@ public class LocalEduResourceServiceImpl extends ServiceImpl<LocalEduResourceMap
 
     private String clean(String value) {
         return value == null ? null : value.trim();
-    }
-
-    private Boolean defaultBoolean(Boolean value, boolean defaultValue) {
-        return value == null ? defaultValue : value;
-    }
-
-    private ResourceCategory defaultCategory(ResourceCategory value) {
-        return value == null ? ResourceCategory.OTHER : value;
     }
 
     private <T> T valueOrOriginal(T newValue, T originalValue) {

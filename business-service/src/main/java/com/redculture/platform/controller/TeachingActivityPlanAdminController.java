@@ -8,6 +8,7 @@ import com.redculture.platform.vo.TeachingActivityPlanAdminVO;
 import com.redculture.platform.vo.request.TeachingActivityPlanCreateRequest;
 import com.redculture.platform.vo.request.TeachingActivityPlanUpdateRequest;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.PutMapping;
@@ -15,6 +16,8 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.http.HttpStatus;
+import org.springframework.web.server.ResponseStatusException;
 
 @RestController
 @RequestMapping({"/api/admin", "/admin"})
@@ -30,22 +33,20 @@ public class TeachingActivityPlanAdminController {
     //新增教学活动方案
     @PostMapping("/activity-plans")
     public ApiResponse<TeachingActivityPlanAdminVO> create(@RequestBody TeachingActivityPlanCreateRequest request) {
-        try {
-            return ApiResponse.success("activity plan created", teachingActivityPlanService.createPlan(request));
-        } catch (IllegalArgumentException exception) {
-            return ApiResponse.fail(exception.getMessage());
-        }
+        throw new ResponseStatusException(HttpStatus.FORBIDDEN, "administrators cannot create teaching activity plans");
     }
 
     //修改教学活动方案
     @PutMapping("/activity-plans/{planId}")
     public ApiResponse<TeachingActivityPlanAdminVO> update(@PathVariable Long planId,
                                                            @RequestBody TeachingActivityPlanUpdateRequest request) {
-        try {
-            return ApiResponse.success("activity plan updated", teachingActivityPlanService.updatePlan(planId, request));
-        } catch (IllegalArgumentException exception) {
-            return ApiResponse.fail(exception.getMessage());
-        }
+        throw new ResponseStatusException(HttpStatus.FORBIDDEN, "administrators cannot edit teaching activity plans");
+    }
+
+    // 方案归属教师，管理员只能查看，不能删除。
+    @DeleteMapping("/activity-plans/{planId}")
+    public ApiResponse<Void> delete(@PathVariable Long planId) {
+        throw new ResponseStatusException(HttpStatus.FORBIDDEN, "administrators cannot delete teaching activity plans");
     }
 
     //查看方案详情

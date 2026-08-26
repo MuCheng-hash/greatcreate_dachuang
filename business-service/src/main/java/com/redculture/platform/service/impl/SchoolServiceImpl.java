@@ -7,14 +7,12 @@ import com.redculture.platform.common.PageResult;
 import com.redculture.platform.entity.School;
 import com.redculture.platform.entity.AdministrativeRegion;
 import com.redculture.platform.enums.RegionLevel;
-import com.redculture.platform.enums.SchoolLevel;
 import com.redculture.platform.enums.SchoolNature;
 import com.redculture.platform.mapper.AdministrativeRegionMapper;
 import com.redculture.platform.mapper.SchoolMapper;
 import com.redculture.platform.service.SchoolService;
 import com.redculture.platform.vo.SchoolAdminVO;
 import com.redculture.platform.vo.SchoolImportErrorVO;
-import com.redculture.platform.vo.request.SchoolCreateRequest;
 import com.redculture.platform.vo.request.SchoolUpdateRequest;
 import com.redculture.platform.vo.request.SchoolCsvImportRequest;
 import com.redculture.platform.vo.SchoolImportResultVO;
@@ -32,12 +30,16 @@ import org.apache.poi.ss.usermodel.HorizontalAlignment;
 import org.apache.poi.ss.usermodel.IndexedColors;
 import org.apache.poi.ss.usermodel.FillPatternType;
 import org.apache.poi.ss.usermodel.CellStyle;
+import org.apache.poi.ss.usermodel.Font;
+import org.apache.poi.ss.usermodel.VerticalAlignment;
 import org.apache.poi.ss.usermodel.CreationHelper;
 import org.apache.poi.ss.usermodel.Comment;
 import org.apache.poi.ss.usermodel.Drawing;
+import org.apache.poi.ss.usermodel.ClientAnchor;
 import org.apache.poi.ss.usermodel.DataValidation;
 import org.apache.poi.ss.usermodel.DataValidationConstraint;
 import org.apache.poi.ss.util.CellRangeAddressList;
+import org.apache.poi.ss.util.CellRangeAddress;
 import org.apache.poi.xssf.usermodel.XSSFWorkbook;
 
 import java.io.ByteArrayOutputStream;
@@ -48,6 +50,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.UUID;
 
 @Service
 public class SchoolServiceImpl extends ServiceImpl<SchoolMapper, School> implements SchoolService {
@@ -56,29 +59,32 @@ public class SchoolServiceImpl extends ServiceImpl<SchoolMapper, School> impleme
     private static final long DEFAULT_PAGE_SIZE = 10L;
     private static final long MAX_PAGE_SIZE = 100L;
     private static final long MAX_IMPORT_BYTES = 10L * 1024 * 1024;
+    private static final String TEMPLATE_EXAMPLE_NOTICE = "示例数据：导入前请删除下一行的“平山县西柏坡希望小学”示例信息。";
     private static final List<String> IMPORT_HEADERS = List.of(
-            "school_code", "school_name", "school_type", "school_level", "school_nature", "address",
+            "school_name", "school_type", "school_nature", "address",
             "longitude", "latitude", "province_name", "city_name", "county_name", "township_name",
             "intro", "contact_phone", "principal_name"
+    );
+    private static final Map<String, String> IMPORT_HEADER_LABELS = Map.ofEntries(
+            Map.entry("school_name", "学校名称"),
+            Map.entry("school_type", "学校类型"),
+            Map.entry("school_nature", "办学性质"),
+            Map.entry("address", "学校地址"),
+            Map.entry("longitude", "经度"),
+            Map.entry("latitude", "纬度"),
+            Map.entry("province_name", "省份名称"),
+            Map.entry("city_name", "城市名称"),
+            Map.entry("county_name", "区县名称"),
+            Map.entry("township_name", "乡镇名称"),
+            Map.entry("intro", "学校简介"),
+            Map.entry("contact_phone", "联系电话"),
+            Map.entry("principal_name", "负责人姓名")
     );
 
     private final AdministrativeRegionMapper administrativeRegionMapper;
 
     public SchoolServiceImpl(AdministrativeRegionMapper administrativeRegionMapper) {
         this.administrativeRegionMapper = administrativeRegionMapper;
-    }
-
-    @Override
-    @Transactional
-    public SchoolAdminVO createSchool(SchoolCreateRequest request) {
-        validateCreateRequest(request);
-
-        School school = new School();
-        fillSchoolForCreate(school, request);
-        school.setActive(true);
-        school.setReviewStatus("approved");
-        save(school);
-        return toSchoolAdminVO(school);
     }
 
     @Override
@@ -186,33 +192,31 @@ public class SchoolServiceImpl extends ServiceImpl<SchoolMapper, School> impleme
             }
             Map<String, Integer> headerIndexes = readHeaderIndexes(sheet.getRow(sheet.getFirstRowNum()));
             SchoolImportResultVO result = new SchoolImportResultVO();
-            Map<String, Integer> importedCodes = new HashMap<>();
+            Map<String, Integer> importedNames = new HashMap<>();
+            Map<String, Integer> importedLongitudes = new HashMap<>();
+            Map<String, Integer> importedLatitudes = new HashMap<>();
             DataFormatter formatter = new DataFormatter(Locale.ROOT);
             for (int rowIndex = sheet.getFirstRowNum() + 1; rowIndex <= sheet.getLastRowNum(); rowIndex++) {
                 Row row = sheet.getRow(rowIndex);
                 if (isBlankRow(row, formatter)) continue;
+                if (isTemplateExampleNotice(row, formatter)) continue;
                 int excelRowNumber = rowIndex + 1;
-                String schoolCode = readCell(row, headerIndexes, "school_code", formatter);
+                String schoolName = readCell(row, headerIndexes, "school_name", formatter);
                 try {
-                    String normalizedCode = required(schoolCode, "school_code");
-                    Integer firstRow = importedCodes.putIfAbsent(normalizedCode, excelRowNumber);
-                    if (firstRow != null) {
-                        throw new IllegalArgumentException("school_code 已在本文件第 " + firstRow + " 行出现");
-                    }
-                    School school = getOne(new LambdaQueryWrapper<School>()
-                            .eq(School::getSchoolCode, normalizedCode).last("LIMIT 1"));
-                    if (school == null) {
-                        school = buildSchool(row, headerIndexes, formatter, new School());
-                        save(school);
-                        result.setCreatedCount(result.getCreatedCount() + 1);
-                    } else {
-                        buildSchool(row, headerIndexes, formatter, school);
-                        updateById(school);
-                        result.setUpdatedCount(result.getUpdatedCount() + 1);
-                    }
+                    School school = buildSchool(row, headerIndexes, formatter);
+                    rejectDuplicateInFile(importedNames, school.getSchoolName(), "学校名称", excelRowNumber);
+                    rejectDuplicateInFile(importedLongitudes, coordinateKey(school.getLongitude()), "经度", excelRowNumber);
+                    rejectDuplicateInFile(importedLatitudes, coordinateKey(school.getLatitude()), "纬度", excelRowNumber);
+                    rejectDuplicateInDatabase(school);
+                    school.setSchoolCode(nextImportSchoolCode());
+                    save(school);
+                    importedNames.put(school.getSchoolName(), excelRowNumber);
+                    importedLongitudes.put(coordinateKey(school.getLongitude()), excelRowNumber);
+                    importedLatitudes.put(coordinateKey(school.getLatitude()), excelRowNumber);
+                    result.setCreatedCount(result.getCreatedCount() + 1);
                 } catch (Exception exception) {
                     result.setFailedCount(result.getFailedCount() + 1);
-                    result.getErrors().add(new SchoolImportErrorVO(excelRowNumber, emptyToNull(schoolCode), readableMessage(exception)));
+                    result.getErrors().add(new SchoolImportErrorVO(excelRowNumber, emptyToNull(schoolName), readableMessage(exception)));
                 }
             }
             return result;
@@ -229,27 +233,53 @@ public class SchoolServiceImpl extends ServiceImpl<SchoolMapper, School> impleme
             Sheet sheet = workbook.createSheet("学校导入");
             Row header = sheet.createRow(0);
             CellStyle headerStyle = workbook.createCellStyle();
-            headerStyle.setFillForegroundColor(IndexedColors.DARK_GREEN.getIndex());
+            headerStyle.setFillForegroundColor(IndexedColors.LIGHT_GREEN.getIndex());
             headerStyle.setFillPattern(FillPatternType.SOLID_FOREGROUND);
             headerStyle.setAlignment(HorizontalAlignment.CENTER);
+            Font headerFont = workbook.createFont();
+            headerFont.setBold(true);
+            headerFont.setColor(IndexedColors.DARK_GREEN.getIndex());
+            headerStyle.setFont(headerFont);
             CreationHelper creationHelper = workbook.getCreationHelper();
             Drawing<?> drawing = sheet.createDrawingPatriarch();
             for (int index = 0; index < IMPORT_HEADERS.size(); index++) {
                 Cell cell = header.createCell(index);
-                cell.setCellValue(IMPORT_HEADERS.get(index));
+                String headerKey = IMPORT_HEADERS.get(index);
+                cell.setCellValue(IMPORT_HEADER_LABELS.get(headerKey));
                 cell.setCellStyle(headerStyle);
-                Comment comment = drawing.createCellComment(creationHelper.createClientAnchor());
-                comment.setString(creationHelper.createRichTextString(templateHint(IMPORT_HEADERS.get(index))));
+                ClientAnchor anchor = creationHelper.createClientAnchor();
+                anchor.setCol1(index);
+                anchor.setCol2(index + 3);
+                anchor.setRow1(0);
+                anchor.setRow2(4);
+                Comment comment = drawing.createCellComment(anchor);
+                comment.setString(creationHelper.createRichTextString(templateHint(headerKey)));
                 cell.setCellComment(comment);
                 sheet.setColumnWidth(index, index == 12 ? 32 * 256 : 18 * 256);
             }
-            Row example = sheet.createRow(1);
-            List<String> values = List.of("SCH001", "示例小学", "primary_school", "primary", "public", "示例路 1 号",
-                    "114.500000", "38.000000", "河北省", "石家庄市", "示例区", "示例镇", "用于填写学校简介", "0311-0000000", "张老师");
+            Row notice = sheet.createRow(1);
+            CellStyle noticeStyle = workbook.createCellStyle();
+            noticeStyle.setFillForegroundColor(IndexedColors.LIGHT_YELLOW.getIndex());
+            noticeStyle.setFillPattern(FillPatternType.SOLID_FOREGROUND);
+            noticeStyle.setAlignment(HorizontalAlignment.LEFT);
+            noticeStyle.setVerticalAlignment(VerticalAlignment.CENTER);
+            Font noticeFont = workbook.createFont();
+            noticeFont.setBold(true);
+            noticeFont.setColor(IndexedColors.DARK_RED.getIndex());
+            noticeStyle.setFont(noticeFont);
+            Cell noticeCell = notice.createCell(0);
+            noticeCell.setCellValue(TEMPLATE_EXAMPLE_NOTICE);
+            noticeCell.setCellStyle(noticeStyle);
+            sheet.addMergedRegion(new CellRangeAddress(1, 1, 0, IMPORT_HEADERS.size() - 1));
+            notice.setHeightInPoints(24);
+            Row example = sheet.createRow(2);
+            List<String> values = List.of("平山县西柏坡希望小学", "乡镇中心小学", "公办",
+                    "河北省石家庄市平山县西柏坡镇迎宾路7号", "113.9390000", "38.3484380", "河北省", "石家庄市",
+                    "平山县", "西柏坡镇", "用于红色文化资源密集区域学校试点。", "", "");
             for (int index = 0; index < values.size(); index++) example.createCell(index).setCellValue(values.get(index));
             sheet.createFreezePane(0, 1);
-            addListValidation(sheet, 3, Arrays.stream(SchoolLevel.values()).map(SchoolLevel::getValue).toArray(String[]::new));
-            addListValidation(sheet, 4, Arrays.stream(SchoolNature.values()).map(SchoolNature::getValue).toArray(String[]::new));
+            addListValidation(sheet, 1, new String[]{"乡镇中心小学", "村小"});
+            addListValidation(sheet, 2, Arrays.stream(SchoolNature.values()).map(this::schoolNatureLabel).toArray(String[]::new));
             workbook.write(output);
             return output.toByteArray();
         } catch (IOException exception) {
@@ -257,19 +287,17 @@ public class SchoolServiceImpl extends ServiceImpl<SchoolMapper, School> impleme
         }
     }
 
-    private School buildSchool(Row row, Map<String, Integer> headerIndexes, DataFormatter formatter, School school) {
-        String schoolCode = validateLength(required(readCell(row, headerIndexes, "school_code", formatter), "school_code"), "school_code", 50);
-        String schoolName = validateLength(required(readCell(row, headerIndexes, "school_name", formatter), "school_name"), "school_name", 200);
+    private School buildSchool(Row row, Map<String, Integer> headerIndexes, DataFormatter formatter) {
+        School school = new School();
+        String schoolName = validateLength(required(readCell(row, headerIndexes, "school_name", formatter), "学校名称"), "学校名称", 200);
         BigDecimal longitude = parseCoordinate(readCell(row, headerIndexes, "longitude", formatter), "经度", new BigDecimal("-180"), new BigDecimal("180"));
         BigDecimal latitude = parseCoordinate(readCell(row, headerIndexes, "latitude", formatter), "纬度", new BigDecimal("-90"), new BigDecimal("90"));
         RegionPath regions = resolveRegions(
                 readCell(row, headerIndexes, "province_name", formatter), readCell(row, headerIndexes, "city_name", formatter),
                 readCell(row, headerIndexes, "county_name", formatter), readCell(row, headerIndexes, "township_name", formatter));
-        school.setSchoolCode(schoolCode);
         school.setSchoolName(schoolName);
         school.setSchoolType(validateLength(emptyToNull(readCell(row, headerIndexes, "school_type", formatter)), "school_type", 100));
-        school.setSchoolLevel(valueOrDefault(parseSchoolLevel(readCell(row, headerIndexes, "school_level", formatter)),
-                school.getSchoolLevel(), "primary"));
+        school.setSchoolLevel("primary");
         school.setSchoolNature(valueOrDefault(parseSchoolNature(readCell(row, headerIndexes, "school_nature", formatter)),
                 school.getSchoolNature(), "public"));
         school.setAddress(validateLength(emptyToNull(readCell(row, headerIndexes, "address", formatter)), "address", 300));
@@ -285,6 +313,33 @@ public class SchoolServiceImpl extends ServiceImpl<SchoolMapper, School> impleme
         school.setReviewStatus("approved");
         school.setActive(true);
         return school;
+    }
+
+    private void rejectDuplicateInFile(Map<String, Integer> seenValues, String value, String field, int rowNumber) {
+        Integer firstRow = seenValues.get(value);
+        if (firstRow != null) {
+            throw new IllegalArgumentException(field + "已在本文件第 " + firstRow + " 行出现");
+        }
+    }
+
+    private void rejectDuplicateInDatabase(School school) {
+        if (exists(new LambdaQueryWrapper<School>().eq(School::getSchoolName, school.getSchoolName()))) {
+            throw new IllegalArgumentException("学校名称“" + school.getSchoolName() + "”已存在，不能重复导入");
+        }
+        if (exists(new LambdaQueryWrapper<School>().eq(School::getLongitude, school.getLongitude()))) {
+            throw new IllegalArgumentException("经度“" + coordinateKey(school.getLongitude()) + "”已存在，不能重复导入");
+        }
+        if (exists(new LambdaQueryWrapper<School>().eq(School::getLatitude, school.getLatitude()))) {
+            throw new IllegalArgumentException("纬度“" + coordinateKey(school.getLatitude()) + "”已存在，不能重复导入");
+        }
+    }
+
+    private String coordinateKey(BigDecimal coordinate) {
+        return coordinate.stripTrailingZeros().toPlainString();
+    }
+
+    private String nextImportSchoolCode() {
+        return "SCH_AUTO_" + UUID.randomUUID().toString().replace("-", "").toUpperCase(Locale.ROOT);
     }
 
     private RegionPath resolveRegions(String provinceName, String cityName, String countyName, String townshipName) {
@@ -349,7 +404,13 @@ public class SchoolServiceImpl extends ServiceImpl<SchoolMapper, School> impleme
         Map<String, Integer> indexes = new HashMap<>();
         for (Cell cell : headerRow) {
             String value = clean(formatter.formatCellValue(cell));
-            if (StringUtils.hasText(value)) indexes.put(value, cell.getColumnIndex());
+            if (!StringUtils.hasText(value)) continue;
+            String headerKey = IMPORT_HEADER_LABELS.entrySet().stream()
+                    .filter(entry -> entry.getValue().equals(value))
+                    .map(Map.Entry::getKey)
+                    .findFirst()
+                    .orElse(value);
+            indexes.put(headerKey, cell.getColumnIndex());
         }
         List<String> missing = IMPORT_HEADERS.stream().filter(header -> !indexes.containsKey(header)).toList();
         if (!missing.isEmpty()) throw new IllegalArgumentException("Excel 表头不匹配，缺少：" + String.join("、", missing));
@@ -365,14 +426,13 @@ public class SchoolServiceImpl extends ServiceImpl<SchoolMapper, School> impleme
 
     private String templateHint(String header) {
         return switch (header) {
-            case "school_code" -> "必填，唯一编码，用于新增或更新学校。";
-            case "school_name" -> "必填，最长 200 个字符。";
+            case "school_name" -> "必填，最长 200 个字符；与已有学校或本文件其他行重复时不能导入。";
+            case "school_type" -> "请从下拉选项选择“乡镇中心小学”或“村小”。";
             case "longitude" -> "必填，经度范围 -180 到 180。";
             case "latitude" -> "必填，纬度范围 -90 到 90。";
             case "county_name" -> "必填；省、市、区县按父子关系解析。";
             case "township_name" -> "可选；填写时必须属于对应区县。";
-            case "school_level" -> "可选，使用下拉选项中的英文值。";
-            case "school_nature" -> "可选，使用下拉选项中的英文值。";
+            case "school_nature" -> "可选，请从下拉选项选择办学性质。";
             default -> "可选字段；请使用文本填写。";
         };
     }
@@ -381,6 +441,11 @@ public class SchoolServiceImpl extends ServiceImpl<SchoolMapper, School> impleme
         if (row == null) return true;
         for (Cell cell : row) if (StringUtils.hasText(clean(formatter.formatCellValue(cell)))) return false;
         return true;
+    }
+
+    private boolean isTemplateExampleNotice(Row row, DataFormatter formatter) {
+        Cell cell = row == null ? null : row.getCell(0, Row.MissingCellPolicy.RETURN_BLANK_AS_NULL);
+        return cell != null && TEMPLATE_EXAMPLE_NOTICE.equals(clean(formatter.formatCellValue(cell)));
     }
 
     private String readCell(Row row, Map<String, Integer> indexes, String header, DataFormatter formatter) {
@@ -401,14 +466,20 @@ public class SchoolServiceImpl extends ServiceImpl<SchoolMapper, School> impleme
         }
     }
 
-    private String parseSchoolLevel(String value) {
-        if (!StringUtils.hasText(value)) return null;
-        return SchoolLevel.fromValue(value).getValue();
-    }
-
     private String parseSchoolNature(String value) {
         if (!StringUtils.hasText(value)) return null;
+        for (SchoolNature item : SchoolNature.values()) {
+            if (schoolNatureLabel(item).equals(value.trim())) return item.getValue();
+        }
         return SchoolNature.fromValue(value).getValue();
+    }
+
+    private String schoolNatureLabel(SchoolNature value) {
+        return switch (value) {
+            case PUBLIC -> "公办";
+            case PRIVATE -> "民办";
+            case OTHER -> "其他";
+        };
     }
 
     private String valueOrDefault(String importedValue, String existingValue, String defaultValue) {
@@ -439,15 +510,6 @@ public class SchoolServiceImpl extends ServiceImpl<SchoolMapper, School> impleme
 
     private record RegionPath(Long provinceId, Long cityId, Long countyId, Long townshipId) { }
 
-    private void validateCreateRequest(SchoolCreateRequest request) {
-        if (request == null) {
-            throw new IllegalArgumentException("request cannot be null");
-        }
-        if (!StringUtils.hasText(request.getSchoolName())) {
-            throw new IllegalArgumentException("schoolName is required");
-        }
-    }
-
     private School requireSchool(Long schoolId) {
         if (schoolId == null) {
             throw new IllegalArgumentException("schoolId is required");
@@ -457,21 +519,6 @@ public class SchoolServiceImpl extends ServiceImpl<SchoolMapper, School> impleme
             throw new IllegalArgumentException("school not found");
         }
         return school;
-    }
-
-    private void fillSchoolForCreate(School school, SchoolCreateRequest request) {
-        school.setSchoolName(clean(request.getSchoolName()));
-        school.setProvinceRegionId(request.getProvinceRegionId());
-        school.setCityRegionId(request.getCityRegionId());
-        school.setCountyRegionId(request.getCountyRegionId());
-        school.setTownshipRegionId(request.getTownshipRegionId());
-        school.setSchoolType(clean(request.getSchoolType()));
-        school.setAddress(clean(request.getAddress()));
-        school.setContactPhone(clean(request.getContactPhone()));
-        school.setPrincipalName(clean(request.getPrincipalName()));
-        school.setLongitude(request.getLongitude());
-        school.setLatitude(request.getLatitude());
-        school.setIntro(clean(request.getIntro()));
     }
 
     private void fillSchoolForUpdate(School school, SchoolUpdateRequest request) {

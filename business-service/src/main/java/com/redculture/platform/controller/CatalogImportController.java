@@ -36,16 +36,25 @@ public class CatalogImportController {
             for (String name : SHEETS) {
                 var sheet = workbook.createSheet(name);
                 var header = sheet.createRow(0);
-                String[] columns = "关系".equals(name)
-                        ? new String[]{"源实体类型", "源实体编码", "关系类型", "目标实体类型", "目标实体编码", "备注"}
-                        : "资源".equals(name)
-                        ? new String[]{"编码", "资源名称", "资源类型", "行政区域", "地址", "经度", "纬度", "简介", "教育价值", "数据来源", "适合学段", "别名", "资源子类", "所属机构", "联系电话", "开放时间", "需要预约", "建议时长", "活动建议", "安全提示", "图片URL", "来源可信度"}
-                        : new String[]{"编码", "名称", "别名", "区域ID", "地址", "经度", "纬度", "简介", "详情", "图片URL", "来源URL", "可信度"};
+                String[] columns = templateColumns(name);
                 for (int index = 0; index < columns.length; index++) { header.createCell(index).setCellValue(columns[index]); sheet.setColumnWidth(index, 18 * 256); }
                 sheet.createFreezePane(0, 1);
             }
             workbook.write(response.getOutputStream());
         }
+    }
+
+    private String[] templateColumns(String sheetName) {
+        if ("关系".equals(sheetName)) {
+            return new String[]{"源实体类型", "源实体编码", "关系类型", "目标实体类型", "目标实体编码", "备注"};
+        }
+        if ("资源".equals(sheetName)) {
+            return new String[]{"编码", "资源名称", "资源类型", "省份名称", "城市名称", "区县名称", "乡镇名称", "地址", "经度", "纬度", "简介", "教育价值", "数据来源", "适合学段", "资源子类", "所属机构", "联系电话", "开放时间", "需要预约", "建议时长", "活动建议", "安全提示", "图片URL"};
+        }
+        if ("人物".equals(sheetName) || "故事".equals(sheetName)) {
+            return new String[]{"编码", "名称", "省份名称", "城市名称", "区县名称", "乡镇名称", "地址", "简介", "详情", "图片URL", "来源URL"};
+        }
+        return new String[]{"编码", "名称", "省份名称", "城市名称", "区县名称", "乡镇名称", "地址", "经度", "纬度", "简介", "详情", "图片URL", "来源URL"};
     }
 
     @PostMapping(value = "/preview", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
@@ -62,7 +71,7 @@ public class CatalogImportController {
 
     @PostMapping("/{batchId}/confirm")
     public ApiResponse<CatalogImportBatch> confirm(@PathVariable Long batchId) {
-        try { return ApiResponse.success("合法行已导入待审核", importService.confirm(batchId)); }
+        try { return ApiResponse.success("合法行已导入并发布", importService.confirm(batchId)); }
         catch (IllegalArgumentException exception) { return ApiResponse.fail(exception.getMessage()); }
     }
 

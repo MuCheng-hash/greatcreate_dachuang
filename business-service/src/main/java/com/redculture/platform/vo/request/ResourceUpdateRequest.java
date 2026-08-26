@@ -10,8 +10,6 @@ public class ResourceUpdateRequest {
 
     private String resourceName;
 
-    private String resourceAlias;
-
     private ResourceCategory resourceCategory;
 
     private String resourceSubcategory;

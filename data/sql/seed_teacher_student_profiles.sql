@@ -86,18 +86,27 @@ ON DUPLICATE KEY UPDATE
   status = VALUES(status),
   updated_at = CURRENT_TIMESTAMP;
 
--- 2. 为每所学校生成 3 个示例班级
-INSERT IGNORE INTO class_info (school_id, class_name, grade_name, class_type, invite_code, status)
+-- 2. 为每所学校生成小学一年级至六年级示例班级
+INSERT INTO class_info (school_id, class_name, grade_name, class_type, invite_code, status)
 SELECT s.school_id, c.class_name, c.grade_name, 'administrative',
        CONCAT('S', s.school_id, 'C', c.class_no),
        'active'
 FROM school s
 JOIN (
-  SELECT 1 AS class_no, '五年级一班' AS class_name, '五年级' AS grade_name
-  UNION ALL SELECT 2, '六年级一班', '六年级'
-  UNION ALL SELECT 3, '七年级一班', '七年级'
+  SELECT 1 AS class_no, '一年级一班' AS class_name, '一年级' AS grade_name
+  UNION ALL SELECT 2, '二年级一班', '二年级'
+  UNION ALL SELECT 3, '三年级一班', '三年级'
+  UNION ALL SELECT 4, '四年级一班', '四年级'
+  UNION ALL SELECT 5, '五年级一班', '五年级'
+  UNION ALL SELECT 6, '六年级一班', '六年级'
 ) c
-WHERE s.school_id IS NOT NULL;
+WHERE s.school_id IS NOT NULL
+ON DUPLICATE KEY UPDATE
+  class_name = VALUES(class_name),
+  grade_name = VALUES(grade_name),
+  class_type = VALUES(class_type),
+  status = VALUES(status),
+  updated_at = CURRENT_TIMESTAMP;
 
 -- 3. 为每所学校生成 3 名教师账号
 INSERT IGNORE INTO school_user_account (

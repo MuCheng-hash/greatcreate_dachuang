@@ -6,6 +6,7 @@ import com.redculture.platform.entity.CatalogImportBatch;
 import com.redculture.platform.entity.CatalogImportRow;
 import com.redculture.platform.entity.CatalogProjectionTask;
 import com.redculture.platform.enums.EntityType;
+import com.redculture.platform.enums.RegionLevel;
 import com.redculture.platform.mapper.AdministrativeRegionMapper;
 import com.redculture.platform.mapper.CatalogImportBatchMapper;
 import com.redculture.platform.mapper.CatalogImportRowMapper;
@@ -141,6 +142,31 @@ class CatalogImportServiceTest {
     }
 
     @Test
+    void previewResolvesProvinceCityCountyAndTownshipNamesToMostSpecificRegion() throws Exception {
+        CatalogImportBatchMapper batchMapper = mock(CatalogImportBatchMapper.class);
+        CatalogImportRowMapper rowMapper = mock(CatalogImportRowMapper.class);
+        CatalogAdminService catalogService = mock(CatalogAdminService.class);
+        AdministrativeRegionMapper regionMapper = mock(AdministrativeRegionMapper.class);
+        doAnswer(invocation -> {
+            ((CatalogImportBatch) invocation.getArgument(0)).setBatchId(47L);
+            return 1;
+        }).when(batchMapper).insert(any(CatalogImportBatch.class));
+        AdministrativeRegion province = region(1L, null, "河北省", RegionLevel.PROVINCE);
+        AdministrativeRegion city = region(2L, 1L, "石家庄市", RegionLevel.CITY);
+        AdministrativeRegion county = region(3L, 2L, "平山县", RegionLevel.COUNTY);
+        AdministrativeRegion township = region(4L, 3L, "西柏坡镇", RegionLevel.TOWNSHIP);
+        when(regionMapper.selectList(any())).thenReturn(List.of(province), List.of(city), List.of(county), List.of(township));
+        ArgumentCaptor<CatalogImportRow> captor = ArgumentCaptor.forClass(CatalogImportRow.class);
+
+        CatalogImportBatch batch = service(batchMapper, rowMapper, catalogService, regionMapper)
+                .preview(hierarchicalResourceWorkbook());
+
+        assertEquals(1, batch.getValidRows());
+        verify(rowMapper).insert(captor.capture());
+        assertTrue(captor.getValue().getPayloadJson().contains("\"regionId\":4"));
+    }
+
+    @Test
     void confirmImportsEntitiesAndWritesSameBatchRelationsWithoutProjecting() throws Exception {
         CatalogImportBatchMapper batchMapper = mock(CatalogImportBatchMapper.class);
         CatalogImportRowMapper rowMapper = mock(CatalogImportRowMapper.class);
@@ -185,10 +211,8 @@ class CatalogImportServiceTest {
         assertEquals("IMPORTED", insertedRows.get(0).getValidationStatus());
         assertEquals("IMPORTED", insertedRows.get(1).getValidationStatus());
         assertEquals("IMPORTED", insertedRows.get(2).getValidationStatus());
-        assertTrue(insertedRows.get(2).getValidationMessage().contains("两端实体审核通过后投影"));
+        assertTrue(insertedRows.get(2).getValidationMessage().contains("图谱投影已排队"));
         verify(catalogService).createImportedRelation(any());
-        verify(catalogService).submitForReview(EntityType.SITE, 101L);
-        verify(catalogService).submitForReview(EntityType.EVENT, 202L);
         verify(rowMapper, org.mockito.Mockito.atLeast(3)).updateById(any(CatalogImportRow.class));
     }
 
@@ -219,7 +243,7 @@ class CatalogImportServiceTest {
         when(rowMapper.selectList(any())).thenReturn(List.of(row));
         when(catalogService.findByCode(EntityType.SITE, "S-RACE")).thenReturn(existing);
 
-        new CatalogImportService(batchMapper, rowMapper, catalogService, regionMapper, objectMapper).confirm(45L);
+        new CatalogImportService(batchMapper, rowMapper, catalogService, mock(CatalogProjectionService.class), regionMapper, objectMapper).confirm(45L);
 
         assertEquals("DUPLICATE", row.getValidationStatus());
         assertTrue(row.getValidationMessage().contains("确认导入时发现"));
@@ -262,7 +286,7 @@ class CatalogImportServiceTest {
 
     private CatalogImportService service(CatalogImportBatchMapper batchMapper, CatalogImportRowMapper rowMapper,
                                          CatalogAdminService catalogService, AdministrativeRegionMapper regionMapper) {
-        return new CatalogImportService(batchMapper, rowMapper, catalogService, regionMapper, new ObjectMapper());
+        return new CatalogImportService(batchMapper, rowMapper, catalogService, mock(CatalogProjectionService.class), regionMapper, new ObjectMapper());
     }
 
     private MockMultipartFile legacyWorkbook(String sheetName, String headerCode, String headerName, String... values) throws Exception {
@@ -331,6 +355,31 @@ class CatalogImportServiceTest {
         row.put("数据来源", source);
         row.put("适合学段", grade);
         return row;
+    }
+
+    private MockMultipartFile hierarchicalResourceWorkbook() throws Exception {
+        String[] headers = {"编码", "资源名称", "资源类型", "省份名称", "城市名称", "区县名称", "乡镇名称", "地址", "经度", "纬度", "简介", "教育价值", "数据来源", "适合学段"};
+        String[] values = {"R-PATH", "层级区域资源", "红色文化", "河北省", "石家庄市", "平山县", "西柏坡镇", "西柏坡路", "113.9", "38.3", "简介", "教育价值", "政府门户", "小学"};
+        try (XSSFWorkbook workbook = new XSSFWorkbook(); ByteArrayOutputStream output = new ByteArrayOutputStream()) {
+            var sheet = workbook.createSheet("资源");
+            var header = sheet.createRow(0);
+            var row = sheet.createRow(1);
+            for (int index = 0; index < headers.length; index++) {
+                header.createCell(index).setCellValue(headers[index]);
+                row.createCell(index).setCellValue(values[index]);
+            }
+            workbook.write(output);
+            return new MockMultipartFile("file", "catalog.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", output.toByteArray());
+        }
+    }
+
+    private AdministrativeRegion region(Long regionId, Long parentRegionId, String name, RegionLevel level) {
+        AdministrativeRegion result = new AdministrativeRegion();
+        result.setRegionId(regionId);
+        result.setParentRegionId(parentRegionId);
+        result.setRegionName(name);
+        result.setRegionLevel(level);
+        return result;
     }
 
     private MockMultipartFile relationWorkbook() throws Exception {

@@ -88,7 +88,6 @@ CREATE TABLE red_site (
   site_id              BIGINT PRIMARY KEY AUTO_INCREMENT,
   site_code            VARCHAR(50) NOT NULL,
   site_name            VARCHAR(200) NOT NULL,
-  site_alias           VARCHAR(200) NULL,
   region_id            BIGINT NULL,
   address              VARCHAR(300) NULL,
   longitude            DECIMAL(10,7) NULL,
@@ -119,7 +118,6 @@ CREATE TABLE hero_person (
   hero_id              BIGINT PRIMARY KEY AUTO_INCREMENT,
   hero_code            VARCHAR(50) NOT NULL,
   hero_name            VARCHAR(100) NOT NULL,
-  hero_alias           VARCHAR(200) NULL,
   gender               ENUM('male', 'female', 'unknown') NOT NULL DEFAULT 'unknown',
   birth_year           SMALLINT NULL,
   death_year           SMALLINT NULL,
@@ -146,7 +144,6 @@ CREATE TABLE historical_event (
   event_id             BIGINT PRIMARY KEY AUTO_INCREMENT,
   event_code           VARCHAR(50) NOT NULL,
   event_name           VARCHAR(200) NOT NULL,
-  event_alias          VARCHAR(200) NULL,
   primary_region_id    BIGINT NULL,
   event_time_text      VARCHAR(100) NULL,
   start_date           DATE NULL,
@@ -521,32 +518,32 @@ VALUES
     (4, '就近研学', 'route', '适用于乡村学生就近研学路线');
 
 INSERT INTO red_site
-    (site_id, site_code, site_name, site_alias, region_id, address, longitude, latitude, established_year, site_level,
+    (site_id, site_code, site_name, region_id, address, longitude, latitude, established_year, site_level,
      protection_level, historical_background, intro, opening_time_desc, suggested_visit_minutes, official_url, review_status, is_active)
 VALUES
-    (1, 'SITE_HEB_XBP_001', '西柏坡中共中央旧址', '西柏坡旧址', 4, '河北省石家庄市平山县西柏坡镇西柏坡村', 113.9407980, 38.3410770, 1948, 'national',
+    (1, 'SITE_HEB_XBP_001', '西柏坡中共中央旧址', 4, '河北省石家庄市平山县西柏坡镇西柏坡村', 113.9407980, 38.3410770, 1948, 'national',
      '全国重点文物保护单位', '1948年至1949年间，中共中央在西柏坡指挥了决定中国命运的三大战役。', '西柏坡中共中央旧址是河北红色文化的重要代表。', '08:30-17:00', 120,
      'http://www.xbpjng.com', 'approved', 1),
-    (2, 'SITE_HEB_LYS_001', '狼牙山五壮士纪念地', '狼牙山纪念地', 6, '河北省保定市易县狼牙山景区', 115.4448000, 39.4054000, 1941, 'provincial',
+    (2, 'SITE_HEB_LYS_001', '狼牙山五壮士纪念地', 6, '河北省保定市易县狼牙山景区', 115.4448000, 39.4054000, 1941, 'provincial',
      '省级重点保护资源', '狼牙山五壮士英勇抗敌的事迹在全国广为流传。', '狼牙山纪念地适合爱国主义教育与研学。', '08:00-17:30', 180,
      NULL, 'approved', 1);
 
 INSERT INTO hero_person
-    (hero_id, hero_code, hero_name, hero_alias, gender, birth_year, death_year, native_place_region_id, native_place_text,
+    (hero_id, hero_code, hero_name, gender, birth_year, death_year, native_place_region_id, native_place_text,
      profile_summary, main_deeds, official_url, review_status, is_active)
 VALUES
-    (1, 'HERO_HEB_DXP_001', '董存瑞', NULL, 'male', 1929, 1948, 1, '河北省张家口市怀来县',
+    (1, 'HERO_HEB_DXP_001', '董存瑞', 'male', 1929, 1948, 1, '河北省张家口市怀来县',
      '著名战斗英雄，全国知名革命烈士。', '在解放隆化战斗中舍身炸碉堡，展现了英勇无畏的革命精神。', NULL, 'approved', 1),
-    (2, 'HERO_HEB_MBL_001', '毛岸英', NULL, 'male', 1922, 1950, NULL, '湖南省湘潭县',
+    (2, 'HERO_HEB_MBL_001', '毛岸英', 'male', 1922, 1950, NULL, '湖南省湘潭县',
      '革命烈士，曾在党中央工作体系中参与重要事务。', '其革命精神和家国情怀被广泛纪念。', NULL, 'approved', 1);
 
 INSERT INTO historical_event
-    (event_id, event_code, event_name, event_alias, primary_region_id, event_time_text, start_date, end_date, start_year, end_year,
+    (event_id, event_code, event_name, primary_region_id, event_time_text, start_date, end_date, start_year, end_year,
      longitude, latitude, historical_significance, event_process, result_impact, official_url, review_status, is_active)
 VALUES
-    (1, 'EVENT_HEB_SDZY_001', '三大战役指挥决策', '西柏坡时期三大战役指挥', 4, '1948年9月至1949年1月', '1948-09-12', '1949-01-31', 1948, 1949,
+    (1, 'EVENT_HEB_SDZY_001', '三大战役指挥决策', 4, '1948年9月至1949年1月', '1948-09-12', '1949-01-31', 1948, 1949,
      113.9407980, 38.3410770, '三大战役的胜利奠定了解放战争全国胜利的基础。', '中共中央在西柏坡先后指挥辽沈、淮海、平津三大战役。', '成为中国革命走向全国胜利的重要转折。', NULL, 'approved', 1),
-    (2, 'EVENT_HEB_WYSZS_001', '狼牙山五壮士抗敌战斗', '狼牙山五壮士战斗', 6, '1941年9月', '1941-09-01', '1941-09-30', 1941, 1941,
+    (2, 'EVENT_HEB_WYSZS_001', '狼牙山五壮士抗敌战斗', 6, '1941年9月', '1941-09-01', '1941-09-30', 1941, 1941,
      115.4448000, 39.4054000, '展现了中国军民英勇抗战的精神风貌。', '抗日战争时期，五位八路军战士为掩护群众和主力转移，英勇阻击日伪军。', '成为中国抗战精神的重要象征。', NULL, 'approved', 1);
 
 INSERT INTO memorial_hall
@@ -753,7 +750,6 @@ CREATE TABLE IF NOT EXISTS local_edu_resource (
   resource_id            BIGINT PRIMARY KEY AUTO_INCREMENT,
   resource_code          VARCHAR(50) NOT NULL,
   resource_name          VARCHAR(200) NOT NULL,
-  resource_alias         VARCHAR(200) NULL,
   resource_category      ENUM('red_culture', 'intangible_culture', 'traditional_culture', 'local_history', 'public_culture', 'labor_education', 'public_welfare', 'ecological_civilization', 'patriotism_base', 'social_practice', 'other') NOT NULL DEFAULT 'other',
   resource_subcategory   VARCHAR(100) NULL,
   region_id              BIGINT NULL,
@@ -1123,34 +1119,33 @@ FROM school
 WHERE school_code IN ('SCH_SJZ_GC_0001', 'SCH_SJZ_PS_0001', 'SCH_BD_YX_0001');
 
 INSERT INTO local_edu_resource
-  (resource_code, resource_name, resource_alias, resource_category, resource_subcategory, region_id, county_region_id,
+  (resource_code, resource_name, resource_category, resource_subcategory, region_id, county_region_id,
    township_region_id, address, longitude, latitude, organization_name, opening_time_desc, reservation_required,
    recommended_visit_minutes, intro, education_value, activity_suggestion, target_grade, safety_note, source_id,
    external_provider, external_place_id, source_checked_at, review_status, is_active)
 VALUES
-  ('RES_SJZ_XBP_0001', '西柏坡中共中央旧址', '西柏坡旧址', 'red_culture', '革命旧址', NULL, NULL,
+  ('RES_SJZ_XBP_0001', '西柏坡中共中央旧址', 'red_culture', '革命旧址', NULL, NULL,
    NULL, '河北省石家庄市平山县西柏坡镇西柏坡村', 113.9407980, 38.3410770, '西柏坡景区', '08:30-17:00', 0,
    120, '西柏坡中共中央旧址是河北红色文化的重要代表。', '可用于爱国主义教育、党史教育、理想信念教育。', '开展红色故事讲解、研学路线设计、主题班会。', '小学高年级/初中/高中', '山区活动需注意集体组织与交通安全。', NULL,
    'amap', 'B013705X0E', CURRENT_TIMESTAMP, 'approved', 1),
-  ('RES_SJZ_XBP_0002', '西柏坡纪念馆', NULL, 'patriotism_base', '纪念馆', NULL, NULL,
+  ('RES_SJZ_XBP_0002', '西柏坡纪念馆', 'patriotism_base', '纪念馆', NULL, NULL,
    NULL, '河北省石家庄市平山县西柏坡镇', 113.9448620, 38.3398480, '西柏坡纪念馆', '09:00-17:00', 0,
    90, '西柏坡纪念馆是开展红色文化教育的重要场馆。', '适合开展场馆式思政教育、图片文献教学和主题研学。', '可组织讲解参观、研学打卡、展陈观察记录。', '小学高年级/初中/高中', '集体参观需提前确认开放安排。', NULL,
    'amap', 'B01370T0XJ', CURRENT_TIMESTAMP, 'approved', 1),
-  ('RES_BD_LYS_0001', '狼牙山五壮士纪念地', '狼牙山纪念地', 'red_culture', '抗战遗址', NULL, NULL,
+  ('RES_BD_LYS_0001', '狼牙山五壮士纪念地', 'red_culture', '抗战遗址', NULL, NULL,
    NULL, '河北省保定市易县狼牙山景区', 115.4448000, 39.4054000, '狼牙山景区', '08:00-17:30', 0,
    180, '狼牙山纪念地适合爱国主义教育与研学。', '可用于抗战精神、英勇担当、集体主义教育。', '可开展抗战主题研学、英雄故事分享、路线式教育活动。', '小学高年级/初中', '山区路段较多，需重视行进安全。', NULL,
    NULL, NULL, NULL, 'approved', 1),
-  ('RES_SJZ_GC_0001', '常安镇敬老院', NULL, 'public_welfare', '养老院', NULL, NULL,
+  ('RES_SJZ_GC_0001', '常安镇敬老院', 'public_welfare', '养老院', NULL, NULL,
    NULL, '河北省石家庄市藁城区常安镇示例地址', 114.9498000, 38.0296000, '常安镇敬老院', NULL, 1,
    60, '可作为敬老爱老和社会责任教育的公益实践场所。', '适合开展尊老爱老、志愿服务、社会责任教育。', '可组织节日慰问、劳动服务、口述历史访谈。', '小学高年级/初中', '进入养老院需提前协调并注意礼仪与秩序。', NULL,
    NULL, NULL, NULL, 'approved', 1),
-  ('RES_SJZ_GC_0002', '里庄村乡贤文化墙', NULL, 'traditional_culture', '乡贤文化', NULL, NULL,
+  ('RES_SJZ_GC_0002', '里庄村乡贤文化墙', 'traditional_culture', '乡贤文化', NULL, NULL,
    NULL, '河北省石家庄市藁城区常安镇里庄村示例地址', 114.9552000, 38.0265000, '里庄村村委会', NULL, 0,
    30, '乡贤文化墙可作为本土优秀传统文化和家风教育资源。', '适合开展家风家训、乡土认同、优秀传统文化教育。', '可组织观察记录、村史讲述、主题讨论。', '小学/初中', '村内步行活动注意交通安全。', NULL,
    NULL, NULL, NULL, 'approved', 1)
 ON DUPLICATE KEY UPDATE
   resource_name = VALUES(resource_name),
-  resource_alias = VALUES(resource_alias),
   resource_category = VALUES(resource_category),
   resource_subcategory = VALUES(resource_subcategory),
   region_id = VALUES(region_id),
@@ -1251,11 +1246,11 @@ ON DUPLICATE KEY UPDATE
 
 -- Extra pilot resources and RAG content for SCH_SJZ_GC_0001.
 INSERT INTO local_edu_resource
-  (resource_code, resource_name, resource_alias, resource_category, resource_subcategory, region_id, county_region_id,
+  (resource_code, resource_name, resource_category, resource_subcategory, region_id, county_region_id,
    township_region_id, address, longitude, latitude, organization_name, opening_time_desc, reservation_required,
    recommended_visit_minutes, intro, education_value, activity_suggestion, target_grade, safety_note, source_id,
    review_status, is_active)
-SELECT x.resource_code, x.resource_name, NULL, x.resource_category, x.resource_subcategory, NULL, NULL, NULL,
+SELECT x.resource_code, x.resource_name, x.resource_category, x.resource_subcategory, NULL, NULL, NULL,
        x.address, x.longitude, x.latitude, x.organization_name, x.opening_time_desc, x.reservation_required,
        x.recommended_visit_minutes, x.intro, x.education_value, x.activity_suggestion, x.target_grade, x.safety_note,
        NULL, 'approved', 1

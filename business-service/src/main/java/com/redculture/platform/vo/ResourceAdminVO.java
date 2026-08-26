@@ -14,8 +14,6 @@ public class ResourceAdminVO {
 
     private String resourceName;
 
-    private String resourceAlias;
-
     private String resourceCategory;
 
     private String resourceSubcategory;

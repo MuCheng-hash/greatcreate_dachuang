@@ -4,7 +4,6 @@ import com.redculture.platform.common.ApiResponse;
 import com.redculture.platform.common.PageResult;
 import com.redculture.platform.service.SchoolService;
 import com.redculture.platform.vo.SchoolAdminVO;
-import com.redculture.platform.vo.request.SchoolCreateRequest;
 import com.redculture.platform.vo.request.SchoolUpdateRequest;
 import com.redculture.platform.vo.request.SchoolCsvImportRequest;
 import com.redculture.platform.vo.SchoolImportResultVO;
@@ -36,16 +35,6 @@ public class SchoolAdminController {
         this.schoolService = schoolService;
     }
 
-    //新建学校档案。
-    @PostMapping
-    public ApiResponse<SchoolAdminVO> create(@RequestBody SchoolCreateRequest request) {
-        try {
-            return ApiResponse.success("school created", schoolService.createSchool(request));
-        } catch (IllegalArgumentException exception) {
-            return ApiResponse.fail(exception.getMessage());
-        }
-    }
-
     @PostMapping("/import-csv")
     public ApiResponse<SchoolImportResultVO> importCsv(@RequestBody SchoolCsvImportRequest request) {
         return ApiResponse.success("schools imported", schoolService.importCsv(request));
@@ -57,7 +46,7 @@ public class SchoolAdminController {
         return ResponseEntity.ok()
                 .contentType(MediaType.parseMediaType("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"))
                 .header(HttpHeaders.CONTENT_DISPOSITION, ContentDisposition.attachment()
-                        .filename("schools-import-template.xlsx", StandardCharsets.UTF_8).build().toString())
+                        .filename("学校导入模板.xlsx", StandardCharsets.UTF_8).build().toString())
                 .body(content);
     }
 

@@ -122,7 +122,6 @@ const adminElements = {
     schoolImportButton: document.querySelector("#schoolImportButton"),
     schoolImportFileInput: document.querySelector("#schoolImportFileInput"),
     schoolImportResult: document.querySelector("#schoolImportResult"),
-    schoolAddButton: document.querySelector("#schoolAddButton"),
     schoolResetButton: document.querySelector("#schoolResetButton"),
     schoolModal: document.querySelector("#schoolModal"),
     schoolModalTitle: document.querySelector("#schoolModalTitle"),
@@ -134,7 +133,6 @@ const adminElements = {
     resourceIdInput: document.querySelector("#resourceIdInput"),
     resourceCodeInput: document.querySelector("#resourceCodeInput"),
     resourceNameInput: document.querySelector("#resourceNameInput"),
-    resourceAliasInput: document.querySelector("#resourceAliasInput"),
     resourceCategoryInput: document.querySelector("#resourceCategoryInput"),
     resourceSubcategoryInput: document.querySelector("#resourceSubcategoryInput"),
     resourceOrgInput: document.querySelector("#resourceOrgInput"),
@@ -316,12 +314,12 @@ function initializeSchoolMapPanel() {
     }
     panel.dataset.panel = "school-map";
     panel.innerHTML = `
-        <div class="panel-heading">
+        <div class="panel-heading school-map-heading">
             <div>
                 <p class="eyebrow">Module 03</p>
                 <h2>学校周边地图</h2>
             </div>
-            <div class="panel-tools">
+            <div class="panel-tools school-map-tools">
                 <select id="schoolMapSchoolSelect" class="line-select"></select>
                 <div class="school-map-radius-control">
                     <input id="schoolMapRadiusInput" class="line-input" type="number" min="0.5" max="50" step="0.5" value="5" aria-label="资源计算半径">
@@ -846,7 +844,6 @@ function bindAdminEvents() {
     adminElements.schoolImportButton?.addEventListener("click", () => adminElements.schoolImportFileInput?.click());
     adminElements.schoolImportFileInput?.addEventListener("change", () => void importSchoolsFromExcel());
     adminElements.schoolResetButton?.addEventListener("click", resetSchoolForm);
-    adminElements.schoolAddButton?.addEventListener("click", () => void openCreateSchoolModal());
     adminElements.schoolModalCloseButton?.addEventListener("click", closeSchoolModal);
     adminElements.schoolModal?.querySelector("[data-school-modal-close]")?.addEventListener("click", closeSchoolModal);
     adminElements.schoolProvinceRegionIdInput?.addEventListener("change", () => {
@@ -884,16 +881,10 @@ function bindAdminEvents() {
         void loadSchoolMapDetail(adminState.selectedSchoolIdForMap, { renderMap: true });
     });
 
-    adminElements.planForm?.addEventListener("submit", async event => {
-        event.preventDefault();
-        await submitPlanForm();
-    });
-    adminElements.planRefreshButton?.addEventListener("click", () => void Promise.all([loadPlans(), loadTeachingPlanFeedbackReport()]));
-    adminElements.planResetButton?.addEventListener("click", resetPlanForm);
     adminElements.planFilterSchoolSelect?.addEventListener("change", () => {
         adminState.selectedSchoolIdForPlans = parseNullableNumber(adminElements.planFilterSchoolSelect.value);
         adminState.feedbackReportPage = 1;
-        void Promise.all([loadPlans(), loadTeachingPlanFeedbackReport()]);
+        void loadTeachingPlanFeedbackReport();
     });
     adminElements.planFeedbackRefreshButton?.addEventListener("click", () => {
         adminState.feedbackReportPage = 1;
@@ -974,7 +965,6 @@ async function bootstrapAdmin() {
             loadSchoolProvinceOptions(),
             loadSchools(),
               loadResources(),
-              loadPlans(),
               loadTeachingPlanFeedbackReport()
           ]);
           const dashboardAvailable = await loadDashboardOverview();
@@ -2109,7 +2099,7 @@ async function downloadSchoolImportTemplate() {
         const url = URL.createObjectURL(blob);
         const anchor = document.createElement("a");
         anchor.href = url;
-        anchor.download = "schools-import-template.xlsx";
+        anchor.download = "学校导入模板.xlsx";
         document.body.appendChild(anchor);
         anchor.click();
         anchor.remove();
@@ -2156,9 +2146,9 @@ async function importSchoolsFromExcel() {
         }
         const result = payload.data || {};
         showSchoolImportResult(renderSchoolImportResult(result));
-        if ((result.createdCount || 0) + (result.updatedCount || 0) > 0) {
+        if ((result.createdCount || 0) > 0) {
             await loadSchools();
-            setGlobalStatus("学校导入完成", `新增 ${result.createdCount || 0} 所，更新 ${result.updatedCount || 0} 所。`);
+            setGlobalStatus("学校导入完成", `新增 ${result.createdCount || 0} 所，失败 ${result.failedCount || 0} 行。`);
         }
     } catch (error) {
         showSchoolImportResult(`导入失败：${escapeHtml(error.message || "请检查文件后重试")}`);
@@ -2173,8 +2163,8 @@ async function importSchoolsFromExcel() {
 
 function renderSchoolImportResult(result) {
     const errors = result.errors || [];
-    const errorTable = errors.length ? `<div class="table-shell"><table><thead><tr><th>Excel 行号</th><th>学校编码</th><th>错误原因</th></tr></thead><tbody>${errors.map(error => `<tr><td>${escapeHtml(error.rowNumber || "-")}</td><td>${escapeHtml(error.schoolCode || "-")}</td><td>${escapeHtml(error.message || "导入失败")}</td></tr>`).join("")}</tbody></table></div>` : "";
-    return `<p>导入完成：新增 <strong>${escapeHtml(result.createdCount || 0)}</strong> 所，更新 <strong>${escapeHtml(result.updatedCount || 0)}</strong> 所，失败 <strong>${escapeHtml(result.failedCount || 0)}</strong> 行。</p>${errorTable}`;
+    const errorTable = errors.length ? `<div class="table-shell"><table><thead><tr><th>Excel 行号</th><th>学校名称</th><th>错误原因</th></tr></thead><tbody>${errors.map(error => `<tr><td>${escapeHtml(error.rowNumber || "-")}</td><td>${escapeHtml(error.schoolName || "-")}</td><td>${escapeHtml(error.message || "导入失败")}</td></tr>`).join("")}</tbody></table></div>` : "";
+    return `<p>导入完成：新增 <strong>${escapeHtml(result.createdCount || 0)}</strong> 所，重复或错误 <strong>${escapeHtml(result.failedCount || 0)}</strong> 行。</p>${errorTable}`;
 }
 
 function showSchoolImportResult(html) {
@@ -2186,15 +2176,6 @@ function showSchoolImportResult(html) {
 
 function formatFileSize(size) {
     return size < 1024 * 1024 ? `${Math.ceil(size / 1024)} KB` : `${(size / 1024 / 1024).toFixed(1)} MB`;
-}
-
-async function openCreateSchoolModal() {
-    resetSchoolForm();
-    if (adminElements.schoolModalTitle) {
-        adminElements.schoolModalTitle.textContent = "新增学校";
-    }
-    openSchoolModal();
-    await loadSchoolProvinceOptions();
 }
 
 function openEditSchoolModal(record) {
@@ -2643,13 +2624,13 @@ async function submitSchoolForm() {
         return;
     }
 
-    if (schoolId) {
-        await requestJson(`/api/admin/schools/${schoolId}`, { method: "PUT", body });
-        setGlobalStatus("已更新", "学校信息已更新。");
-    } else {
-        await requestJson("/api/admin/schools", { method: "POST", body });
-        setGlobalStatus("已创建", "学校信息已创建。");
+    if (!schoolId) {
+        setGlobalStatus("操作失败", "学校仅支持通过 Excel 导入新增。");
+        return;
     }
+
+    await requestJson(`/api/admin/schools/${schoolId}`, { method: "PUT", body });
+    setGlobalStatus("已更新", "学校信息已更新。");
 
     resetSchoolForm();
     closeSchoolModal();
@@ -2706,20 +2687,14 @@ function renderResourceTable(records) {
                 <div class="status-box">${escapeHtml(record.organizationName || "未填写机构")}</div>
             </td>
             <td>${escapeHtml(record.resourceCategory || "-")}</td>
-            <td>${renderStatus(record.reviewStatus)}</td>
+            <td>${record.active === false ? "已停用" : "启用"}</td>
             <td>
                 <div class="table-actions">
-                    <button class="action-button" data-action="edit">编辑</button>
-                    <button class="action-button" data-action="submit">提交审核</button>
-                    <button class="action-button" data-action="approve">通过</button>
-                    <button class="action-button" data-action="reject">驳回</button>
+                    <span class="status-box">只读</span>
                 </div>
             </td>
         `;
         tr.querySelector('[data-action="edit"]').addEventListener("click", () => fillResourceForm(record));
-        tr.querySelector('[data-action="submit"]').addEventListener("click", () => void runResourceAction(record.resourceId, "submit-review"));
-        tr.querySelector('[data-action="approve"]').addEventListener("click", () => void runResourceAction(record.resourceId, "approve"));
-        tr.querySelector('[data-action="reject"]').addEventListener("click", () => void runResourceAction(record.resourceId, "reject"));
         adminElements.resourceTableBody.appendChild(tr);
     });
 }
@@ -2729,7 +2704,6 @@ async function submitResourceForm() {
     const body = {
         resourceCode: adminElements.resourceCodeInput.value.trim(),
         resourceName: adminElements.resourceNameInput.value.trim(),
-        resourceAlias: optionalText(adminElements.resourceAliasInput.value),
         resourceCategory: adminElements.resourceCategoryInput.value,
         resourceSubcategory: optionalText(adminElements.resourceSubcategoryInput.value),
         countyRegionId: parseNullableNumber(adminElements.resourceCountyRegionIdInput.value),
@@ -2756,8 +2730,8 @@ async function submitResourceForm() {
         await requestJson(`/api/admin/resources/${resourceId}`, { method: "PUT", body });
         setGlobalStatus("已更新", "资源信息已更新。");
     } else {
-        await requestJson("/api/admin/resources", { method: "POST", body });
-        setGlobalStatus("已创建", "资源信息已创建。");
+        setGlobalStatus("请使用图谱导入", "新增资源仅支持通过 Excel 图谱导入。 ");
+        return;
     }
 
     resetResourceForm();
@@ -2769,7 +2743,6 @@ function fillResourceForm(record) {
     adminElements.resourceCodeInput.value = record.resourceCode || "";
     adminElements.resourceCodeInput.disabled = true;
     adminElements.resourceNameInput.value = record.resourceName || "";
-    adminElements.resourceAliasInput.value = record.resourceAlias || "";
     adminElements.resourceCategoryInput.value = record.resourceCategory || "other";
     adminElements.resourceSubcategoryInput.value = record.resourceSubcategory || "";
     adminElements.resourceOrgInput.value = record.organizationName || "";
@@ -2790,12 +2763,6 @@ function resetResourceForm() {
     adminElements.resourceForm.reset();
     adminElements.resourceIdInput.value = "";
     adminElements.resourceCodeInput.disabled = false;
-}
-
-async function runResourceAction(resourceId, action) {
-    await requestJson(`/api/admin/resources/${resourceId}/${action}`, { method: "POST", body: {} });
-    setGlobalStatus("操作成功", "资源审核状态已更新。");
-    await loadResources();
 }
 
 async function loadDiscoveryCandidates() {
@@ -3937,13 +3904,8 @@ async function loadPlans() {
             </td>
             <td>${escapeHtml(record.schoolName || "-")}</td>
             <td>${escapeHtml(record.activityType || "-")}</td>
-            <td>
-                <div class="table-actions">
-                    <button class="action-button" data-action="edit">编辑</button>
-                </div>
-            </td>
+            <td><span class="status-box">只读</span></td>
         `;
-        tr.querySelector('[data-action="edit"]').addEventListener("click", () => fillPlanForm(record));
         adminElements.planTableBody.appendChild(tr);
     });
 }
@@ -4067,13 +4029,13 @@ function mountCatalogWorkspace() {
     tabs.appendChild(tab);
     const panel = document.createElement("section");
     panel.className = "workspace-panel"; panel.dataset.panel = "catalog";
-    panel.innerHTML = `<div class="panel-heading"><div><p class="eyebrow">Module 07</p><h2>资源与图谱目录</h2></div><div class="panel-tools"><select id="catalogType" class="line-input"><option value="">全部实体</option><option value="RESOURCE">资源</option><option value="SITE">遗址</option><option value="MEMORIAL">纪念馆</option><option value="HERO">人物</option><option value="EVENT">事件</option><option value="STORY">故事</option></select><input id="catalogKeyword" class="line-input" placeholder="名称、编码或别名"><button id="catalogSearch" class="ghost-button" type="button">查询</button><a class="accent-button" href="/api/admin/catalog/import/template">下载 Excel 模板</a></div></div><div class="workspace-grid"><article class="form-card"><div class="card-topline"><h3>新增图谱实体</h3></div><form id="catalogForm" class="data-form"><label><span>实体类型</span><select id="catalogFormType"><option value="SITE">遗址</option><option value="MEMORIAL">纪念馆</option><option value="HERO">人物</option><option value="EVENT">事件</option><option value="STORY">故事</option></select></label><div class="field-grid two-col"><label><span>编码</span><input id="catalogCode"></label><label><span>名称</span><input id="catalogName"></label><label><span>别名</span><input id="catalogAlias"></label><label><span>区域 ID</span><input id="catalogRegion" type="number"></label></div><label><span>简介</span><textarea id="catalogSummary"></textarea></label><label><span>详情</span><textarea id="catalogDetail"></textarea></label><div class="form-actions"><button class="accent-button" type="submit">保存待审核</button></div></form></article><article class="table-card"><div class="card-topline"><h3>目录列表</h3><span id="catalogCount" class="mini-stat">0 条</span></div><div class="table-shell"><table><thead><tr><th>类型</th><th>名称</th><th>状态</th><th>操作</th></tr></thead><tbody id="catalogTable"></tbody></table></div></article></div></section>`;
+    panel.innerHTML = `<div class="panel-heading"><div><p class="eyebrow">Module 07</p><h2>资源与图谱目录</h2></div><div class="panel-tools"><select id="catalogType" class="line-input"><option value="">全部实体</option><option value="RESOURCE">资源</option><option value="SITE">遗址</option><option value="MEMORIAL">纪念馆</option><option value="HERO">人物</option><option value="EVENT">事件</option><option value="STORY">故事</option></select><input id="catalogKeyword" class="line-input" placeholder="名称或编码"><button id="catalogSearch" class="ghost-button" type="button">查询</button><a class="accent-button" href="/api/admin/catalog/import/template">下载 Excel 模板</a></div></div><div class="workspace-grid"><article class="form-card"><div class="card-topline"><h3>新增图谱实体</h3></div><form id="catalogForm" class="data-form"><label><span>实体类型</span><select id="catalogFormType"><option value="SITE">遗址</option><option value="MEMORIAL">纪念馆</option><option value="HERO">人物</option><option value="EVENT">事件</option><option value="STORY">故事</option></select></label><div class="field-grid two-col"><label><span>编码</span><input id="catalogCode"></label><label><span>名称</span><input id="catalogName"></label><label><span>区域 ID</span><input id="catalogRegion" type="number"></label></div><label><span>简介</span><textarea id="catalogSummary"></textarea></label><label><span>详情</span><textarea id="catalogDetail"></textarea></label><div class="form-actions"><button class="accent-button" type="submit">保存待审核</button></div></form></article><article class="table-card"><div class="card-topline"><h3>目录列表</h3><span id="catalogCount" class="mini-stat">0 条</span></div><div class="table-shell"><table><thead><tr><th>类型</th><th>名称</th><th>状态</th><th>操作</th></tr></thead><tbody id="catalogTable"></tbody></table></div></article></div></section>`;
     workspace.appendChild(panel);
     tab.addEventListener("click", () => { document.querySelectorAll(".tab-chip").forEach(x => x.classList.toggle("is-active", x === tab)); document.querySelectorAll(".workspace-panel").forEach(x => x.classList.toggle("is-active", x === panel)); void loadCatalog(); });
     document.querySelector("#catalogSearch").addEventListener("click", () => void loadCatalog());
     const catalogForm = document.querySelector("#catalogForm");
     catalogForm.querySelector(".form-actions").insertAdjacentHTML("beforebegin", `<div class="field-grid two-col"><label><span>图片 URL</span><input id="catalogImageUrl" type="url"></label><label><span>来源 URL</span><input id="catalogSourceUrl" type="url"></label><label><span>来源可信度（1-5）</span><input id="catalogCredibility" type="number" min="1" max="5"></label></div>`);
-    catalogForm.addEventListener("submit", async event => { event.preventDefault(); const imageUrl=optionalText(document.querySelector("#catalogImageUrl").value),sourceUrl=optionalText(document.querySelector("#catalogSourceUrl").value); const body={entityType:document.querySelector("#catalogFormType").value,code:document.querySelector("#catalogCode").value.trim(),name:document.querySelector("#catalogName").value.trim(),alias:optionalText(document.querySelector("#catalogAlias").value),regionId:parseNullableNumber(document.querySelector("#catalogRegion").value),summary:optionalText(document.querySelector("#catalogSummary").value),detail:optionalText(document.querySelector("#catalogDetail").value),media:imageUrl?[{mediaUrl:imageUrl,mediaType:"image",primary:true}]:[],sources:sourceUrl?[{sourceUrl,credibilityScore:parseNullableNumber(document.querySelector("#catalogCredibility").value)}]:[]}; await requestJson("/api/admin/catalog/entities",{method:"POST",body}); event.target.reset(); await loadCatalog(); });
+    catalogForm.addEventListener("submit", async event => { event.preventDefault(); const imageUrl=optionalText(document.querySelector("#catalogImageUrl").value),sourceUrl=optionalText(document.querySelector("#catalogSourceUrl").value); const body={entityType:document.querySelector("#catalogFormType").value,code:document.querySelector("#catalogCode").value.trim(),name:document.querySelector("#catalogName").value.trim(),regionId:parseNullableNumber(document.querySelector("#catalogRegion").value),summary:optionalText(document.querySelector("#catalogSummary").value),detail:optionalText(document.querySelector("#catalogDetail").value),media:imageUrl?[{mediaUrl:imageUrl,mediaType:"image",primary:true}]:[],sources:sourceUrl?[{sourceUrl,credibilityScore:parseNullableNumber(document.querySelector("#catalogCredibility").value)}]:[]}; await requestJson("/api/admin/catalog/entities",{method:"POST",body}); event.target.reset(); await loadCatalog(); });
     const importInput=document.createElement("input"); importInput.type="file"; importInput.accept=".xlsx"; importInput.hidden=true; importInput.id="catalogImportFile"; tabs.appendChild(importInput);
     const previewButton=document.createElement("button"); previewButton.type="button"; previewButton.className="ghost-button"; previewButton.textContent="上传预检"; panel.querySelector(".panel-tools").appendChild(previewButton);
     const importResult=document.createElement("div"); importResult.className="status-box"; panel.querySelector(".panel-heading").appendChild(importResult);
@@ -4155,34 +4117,32 @@ function mountUnifiedCatalogResourceWorkspace() {
     if (!root || root.dataset.ready === "true") return;
     root.dataset.ready = "true";
     root.innerHTML = `
-        <div class="panel-heading">
+        <div class="panel-heading catalog-directory-heading">
             <div><p class="eyebrow">Module 02</p><h2>统一资源目录</h2></div>
-            <div class="panel-tools">
+            <div class="panel-tools catalog-directory-filters">
                 <select id="catalogDirectoryType" class="line-input"><option value="">全部类型</option>${Object.entries(catalogEntityLabels).map(([key, label]) => `<option value="${key}">${label}</option>`).join("")}</select>
                 <select id="catalogDirectoryCategory" class="line-input"><option value="">全部资源分类</option><option value="red_culture">红色文化</option><option value="local_history">地方历史</option><option value="labor_education">劳动教育</option><option value="social_practice">社会实践</option><option value="other">其他</option></select>
-                <select id="catalogDirectoryReview" class="line-input"><option value="">全部审核状态</option><option value="draft">草稿</option><option value="pending">待审核</option><option value="approved">已通过</option><option value="rejected">已驳回</option></select>
-                <input id="catalogDirectoryKeyword" class="line-input" type="search" placeholder="名称、编码、别名或地址">
+                <input id="catalogDirectoryKeyword" class="line-input" type="search" placeholder="名称、编码或地址">
                 <button id="catalogDirectorySearch" class="ghost-button" type="button">查询</button>
-                <button id="catalogDirectoryCreate" class="accent-button" type="button">新增实体</button>
+                <button id="catalogDirectoryImport" class="accent-button" type="button">图谱导入</button>
             </div>
         </div>
-        <div class="workspace-grid">
-            <article class="form-card">
-                <div class="card-topline"><h3 id="catalogDirectoryFormTitle">新增待审核实体</h3><button id="catalogDirectoryReset" class="ghost-button" type="button">清空</button></div>
+        <div class="catalog-directory-layout">
+            <article id="catalogDirectoryEditor" class="form-card" hidden>
+                <div class="card-topline"><h3 id="catalogDirectoryFormTitle">编辑实体</h3><button id="catalogDirectoryReset" class="ghost-button" type="button">关闭</button></div>
                 <form id="catalogDirectoryForm" class="data-form">
                     <input id="catalogDirectoryId" type="hidden">
                     <div class="field-grid two-col">
                         <label><span>实体类型</span><select id="catalogDirectoryFormType">${Object.entries(catalogEntityLabels).map(([key, label]) => `<option value="${key}">${label}</option>`).join("")}</select></label>
                         <label><span>编码</span><input id="catalogDirectoryCode" required placeholder="RES_HEB_0001"></label>
                         <label><span>名称</span><input id="catalogDirectoryName" required placeholder="输入名称"></label>
-                        <label><span>别名</span><input id="catalogDirectoryAlias" placeholder="可选"></label>
                         <label><span>行政区域</span><div class="catalog-picker"><input id="catalogDirectoryRegionName" autocomplete="off" placeholder="搜索并选择区域" role="combobox" aria-autocomplete="list" aria-expanded="false"><button id="catalogDirectoryRegionToggle" class="catalog-picker-toggle" type="button" title="展开区域候选" aria-label="展开区域候选" aria-expanded="false"><span></span></button><div id="catalogDirectoryRegionOptions" class="catalog-picker-menu" role="listbox" hidden></div></div><input id="catalogDirectoryRegion" type="hidden"></label>
                         <label><span>适用学段</span><input id="catalogDirectoryGrade" placeholder="如：小学中年级"></label>
                         <label><span>经度</span><input id="catalogDirectoryLongitude" type="number" step="0.0000001" placeholder="可选"></label>
                         <label><span>纬度</span><input id="catalogDirectoryLatitude" type="number" step="0.0000001" placeholder="可选"></label>
                     </div>
                     <div class="form-actions"><input id="catalogDirectoryPendingMediaFiles" type="file" accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp" multiple hidden><button id="catalogDirectoryPickImages" class="accent-button" type="button">选择展示图片</button><span id="catalogDirectoryPendingMediaHint" class="mini-stat">暂未选择图片</span></div>
-                    <p class="status-box">支持 JPG、PNG 或 WebP 图片，每张不超过 10MB。保存草稿成功后将自动上传并关联。</p>
+                    <p class="status-box">支持 JPG、PNG 或 WebP 图片，每张不超过 10MB。更新后将自动上传并关联。</p>
                     <div id="catalogDirectoryPendingMediaPreview" class="catalog-pending-media-preview" hidden></div>
                     <div id="catalogDirectoryResourceFields" class="field-grid two-col">
                         <label><span>资源分类</span><select id="catalogDirectoryCategoryInput"><option value="red_culture">红色文化</option><option value="intangible_culture">非遗文化</option><option value="traditional_culture">传统文化</option><option value="local_history">地方历史</option><option value="public_culture">公共文化</option><option value="labor_education">劳动教育</option><option value="public_welfare">公益实践</option><option value="ecological_civilization">生态文明</option><option value="patriotism_base">爱国主义基地</option><option value="social_practice">社会实践</option><option value="other">其他</option></select></label>
@@ -4200,7 +4160,7 @@ function mountUnifiedCatalogResourceWorkspace() {
                         <label><span>安全提示</span><textarea id="catalogDirectorySafety"></textarea></label>
                         <label class="switch-field"><input id="catalogDirectoryReservation" type="checkbox"><span>需要预约</span></label>
                     </div>
-                    <div class="form-actions"><button class="accent-button" type="submit">保存草稿</button></div>
+                    <div class="form-actions"><button class="accent-button" type="submit">保存修改</button></div>
                 </form>
             </article>
             <article class="table-card">
@@ -4208,14 +4168,14 @@ function mountUnifiedCatalogResourceWorkspace() {
                 <div class="table-shell"><table><thead><tr><th>封面</th><th>实体</th><th>类型 / 分类</th><th>坐标</th><th>状态</th><th>操作</th></tr></thead><tbody id="catalogDirectoryTable"></tbody></table></div>
             </article>
         </div>
-        <div id="catalogDirectoryDetails" class="workspace-grid" hidden>
+        <div id="catalogDirectoryDetails" class="catalog-directory-details" hidden>
             <article class="form-card"><div class="card-topline"><h3>来源信息</h3><button id="catalogDirectoryAddSource" class="ghost-button" type="button">新增来源</button></div><div id="catalogDirectorySourceList" class="compact-list"></div><div class="form-actions"><button id="catalogDirectorySaveSources" class="accent-button" type="button">保存来源</button></div></article>
             <article class="form-card"><div class="card-topline"><h3>关联故事与图谱关系</h3></div><form id="catalogDirectoryRelationForm" class="data-form"><div class="field-grid two-col"><label><span>源实体类型</span><select id="catalogDirectoryRelationSourceType"></select></label><label><span>源实体</span><div class="catalog-picker"><input id="catalogDirectoryRelationSourceName" autocomplete="off" placeholder="搜索名称或编码" role="combobox" aria-autocomplete="list" aria-expanded="false"><button id="catalogDirectoryRelationSourceToggle" class="catalog-picker-toggle" type="button" title="展开源实体候选" aria-label="展开源实体候选" aria-expanded="false"><span></span></button><div id="catalogDirectoryRelationSourceOptions" class="catalog-picker-menu" role="listbox" hidden></div></div><input id="catalogDirectoryRelationSourceId" type="hidden"></label><label><span>目标实体类型</span><select id="catalogDirectoryRelationTargetType"></select></label><label><span>目标实体</span><div class="catalog-picker"><input id="catalogDirectoryRelationTargetName" autocomplete="off" placeholder="搜索名称或编码" role="combobox" aria-autocomplete="list" aria-expanded="false"><button id="catalogDirectoryRelationTargetToggle" class="catalog-picker-toggle" type="button" title="展开目标实体候选" aria-label="展开目标实体候选" aria-expanded="false"><span></span></button><div id="catalogDirectoryRelationTargetOptions" class="catalog-picker-menu" role="listbox" hidden></div></div><input id="catalogDirectoryRelationTargetId" type="hidden"></label><label><span>关系类型</span><select id="catalogDirectoryRelationType"></select></label><label><span>备注</span><input id="catalogDirectoryRelationRemark"></label></div><div class="form-actions"><button class="accent-button" type="submit">创建关系</button></div></form><div id="catalogDirectoryRelationList" class="compact-list"></div></article>
         </div>
         <div id="catalogDirectoryImagePreviewModal" class="modal-shell" role="dialog" aria-modal="true" aria-labelledby="catalogDirectoryImagePreviewTitle" hidden><div class="modal-backdrop" data-close-catalog-image-preview></div><section class="modal-card catalog-image-preview-modal"><div class="card-topline"><h3 id="catalogDirectoryImagePreviewTitle">图片预览</h3><button id="catalogDirectoryCloseImagePreview" class="ghost-button" type="button">关闭</button></div><img id="catalogDirectoryImagePreviewImage" alt=""><p id="catalogDirectoryImagePreviewName" class="status-box"></p></section></div>`;
     root.querySelector("#catalogDirectorySearch").addEventListener("click", () => void loadResources());
-    root.querySelector("#catalogDirectoryCreate").addEventListener("click", resetCatalogDirectoryForm);
-    root.querySelector("#catalogDirectoryReset").addEventListener("click", resetCatalogDirectoryForm);
+    root.querySelector("#catalogDirectoryImport").addEventListener("click", () => document.querySelector('[data-tab="catalog"]')?.click());
+    root.querySelector("#catalogDirectoryReset").addEventListener("click", closeCatalogDirectoryEditor);
     root.querySelector("#catalogDirectoryForm").addEventListener("submit", event => { event.preventDefault(); void saveCatalogDirectoryEntity(); });
     root.querySelector("#catalogDirectoryFormType").addEventListener("change", updateCatalogDirectoryFieldVisibility);
     root.querySelector("#catalogDirectoryPickImages").addEventListener("click", () => root.querySelector("#catalogDirectoryPendingMediaFiles").click());
@@ -4243,11 +4203,9 @@ async function loadResources() {
     const params = new URLSearchParams({ pageNum: "1", pageSize: "50" });
     const type = root.querySelector("#catalogDirectoryType").value;
     const category = root.querySelector("#catalogDirectoryCategory").value;
-    const reviewStatus = root.querySelector("#catalogDirectoryReview").value;
     const keyword = root.querySelector("#catalogDirectoryKeyword").value.trim();
     if (type) params.set("entityType", type);
     if (category) params.set("resourceCategory", category);
-    if (reviewStatus) params.set("reviewStatus", reviewStatus);
     if (keyword) params.set("keyword", keyword);
     const result = await requestJson(`/api/admin/catalog/entities?${params}`);
     renderCatalogDirectoryTable(result.records || [], result.total || 0);
@@ -4259,10 +4217,8 @@ function renderCatalogDirectoryTable(records, total) {
     root.querySelector("#catalogDirectoryCount").textContent = `${total} 条`;
     const table = root.querySelector("#catalogDirectoryTable");
     if (!records.length) { table.innerHTML = '<tr><td colspan="6">暂无符合条件的实体。</td></tr>'; return; }
-    table.innerHTML = records.map(item => `<tr><td>${item.coverUrl ? `<img class="catalog-cover" src="${escapeHtml(item.coverUrl)}" alt="">` : "-"}</td><td><strong>${escapeHtml(item.name || "-")}</strong><div class="status-box">${escapeHtml(item.code || "-")}</div></td><td>${escapeHtml(catalogEntityLabels[item.entityType?.toUpperCase()] || item.entityType || "-")}<div class="status-box">${escapeHtml(item.resourceCategory || "-")}</div></td><td>${item.longitude && item.latitude ? `${escapeHtml(item.longitude)}, ${escapeHtml(item.latitude)}` : "未设置"}</td><td>${renderStatus(item.reviewStatus)}<div class="status-box">${item.active ? "启用" : "已停用"}</div></td><td><div class="table-actions"><button class="action-button" data-edit="${item.entityType}:${item.entityId}">编辑</button>${item.active ? `<button class="action-button" data-submit="${item.entityType}:${item.entityId}">提交审核</button><button class="action-button" data-approve="${item.entityType}:${item.entityId}">通过</button><button class="action-button" data-deactivate="${item.entityType}:${item.entityId}">停用</button>` : "-"}</div></td></tr>`).join("");
+    table.innerHTML = records.map(item => `<tr><td>${item.coverUrl ? `<img class="catalog-cover" src="${escapeHtml(item.coverUrl)}" alt="">` : "-"}</td><td><strong>${escapeHtml(item.name || "-")}</strong><div class="status-box">${escapeHtml(item.code || "-")}</div></td><td>${escapeHtml(catalogEntityLabels[item.entityType?.toUpperCase()] || item.entityType || "-")}<div class="status-box">${escapeHtml(item.resourceCategory || "-")}</div></td><td>${item.longitude && item.latitude ? `${escapeHtml(item.longitude)}, ${escapeHtml(item.latitude)}` : "未设置"}</td><td>${item.active ? "启用" : "已停用"}</td><td><div class="table-actions"><button class="action-button" data-edit="${item.entityType}:${item.entityId}">编辑</button>${item.active ? `<button class="action-button" data-deactivate="${item.entityType}:${item.entityId}">停用</button>` : "-"}</div></td></tr>`).join("");
     table.querySelectorAll("[data-edit]").forEach(button => button.addEventListener("click", () => { const [type, id] = button.dataset.edit.split(":"); void openCatalogDirectoryEntity(type.toUpperCase(), id); }));
-    table.querySelectorAll("[data-submit]").forEach(button => button.addEventListener("click", () => void runCatalogEntityAction(button.dataset.submit, "submit-review")));
-    table.querySelectorAll("[data-approve]").forEach(button => button.addEventListener("click", () => void runCatalogEntityAction(button.dataset.approve, "approve")));
     table.querySelectorAll("[data-deactivate]").forEach(button => button.addEventListener("click", () => void deactivateCatalogEntity(button.dataset.deactivate)));
 }
 
@@ -4270,7 +4226,7 @@ function catalogDirectoryPayload({ includeSources = false, includeMedia = false 
     const root = document.querySelector("#catalogResourceWorkspace");
     const value = id => root.querySelector(`#${id}`).value;
     const type = value("catalogDirectoryFormType");
-    const payload = { entityType: type, code: value("catalogDirectoryCode").trim(), name: value("catalogDirectoryName").trim(), alias: optionalText(value("catalogDirectoryAlias")), regionId: parseNullableNumber(value("catalogDirectoryRegion")), address: optionalText(value("catalogDirectoryAddress")), longitude: parseNullableNumber(value("catalogDirectoryLongitude")), latitude: parseNullableNumber(value("catalogDirectoryLatitude")), summary: optionalText(value("catalogDirectorySummary")), detail: optionalText(value("catalogDirectoryDetail")), targetGrade: optionalText(value("catalogDirectoryGrade")) };
+    const payload = { entityType: type, code: value("catalogDirectoryCode").trim(), name: value("catalogDirectoryName").trim(), regionId: parseNullableNumber(value("catalogDirectoryRegion")), address: optionalText(value("catalogDirectoryAddress")), longitude: parseNullableNumber(value("catalogDirectoryLongitude")), latitude: parseNullableNumber(value("catalogDirectoryLatitude")), summary: optionalText(value("catalogDirectorySummary")), detail: optionalText(value("catalogDirectoryDetail")), targetGrade: optionalText(value("catalogDirectoryGrade")) };
     if (type === "RESOURCE") Object.assign(payload, { resourceCategory: value("catalogDirectoryCategoryInput"), resourceSubcategory: optionalText(value("catalogDirectorySubcategory")), organizationName: optionalText(value("catalogDirectoryOrganization")), contactPhone: optionalText(value("catalogDirectoryPhone")), openingTimeDesc: optionalText(value("catalogDirectoryOpening")), reservationRequired: root.querySelector("#catalogDirectoryReservation").checked, recommendedVisitMinutes: parseNullableNumber(value("catalogDirectoryMinutes")), activitySuggestion: optionalText(value("catalogDirectoryActivity")), safetyNote: optionalText(value("catalogDirectorySafety")) });
     if (includeSources) payload.sources = catalogDirectorySources();
     if (includeMedia) payload.media = catalogDirectoryState.selected?.media || [];
@@ -4281,14 +4237,15 @@ async function saveCatalogDirectoryEntity() {
     const root = document.querySelector("#catalogResourceWorkspace");
     const id = parseNullableNumber(root.querySelector("#catalogDirectoryId").value);
     const pendingMediaInput = root.querySelector("#catalogDirectoryPendingMediaFiles");
-    const pendingMediaFiles = id ? [] : Array.from(pendingMediaInput.files || []);
+    if (!id) { setGlobalStatus("请使用图谱导入", "新增实体仅支持通过 Excel 图谱导入。 "); return; }
+    const pendingMediaFiles = Array.from(pendingMediaInput.files || []);
     const payload = catalogDirectoryPayload();
     if (!payload.code || !payload.name) { setGlobalStatus("校验失败", "实体编码和名称不能为空。"); return; }
-    const item = id ? await requestJson(`/api/admin/catalog/entities/${payload.entityType}/${id}`, { method: "PUT", body: payload }) : await requestJson("/api/admin/catalog/entities", { method: "POST", body: payload });
+    const item = await requestJson(`/api/admin/catalog/entities/${payload.entityType}/${id}`, { method: "PUT", body: payload });
     if (pendingMediaFiles.length) await uploadCatalogDirectoryMediaFiles(item.entityType, item.entityId, pendingMediaFiles);
     pendingMediaInput.value = "";
     renderCatalogDirectoryPendingMedia();
-    setGlobalStatus(id ? "已更新" : "已创建", id ? "实体已更新；原已发布实体已回到待审核。" : pendingMediaFiles.length ? `草稿已保存，已上传 ${pendingMediaFiles.length} 张图片。` : "草稿已保存，可继续上传图片、维护来源和关联故事。");
+    setGlobalStatus("已更新", pendingMediaFiles.length ? `实体已更新，已上传 ${pendingMediaFiles.length} 张图片。` : "实体已更新并保持发布状态。");
     await openCatalogDirectoryEntity(item.entityType, item.entityId);
     await loadResources();
 }
@@ -4298,19 +4255,20 @@ async function openCatalogDirectoryEntity(type, id) {
     const item = await requestJson(`/api/admin/catalog/entities/${type}/${id}`);
     catalogDirectoryState.selected = item;
     const set = (name, value) => { const input = root.querySelector(`#${name}`); if (input) input.value = value ?? ""; };
-    set("catalogDirectoryId", item.entityId); set("catalogDirectoryFormType", item.entityType?.toUpperCase()); set("catalogDirectoryCode", item.code); set("catalogDirectoryName", item.name); set("catalogDirectoryAlias", item.alias); set("catalogDirectoryAddress", item.address); set("catalogDirectoryLongitude", item.longitude); set("catalogDirectoryLatitude", item.latitude); set("catalogDirectorySummary", item.summary); set("catalogDirectoryDetail", item.detail); set("catalogDirectoryGrade", item.targetGrade); set("catalogDirectoryCategoryInput", item.resourceCategory || "other"); set("catalogDirectorySubcategory", item.resourceSubcategory); set("catalogDirectoryOrganization", item.organizationName); set("catalogDirectoryPhone", item.contactPhone); set("catalogDirectoryOpening", item.openingTimeDesc); set("catalogDirectoryMinutes", item.recommendedVisitMinutes); set("catalogDirectoryActivity", item.activitySuggestion); set("catalogDirectorySafety", item.safetyNote);
+    set("catalogDirectoryId", item.entityId); set("catalogDirectoryFormType", item.entityType?.toUpperCase()); set("catalogDirectoryCode", item.code); set("catalogDirectoryName", item.name); set("catalogDirectoryAddress", item.address); set("catalogDirectoryLongitude", item.longitude); set("catalogDirectoryLatitude", item.latitude); set("catalogDirectorySummary", item.summary); set("catalogDirectoryDetail", item.detail); set("catalogDirectoryGrade", item.targetGrade); set("catalogDirectoryCategoryInput", item.resourceCategory || "other"); set("catalogDirectorySubcategory", item.resourceSubcategory); set("catalogDirectoryOrganization", item.organizationName); set("catalogDirectoryPhone", item.contactPhone); set("catalogDirectoryOpening", item.openingTimeDesc); set("catalogDirectoryMinutes", item.recommendedVisitMinutes); set("catalogDirectoryActivity", item.activitySuggestion); set("catalogDirectorySafety", item.safetyNote);
     await setCatalogDirectoryRegion(item.regionId);
     root.querySelector("#catalogDirectoryReservation").checked = Boolean(item.reservationRequired);
     root.querySelector("#catalogDirectoryFormType").disabled = true;
     root.querySelector("#catalogDirectoryFormTitle").textContent = `编辑：${item.name}`;
+    root.querySelector("#catalogDirectoryEditor").hidden = false;
     root.querySelector("#catalogDirectoryDetails").hidden = false;
     updateCatalogDirectoryFieldVisibility(); renderCatalogDirectorySources(); await loadCatalogDirectoryRelations();
     root.scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
-function resetCatalogDirectoryForm() {
+function closeCatalogDirectoryEditor() {
     const root = document.querySelector("#catalogResourceWorkspace");
-    root.querySelector("#catalogDirectoryForm").reset(); root.querySelector("#catalogDirectoryId").value = ""; root.querySelector("#catalogDirectoryRegion").value = ""; catalogDirectoryState.regionOptions.clear(); root.querySelector("#catalogDirectoryRegionOptions").innerHTML = ""; closeCatalogPickers(); root.querySelector("#catalogDirectoryFormType").disabled = false; root.querySelector("#catalogDirectoryFormTitle").textContent = "新增待审核实体"; root.querySelector("#catalogDirectoryDetails").hidden = true; catalogDirectoryState.selected = null; renderCatalogDirectoryPendingMedia(); updateCatalogDirectoryFieldVisibility();
+    root.querySelector("#catalogDirectoryForm").reset(); root.querySelector("#catalogDirectoryId").value = ""; root.querySelector("#catalogDirectoryRegion").value = ""; catalogDirectoryState.regionOptions.clear(); root.querySelector("#catalogDirectoryRegionOptions").innerHTML = ""; closeCatalogPickers(); root.querySelector("#catalogDirectoryFormType").disabled = false; root.querySelector("#catalogDirectoryEditor").hidden = true; root.querySelector("#catalogDirectoryDetails").hidden = true; catalogDirectoryState.selected = null; renderCatalogDirectoryPendingMedia(); updateCatalogDirectoryFieldVisibility();
 }
 
 function setCatalogPickerOpen(input, menu, toggle, open) { menu.hidden = !open; input.setAttribute("aria-expanded", String(open)); toggle.setAttribute("aria-expanded", String(open)); }
@@ -4327,15 +4285,14 @@ function renderCatalogDirectoryPendingMedia() { const root=document.querySelecto
 function openCatalogDirectoryImagePreview(url, name) { const root=document.querySelector("#catalogResourceWorkspace"), modal=root.querySelector("#catalogDirectoryImagePreviewModal");root.querySelector("#catalogDirectoryImagePreviewImage").src=url;root.querySelector("#catalogDirectoryImagePreviewImage").alt=name;root.querySelector("#catalogDirectoryImagePreviewName").textContent=name;modal.hidden=false;document.body.classList.add("modal-open"); }
 function closeCatalogDirectoryImagePreview() { const root=document.querySelector("#catalogResourceWorkspace"), modal=root.querySelector("#catalogDirectoryImagePreviewModal");if(!modal)return;modal.hidden=true;document.body.classList.remove("modal-open"); }
 
-async function runCatalogEntityAction(key, action) { const [rawType, id] = key.split(":"), type = rawType.toUpperCase(); await requestJson(`/api/admin/catalog/entities/${type}/${id}/${action}`, { method: "POST", body: {} }); setGlobalStatus("操作成功", action === "approve" ? "实体已审核并投影。" : "实体已提交审核。"); await loadResources(); if (catalogDirectoryState.selected?.entityId === Number(id)) await openCatalogDirectoryEntity(type, id); }
-async function deactivateCatalogEntity(key) { if (!window.confirm("停用后该实体将从地图、图谱和 RAG 检索中隐藏，是否继续？")) return; const [rawType,id]=key.split(":"), type=rawType.toUpperCase(); await requestJson(`/api/admin/catalog/entities/${type}/${id}`,{method:"DELETE"}); setGlobalStatus("已停用","实体历史数据已保留，公开投影已移除。"); resetCatalogDirectoryForm(); await loadResources(); }
+async function deactivateCatalogEntity(key) { if (!window.confirm("停用后该实体将从地图、图谱和 RAG 检索中隐藏，是否继续？")) return; const [rawType,id]=key.split(":"), type=rawType.toUpperCase(); await requestJson(`/api/admin/catalog/entities/${type}/${id}`,{method:"DELETE"}); setGlobalStatus("已停用","实体历史数据已保留，公开投影已移除。"); closeCatalogDirectoryEditor(); await loadResources(); }
 
 async function uploadCatalogDirectoryMediaFiles(entityType, entityId, files) { for (const file of files) { const headers={ Accept:"application/json" }; const token=readCookie("XSRF-TOKEN"); if(token)headers["X-CSRF-TOKEN"]=token; const body=new FormData();body.append("file",file);const response=await fetch(`/api/admin/catalog/entities/${entityType.toUpperCase()}/${entityId}/media`,{method:"POST",credentials:"include",headers,body});const payload=await response.json();if(!response.ok||payload.code!==200)throw new ApiError(payload.message||"图片上传失败",response.status); } }
 
 function appendCatalogSource(source={}) { const root=document.querySelector("#catalogResourceWorkspace"), list=root.querySelector("#catalogDirectorySourceList"), row=document.createElement("div");row.className="compact-row catalog-source-row";row.innerHTML=`<input class="line-input source-url" type="url" placeholder="来源 URL" value="${escapeHtml(source.sourceUrl||"")}"><input class="line-input source-excerpt" placeholder="来源摘录" value="${escapeHtml(source.sourceExcerpt||"")}"><input class="line-input source-score" type="number" min="1" max="5" placeholder="可信度" value="${escapeHtml(source.credibilityScore||"")}"><button class="action-button" type="button">移除</button>`;row.querySelector("button").addEventListener("click",()=>row.remove());list.appendChild(row); }
 function renderCatalogDirectorySources() { const list=document.querySelector("#catalogDirectorySourceList");list.innerHTML="";(catalogDirectoryState.selected?.sources||[]).forEach(appendCatalogSource);if(!list.children.length)appendCatalogSource(); }
 function catalogDirectorySources() { return Array.from(document.querySelectorAll("#catalogDirectorySourceList .catalog-source-row")).map(row=>({sourceUrl:optionalText(row.querySelector(".source-url").value),sourceExcerpt:optionalText(row.querySelector(".source-excerpt").value),credibilityScore:parseNullableNumber(row.querySelector(".source-score").value)})).filter(source=>source.sourceUrl||source.sourceExcerpt); }
-async function saveCatalogDirectorySources() { const item=catalogDirectoryState.selected;if(!item)return;const updated=await requestJson(`/api/admin/catalog/entities/${item.entityType.toUpperCase()}/${item.entityId}`,{method:"PUT",body:catalogDirectoryPayload({includeSources:true})});setGlobalStatus("来源已保存",updated.reviewStatus === "pending" ? "实体已回到待审核。" : "来源信息已更新。");await openCatalogDirectoryEntity(item.entityType,item.entityId);await loadResources(); }
+async function saveCatalogDirectorySources() { const item=catalogDirectoryState.selected;if(!item)return;await requestJson(`/api/admin/catalog/entities/${item.entityType.toUpperCase()}/${item.entityId}`,{method:"PUT",body:catalogDirectoryPayload({includeSources:true})});setGlobalStatus("来源已保存","来源信息已更新并保持发布状态。");await openCatalogDirectoryEntity(item.entityType,item.entityId);await loadResources(); }
 
 async function loadCatalogRelationOptions() { catalogDirectoryState.relationOptions=await requestJson("/api/admin/catalog/relation-options"); const root=document.querySelector("#catalogResourceWorkspace"); ["catalogDirectoryRelationSourceType","catalogDirectoryRelationTargetType"].forEach(id=>{root.querySelector(`#${id}`).innerHTML=Object.entries(catalogEntityLabels).map(([key,label])=>`<option value="${key}">${label}</option>`).join("");}); renderCatalogRelationTypes(); await Promise.all([searchCatalogRelationEntities("source"),searchCatalogRelationEntities("target")]); }
 function relationPickerIds(side) { const title=side === "source" ? "Source" : "Target"; return { type:`catalogDirectoryRelation${title}Type`, name:`catalogDirectoryRelation${title}Name`, id:`catalogDirectoryRelation${title}Id`, options:`catalogDirectoryRelation${title}Options`, toggle:`catalogDirectoryRelation${title}Toggle` }; }
@@ -4346,7 +4303,7 @@ function selectCatalogRelationEntity(side,label) { const root=document.querySele
 async function searchCatalogRelationEntities(side,showAll=false) { const root=document.querySelector("#catalogResourceWorkspace"),ids=relationPickerIds(side),input=root.querySelector(`#${ids.name}`),type=root.querySelector(`#${ids.type}`).value,query=input.value.trim(),selected=catalogDirectoryState.relationEntityOptions[side].get(query),params=new URLSearchParams({entityType:type,pageNum:"1",pageSize:"100"});if(selected&&!showAll){selectCatalogRelationEntity(side,query);return;}if(query&&!showAll)params.set("keyword",query);const result=await requestJson(`/api/admin/catalog/entities?${params}`);if(!showAll&&input.value.trim()!==query)return;renderCatalogRelationEntityOptions(side,result.records||[]);root.querySelector(`#${ids.id}`).value=selected?.entityId||""; }
 function setCatalogRelationEntityPicker(side, item) { const root=document.querySelector("#catalogResourceWorkspace"),ids=relationPickerIds(side),label=catalogRelationEntityLabel(item),input=root.querySelector(`#${ids.name}`),toggle=root.querySelector(`#${ids.toggle}`),options=root.querySelector(`#${ids.options}`);catalogDirectoryState.relationEntityOptions[side].set(label,item);options.innerHTML=`<button class="catalog-picker-option" data-entity-label="${escapeHtml(label)}" type="button" role="option">${escapeHtml(label)}</button>`;options.querySelector("[data-entity-label]").addEventListener("click",()=>selectCatalogRelationEntity(side,label));input.value=label;root.querySelector(`#${ids.id}`).value=item.entityId||"";setCatalogPickerOpen(input,options,toggle,false); }
 function renderCatalogRelationTypes() { const root=document.querySelector("#catalogResourceWorkspace"), source=root.querySelector("#catalogDirectoryRelationSourceType").value.toLowerCase(), target=root.querySelector("#catalogDirectoryRelationTargetType").value.toLowerCase(), select=root.querySelector("#catalogDirectoryRelationType"), options=catalogDirectoryState.relationOptions.filter(item=>item.sourceType===source&&item.targetType===target);select.innerHTML=options.map(item=>`<option value="${item.relationType}">${escapeHtml(item.label)}</option>`).join("")||"<option value=\"\">当前方向无可用关系</option>"; }
-async function createCatalogDirectoryRelation() { const root=document.querySelector("#catalogResourceWorkspace"), item=catalogDirectoryState.selected, body={sourceType:root.querySelector("#catalogDirectoryRelationSourceType").value,sourceId:parseNullableNumber(root.querySelector("#catalogDirectoryRelationSourceId").value),targetType:root.querySelector("#catalogDirectoryRelationTargetType").value,targetId:parseNullableNumber(root.querySelector("#catalogDirectoryRelationTargetId").value),relationType:root.querySelector("#catalogDirectoryRelationType").value,remark:optionalText(root.querySelector("#catalogDirectoryRelationRemark").value)};if(!body.sourceId||!body.targetId||!body.relationType){setGlobalStatus("校验失败","请从候选列表选择两个实体和关系类型。");return;}await requestJson("/api/admin/catalog/relations",{method:"POST",body});setGlobalStatus("关系已创建","关系已保存，并将在两端审核通过后进入图谱投影。");if(item)await loadCatalogDirectoryRelations(); }
+async function createCatalogDirectoryRelation() { const root=document.querySelector("#catalogResourceWorkspace"), item=catalogDirectoryState.selected, body={sourceType:root.querySelector("#catalogDirectoryRelationSourceType").value,sourceId:parseNullableNumber(root.querySelector("#catalogDirectoryRelationSourceId").value),targetType:root.querySelector("#catalogDirectoryRelationTargetType").value,targetId:parseNullableNumber(root.querySelector("#catalogDirectoryRelationTargetId").value),relationType:root.querySelector("#catalogDirectoryRelationType").value,remark:optionalText(root.querySelector("#catalogDirectoryRelationRemark").value)};if(!body.sourceId||!body.targetId||!body.relationType){setGlobalStatus("校验失败","请从候选列表选择两个实体和关系类型。");return;}await requestJson("/api/admin/catalog/relations",{method:"POST",body});setGlobalStatus("关系已创建","关系已保存并进入图谱投影。 ");if(item)await loadCatalogDirectoryRelations(); }
 function catalogRelationDisplayName(relation, side) { const type=relation[`${side}Type`]?.toUpperCase(), fallback=`${catalogEntityLabels[type]||"实体"}（已不可用）`;return relation[`${side}Name`]||fallback; }
 async function loadCatalogDirectoryRelations() { const item=catalogDirectoryState.selected;if(!item)return;const relations=await requestJson(`/api/admin/catalog/entities/${item.entityType.toUpperCase()}/${item.entityId}/relations`),root=document.querySelector("#catalogResourceWorkspace"),list=root.querySelector("#catalogDirectoryRelationList"); list.innerHTML=relations.map(relation=>`<div class="compact-row catalog-relation-row"><div class="catalog-relation-summary"><strong>${escapeHtml(catalogRelationDisplayName(relation,"source"))}</strong><span>${escapeHtml(relation.relationLabel||"相关")}</span><strong>${escapeHtml(catalogRelationDisplayName(relation,"target"))}</strong></div>${relation.remark?`<small>${escapeHtml(relation.remark)}</small>`:""}<button class="action-button" data-delete-relation="${relation.relationKind}:${relation.relationId}" type="button">删除</button></div>`).join("")||"<p class=\"status-box\">暂无关联故事或图谱关系。</p>";list.querySelectorAll("[data-delete-relation]").forEach(button=>button.addEventListener("click",()=>void deleteCatalogDirectoryRelation(button.dataset.deleteRelation))); const selectedType=item.entityType.toUpperCase();root.querySelector("#catalogDirectoryRelationTargetType").value=selectedType;root.querySelector("#catalogDirectoryRelationSourceType").value="STORY";renderCatalogRelationTypes();await Promise.all([searchCatalogRelationEntities("source"),searchCatalogRelationEntities("target")]);setCatalogRelationEntityPicker("target",item); }
 async function deleteCatalogDirectoryRelation(key) { if(!window.confirm("确定删除该关联关系？"))return;const [kind,id]=key.split(":");await requestJson(`/api/admin/catalog/relations/${kind}/${id}`,{method:"DELETE"});setGlobalStatus("关系已删除","图谱关系已同步移除。");await loadCatalogDirectoryRelations(); }

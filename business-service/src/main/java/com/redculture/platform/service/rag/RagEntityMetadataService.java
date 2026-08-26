@@ -167,7 +167,7 @@ public class RagEntityMetadataService {
         String theme = themes(resource.getResourceName(), category, resource.getEducationValue(),
                 resource.getActivitySuggestion());
         return metadata(EntityType.RESOURCE, resource.getResourceId(), resource.getResourceName(),
-                aliases(resource.getResourceAlias(), resource.getResourceCode()), region, category,
+                aliases(resource.getResourceCode()), region, category,
                 resource.getTargetGrade(), theme, resource.getSourceId(), joinValues(relatedNames));
     }
 
@@ -192,7 +192,7 @@ public class RagEntityMetadataService {
 
     private RagEntityMetadata siteMetadata(RedSite site, Map<Long, String> regions) {
         return metadata(EntityType.SITE, site.getSiteId(), site.getSiteName(),
-                aliases(site.getSiteAlias(), site.getSiteCode()), regions.get(site.getRegionId()),
+                aliases(site.getSiteCode()), regions.get(site.getRegionId()),
                 joinValues(site.getSiteLevel(), site.getProtectionLevel()), null,
                 themes(site.getHistoricalBackground(), site.getIntro()), null, null);
     }
@@ -200,13 +200,13 @@ public class RagEntityMetadataService {
     private RagEntityMetadata heroMetadata(HeroPerson hero, Map<Long, String> regions) {
         String region = firstNonBlank(regions.get(hero.getNativePlaceRegionId()), hero.getNativePlaceText());
         return metadata(EntityType.HERO, hero.getHeroId(), hero.getHeroName(),
-                aliases(hero.getHeroAlias(), hero.getHeroCode()), region, "英雄人物", null,
+                aliases(hero.getHeroCode()), region, "英雄人物", null,
                 themes(hero.getProfileSummary(), hero.getMainDeeds()), null, null);
     }
 
     private RagEntityMetadata eventMetadata(HistoricalEvent event, Map<Long, String> regions) {
         return metadata(EntityType.EVENT, event.getEventId(), event.getEventName(),
-                aliases(event.getEventAlias(), event.getEventCode()), regions.get(event.getPrimaryRegionId()),
+                aliases(event.getEventCode()), regions.get(event.getPrimaryRegionId()),
                 "历史事件", null, themes(event.getHistoricalSignificance(), event.getEventProcess()), null, null);
     }
 

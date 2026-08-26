@@ -25,9 +25,6 @@ public class HistoricalEvent extends BaseAuditEntity {
     @TableField("event_name")
     private String eventName;
 
-    @TableField("event_alias")
-    private String eventAlias;
-
     @TableField("primary_region_id")
     private Long primaryRegionId;
 

@@ -9,6 +9,6 @@ import lombok.NoArgsConstructor;
 @AllArgsConstructor
 public class SchoolImportErrorVO {
     private int rowNumber;
-    private String schoolCode;
+    private String schoolName;
     private String message;
 }

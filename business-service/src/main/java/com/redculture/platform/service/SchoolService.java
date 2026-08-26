@@ -4,15 +4,12 @@ import com.redculture.platform.common.PageResult;
 import com.baomidou.mybatisplus.extension.service.IService;
 import com.redculture.platform.entity.School;
 import com.redculture.platform.vo.SchoolAdminVO;
-import com.redculture.platform.vo.request.SchoolCreateRequest;
 import com.redculture.platform.vo.request.SchoolUpdateRequest;
 import com.redculture.platform.vo.request.SchoolCsvImportRequest;
 import com.redculture.platform.vo.SchoolImportResultVO;
 import org.springframework.web.multipart.MultipartFile;
 
 public interface SchoolService extends IService<School> {
-
-    SchoolAdminVO createSchool(SchoolCreateRequest request);
 
     SchoolAdminVO updateSchool(Long schoolId, SchoolUpdateRequest request);
 

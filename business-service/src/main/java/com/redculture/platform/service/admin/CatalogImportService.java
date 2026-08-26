@@ -8,6 +8,7 @@ import com.redculture.platform.entity.AdministrativeRegion;
 import com.redculture.platform.entity.CatalogImportBatch;
 import com.redculture.platform.entity.CatalogImportRow;
 import com.redculture.platform.enums.EntityType;
+import com.redculture.platform.enums.RegionLevel;
 import com.redculture.platform.enums.ResourceCategory;
 import com.redculture.platform.mapper.AdministrativeRegionMapper;
 import com.redculture.platform.mapper.CatalogImportBatchMapper;
@@ -47,6 +48,10 @@ public class CatalogImportService {
     private static final Map<String, List<String>> RELATION_HEADER_ALIASES = relationHeaderAliases();
     private static final Map<String, String> CATEGORY_LABELS = Map.ofEntries(
             Map.entry("红色文化", "red_culture"),
+            Map.entry("革命遗址", "red_culture"),
+            Map.entry("革命英雄", "red_culture"),
+            Map.entry("革命事件", "red_culture"),
+            Map.entry("纪念馆", "patriotism_base"),
             Map.entry("非遗文化", "intangible_culture"),
             Map.entry("非物质文化遗产", "intangible_culture"),
             Map.entry("传统文化", "traditional_culture"),
@@ -64,15 +69,17 @@ public class CatalogImportService {
     private final CatalogImportBatchMapper batchMapper;
     private final CatalogImportRowMapper rowMapper;
     private final CatalogAdminService catalogService;
+    private final CatalogProjectionService projectionService;
     private final AdministrativeRegionMapper regionMapper;
     private final ObjectMapper objectMapper;
 
     public CatalogImportService(CatalogImportBatchMapper batchMapper, CatalogImportRowMapper rowMapper,
-                                CatalogAdminService catalogService, AdministrativeRegionMapper regionMapper,
+                                CatalogAdminService catalogService, CatalogProjectionService projectionService, AdministrativeRegionMapper regionMapper,
                                 ObjectMapper objectMapper) {
         this.batchMapper = batchMapper;
         this.rowMapper = rowMapper;
         this.catalogService = catalogService;
+        this.projectionService = projectionService;
         this.regionMapper = regionMapper;
         this.objectMapper = objectMapper;
     }
@@ -154,10 +161,10 @@ public class CatalogImportService {
                 if (entity == null || entity.getEntityId() == null) {
                     throw new IllegalArgumentException("实体创建未返回实体 ID");
                 }
-                catalogService.submitForReview(request.getEntityType(), entity.getEntityId());
+                projectionService.projectEntity(entity);
                 row.setImportedEntityId(entity.getEntityId());
                 row.setValidationStatus("IMPORTED");
-                row.setValidationMessage("已导入，等待审核");
+                row.setValidationMessage("已导入并发布，图谱与检索投影已排队");
                 importedEntityIds.put(entityKey(request.getEntityType(), request.getCode()), entity.getEntityId());
             } catch (Exception exception) {
                 row.setValidationStatus("FAILED");
@@ -185,9 +192,10 @@ public class CatalogImportService {
                     markDuplicate(row, "确认导入时发现数据库已有相同关系");
                 } else {
                     CatalogRelationVO relation = catalogService.createImportedRelation(request);
+                    if (relation != null) projectionService.projectRelation(relation);
                     row.setImportedEntityId(relation == null ? null : relation.getRelationId());
                     row.setValidationStatus("IMPORTED");
-                    row.setValidationMessage("关系已写入待审核链路，待两端实体审核通过后投影");
+                    row.setValidationMessage("关系已写入，图谱投影已排队");
                 }
             } catch (Exception exception) {
                 row.setValidationStatus("FAILED");
@@ -295,7 +303,7 @@ public class CatalogImportService {
             }
             row.setPayloadJson(relationJson(sourceType, sourceCode, normalizeRelation(relationType), targetType, targetCode, remark));
             row.setValidationStatus(errors.isEmpty() ? "VALID" : "INVALID");
-            row.setValidationMessage(errors.isEmpty() ? "关系校验通过，确认后写入待审核关系" : String.join("；", errors));
+            row.setValidationMessage(errors.isEmpty() ? "关系校验通过，确认后写入并投影" : String.join("；", errors));
             rows.add(row);
         }
     }
@@ -306,7 +314,6 @@ public class CatalogImportService {
         request.setEntityType(type);
         request.setCode(value(row, headers, "code", formatter));
         request.setName(value(row, headers, "name", formatter));
-        request.setAlias(value(row, headers, "alias", formatter));
         request.setAddress(value(row, headers, "address", formatter));
         request.setSummary(value(row, headers, "summary", formatter));
         request.setDetail(value(row, headers, "detail", formatter));
@@ -321,9 +328,24 @@ public class CatalogImportService {
         if (!StringUtils.hasText(request.getCode())) errors.add("编码不能为空");
         if (!StringUtils.hasText(request.getName())) errors.add("名称不能为空");
 
+        String provinceName = value(row, headers, "provinceName", formatter);
+        String cityName = value(row, headers, "cityName", formatter);
+        String countyName = value(row, headers, "countyName", formatter);
+        String townshipName = value(row, headers, "townshipName", formatter);
+        boolean hasRegionPath = StringUtils.hasText(provinceName) || StringUtils.hasText(cityName)
+                || StringUtils.hasText(countyName) || StringUtils.hasText(townshipName);
         String regionText = value(row, headers, "region", formatter);
-        if (!StringUtils.hasText(regionText)) {
-            if (type == EntityType.RESOURCE) errors.add("行政区域不能为空");
+        if (hasRegionPath) {
+            if (type == EntityType.RESOURCE && !StringUtils.hasText(countyName)) {
+                errors.add("资源导入至少需要填写区县名称");
+            }
+            try {
+                request.setRegionId(resolveRegionPath(provinceName, cityName, countyName, townshipName));
+            } catch (IllegalArgumentException exception) {
+                errors.add(exception.getMessage());
+            }
+        } else if (!StringUtils.hasText(regionText)) {
+            if (type == EntityType.RESOURCE) errors.add("请填写区县名称（乡镇名称可选）");
         } else {
             try {
                 request.setRegionId(resolveRegion(regionText));
@@ -379,7 +401,6 @@ public class CatalogImportService {
         if (StringUtils.hasText(dataSource)) {
             CatalogSourceRequest source = new CatalogSourceRequest();
             source.setSourceUrl(dataSource);
-            source.setCredibilityScore(integer(value(row, headers, "credibility", formatter), "可信度", errors));
             request.setSources(List.of(source));
         } else {
             request.setSources(Collections.emptyList());
@@ -408,6 +429,73 @@ public class CatalogImportService {
         if (unique.isEmpty()) throw new IllegalArgumentException("行政区域不存在: " + value);
         if (unique.size() > 1) throw new IllegalArgumentException("行政区域名称或 adcode 匹配到多个区域: " + value);
         return unique.values().iterator().next().getRegionId();
+    }
+
+    /**
+     * Resolves the most specific supplied administrative region and verifies every supplied parent-child link.
+     * The former single-region column remains supported by {@link #resolveRegion(String)} for older workbooks.
+     */
+    private Long resolveRegionPath(String provinceName, String cityName, String countyName, String townshipName) {
+        AdministrativeRegion province = resolveRegionByName(RegionLevel.PROVINCE, provinceName, null, "省份");
+        AdministrativeRegion city = resolveRegionByName(RegionLevel.CITY, cityName,
+                province == null ? null : province.getRegionId(), "城市");
+        if (city != null && province == null) {
+            province = parentOf(city, RegionLevel.PROVINCE, "城市未关联有效省份");
+        }
+
+        AdministrativeRegion county = resolveRegionByName(RegionLevel.COUNTY, countyName,
+                city == null ? null : city.getRegionId(), "区县");
+        if (county != null && city == null) {
+            city = parentOf(county, RegionLevel.CITY, "区县未关联有效城市");
+        }
+        if (city != null && province == null) {
+            province = parentOf(city, RegionLevel.PROVINCE, "城市未关联有效省份");
+        }
+
+        AdministrativeRegion township = resolveRegionByName(RegionLevel.TOWNSHIP, townshipName,
+                county == null ? null : county.getRegionId(), "乡镇");
+        if (township != null && county == null) {
+            county = parentOf(township, RegionLevel.COUNTY, "乡镇未关联有效区县");
+        }
+        if (county != null && city == null) {
+            city = parentOf(county, RegionLevel.CITY, "区县未关联有效城市");
+        }
+        if (city != null && province == null) {
+            province = parentOf(city, RegionLevel.PROVINCE, "城市未关联有效省份");
+        }
+
+        if (township != null) return township.getRegionId();
+        if (county != null) return county.getRegionId();
+        if (city != null) return city.getRegionId();
+        if (province != null) return province.getRegionId();
+        throw new IllegalArgumentException("请至少填写一个行政区划名称");
+    }
+
+    private AdministrativeRegion resolveRegionByName(RegionLevel level, String name, Long parentId, String label) {
+        if (!StringUtils.hasText(name)) return null;
+        List<AdministrativeRegion> candidates = regionMapper.selectList(new LambdaQueryWrapper<AdministrativeRegion>()
+                .eq(AdministrativeRegion::getRegionLevel, level)
+                .eq(parentId != null, AdministrativeRegion::getParentRegionId, parentId));
+        String normalized = normalizeRegionName(name);
+        List<AdministrativeRegion> matches = candidates.stream()
+                .filter(item -> normalizeRegionName(item.getRegionName()).equals(normalized))
+                .toList();
+        if (matches.isEmpty()) throw new IllegalArgumentException("无法找到" + label + "“" + name.trim() + "”");
+        if (matches.size() > 1) throw new IllegalArgumentException(label + "“" + name.trim() + "”存在歧义，请补充上级行政区");
+        return matches.getFirst();
+    }
+
+    private AdministrativeRegion parentOf(AdministrativeRegion child, RegionLevel expectedLevel, String message) {
+        if (child == null || child.getParentRegionId() == null) throw new IllegalArgumentException(message);
+        AdministrativeRegion parent = regionMapper.selectById(child.getParentRegionId());
+        if (parent == null || parent.getRegionLevel() != expectedLevel) throw new IllegalArgumentException(message);
+        return parent;
+    }
+
+    private String normalizeRegionName(String value) {
+        if (value == null) return "";
+        return value.trim().replaceAll("[\\s　]+", "")
+                .replaceFirst("(特别行政区|自治区|省|市|区|县|镇|乡|街道)$", "");
     }
 
     private ResourceCategory resourceCategory(String value) {
@@ -599,6 +687,10 @@ public class CatalogImportService {
             case "name" -> "资源名称/名称";
             case "resourceCategory" -> "资源类型";
             case "region" -> "行政区域";
+            case "provinceName" -> "省份名称";
+            case "cityName" -> "城市名称";
+            case "countyName" -> "区县名称";
+            case "townshipName" -> "乡镇名称";
             case "address" -> "地址";
             case "longitude" -> "经度";
             case "latitude" -> "纬度";
@@ -647,9 +739,12 @@ public class CatalogImportService {
         Map<String, List<String>> result = new LinkedHashMap<>();
         result.put("code", List.of("编码", "资源编码", "实体编码", "代码", "code", "resourcecode"));
         result.put("name", List.of("名称", "资源名称", "实体名称", "name", "resourcename"));
-        result.put("alias", List.of("别名", "资源别名", "alias"));
         result.put("resourceCategory", List.of("资源类型", "资源类别", "资源分类", "类型", "分类", "resourcecategory", "category"));
-        result.put("region", List.of("行政区域", "区域", "区域ID", "区域名称", "地区", "regionid", "regionname", "adcode"));
+        result.put("region", List.of("行政区域", "行政区域名称", "区域", "区域名称", "地区", "regionname", "adcode"));
+        result.put("provinceName", List.of("省份名称", "省份", "province_name", "provincename"));
+        result.put("cityName", List.of("城市名称", "城市", "city_name", "cityname"));
+        result.put("countyName", List.of("区县名称", "区县", "县区名称", "county_name", "countyname"));
+        result.put("townshipName", List.of("乡镇名称", "乡镇", "街道名称", "township_name", "townshipname"));
         result.put("address", List.of("地址", "资源地址", "address"));
         result.put("longitude", List.of("经度", "longitude", "lng"));
         result.put("latitude", List.of("纬度", "latitude", "lat"));
@@ -666,7 +761,6 @@ public class CatalogImportService {
         result.put("activitySuggestion", List.of("活动建议", "activitysuggestion"));
         result.put("safetyNote", List.of("安全提示", "注意事项", "safetynote"));
         result.put("imageUrl", List.of("图片URL", "图片地址", "imageurl"));
-        result.put("credibility", List.of("可信度", "来源可信度", "credibility"));
         return Collections.unmodifiableMap(result);
     }
 

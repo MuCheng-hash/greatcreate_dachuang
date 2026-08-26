@@ -296,7 +296,40 @@ public class UserManagementServiceImpl implements UserManagementService {
                 .orderByAsc(ClassInfo::getSchoolId)
                 .orderByAsc(ClassInfo::getGradeName)
                 .orderByAsc(ClassInfo::getClassName);
-        return toClassVOs(classInfoMapper.selectList(wrapper));
+        // 平台面向小学教育，仅提供一年级至六年级；历史数据中的重复班级只保留一条。
+        return toClassVOs(classInfoMapper.selectList(wrapper).stream()
+                .filter(item -> isPrimarySchoolGrade(item.getGradeName()))
+                .collect(Collectors.toMap(
+                        item -> String.join("|", String.valueOf(item.getSchoolId()),
+                                Objects.toString(item.getGradeName(), ""),
+                                Objects.toString(item.getClassName(), "")),
+                        Function.identity(),
+                        (first, duplicate) -> first,
+                        LinkedHashMap::new))
+                .values().stream()
+                .sorted(Comparator.comparingInt((ClassInfo item) -> primaryGradeNumber(item.getGradeName()))
+                        .thenComparing(ClassInfo::getClassName, Comparator.nullsLast(String::compareTo)))
+                .toList());
+    }
+
+    private boolean isPrimarySchoolGrade(String gradeName) {
+        if (!StringUtils.hasText(gradeName)) return false;
+        String value = gradeName.trim();
+        if (value.contains("七") || value.contains("八") || value.contains("九") || value.contains("初") || value.contains("高")) return false;
+        for (int grade = 1; grade <= 6; grade++) {
+            if (value.contains(String.valueOf(grade)) || value.contains(new String[]{"一", "二", "三", "四", "五", "六"}[grade - 1])) return true;
+        }
+        return false;
+    }
+
+    private int primaryGradeNumber(String gradeName) {
+        if (!StringUtils.hasText(gradeName)) return Integer.MAX_VALUE;
+        String value = gradeName.trim();
+        String[] chinese = {"一", "二", "三", "四", "五", "六"};
+        for (int i = 0; i < chinese.length; i++) {
+            if (value.contains(String.valueOf(i + 1)) || value.contains(chinese[i])) return i + 1;
+        }
+        return Integer.MAX_VALUE;
     }
 
     @Override
