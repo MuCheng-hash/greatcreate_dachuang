@@ -262,9 +262,14 @@ class AgentRuntime:
         *,
         prepared: PreparedTurn | None = None,
     ) -> AsyncIterator[str]:
-        send_stream, receive_stream = anyio.create_memory_object_stream[
+        # SSE is a delivery channel, not the lifetime of a durable turn. A
+        # client may reconnect with the same clientTurnId to recover the
+        # persisted response after a transient browser or proxy disconnect.
+        send_stream, _receive_stream = anyio.create_memory_object_stream[
             tuple[str, dict[str, Any]]
-        ](self.settings.agent_stream_buffer_size)
+        ](1)
+        event_queue: asyncio.Queue[tuple[str, dict[str, Any]] | None] = asyncio.Queue()
+        stream_connected = True
         run_id = str(uuid.uuid4())
         prepared_turn = prepared or await self._prepare_turn(request)
         completed = self._completed_response(prepared_turn.registration.turn)
@@ -272,10 +277,12 @@ class AgentRuntime:
         async def publish(
             event_name: str, data: dict[str, Any] | None = None
         ) -> None:
+            if not stream_connected:
+                return
             payload = {"runId": run_id}
             if data:
                 payload.update(data)
-            await send_stream.send((event_name, payload))
+            event_queue.put_nowait((event_name, payload))
 
         async def worker() -> None:
             writer = self._partial_writer(prepared_turn.registration.turn)
@@ -373,23 +380,19 @@ class AgentRuntime:
                     if heartbeat is not None:
                         with anyio.CancelScope(shield=True):
                             await self._stop_heartbeat(heartbeat)
+                    if stream_connected:
+                        event_queue.put_nowait(None)
 
         task = asyncio.create_task(worker())
         try:
-            async with receive_stream:
-                async for event_name, data in receive_stream:
-                    yield self._format_sse(event_name, data)
+            while True:
+                event = await event_queue.get()
+                if event is None:
+                    break
+                event_name, data = event
+                yield self._format_sse(event_name, data)
         finally:
-            if not task.done():
-                task.cancel()
-            # A disconnect cancels the StreamingResponse task. Shield the
-            # worker's short persistence cleanup from repeated cancellation
-            # so the turn reaches interrupted/cancelled before returning.
-            with anyio.CancelScope(shield=True):
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    pass
+            stream_connected = False
 
     @staticmethod
     def _stream_error_payload(
@@ -1247,11 +1250,18 @@ class AgentRuntime:
         token = bind_tool_runtime(runtime)
         try:
             if "retrieve_knowledge" in plan.recommended_tools:
-                output = await runtime.run(
-                    "retrieve_knowledge",
-                    {"query": request.message, "limit": 5},
-                    lambda: self._retrieve_with_augmentation(request, thread),
-                )
+                try:
+                    output = await asyncio.wait_for(
+                        runtime.run(
+                            "retrieve_knowledge",
+                            {"query": request.message, "limit": 5},
+                            lambda: self._retrieve_with_augmentation(request, thread),
+                        ),
+                        timeout=self.settings.agent_tool_timeout_seconds,
+                    )
+                except asyncio.TimeoutError:
+                    runtime.degraded_reasons.append("retrieve_knowledge_timeout")
+                    output = "{}"
                 try:
                     result = json.loads(output)
                 except (TypeError, ValueError, json.JSONDecodeError):
@@ -1259,9 +1269,15 @@ class AgentRuntime:
                 if isinstance(result, dict):
                     _merge_retrieval(runtime, result)
             if "query_graph_relations" in plan.recommended_tools:
-                await query_graph_relations.ainvoke(
-                    {"query": request.message, "limit": 5}
-                )
+                try:
+                    await asyncio.wait_for(
+                        query_graph_relations.ainvoke(
+                            {"query": request.message, "limit": 5}
+                        ),
+                        timeout=self.settings.agent_tool_timeout_seconds,
+                    )
+                except asyncio.TimeoutError:
+                    runtime.degraded_reasons.append("query_graph_relations_timeout")
         finally:
             reset_tool_runtime(token)
         return list(runtime.executions), list(runtime.degraded_reasons)

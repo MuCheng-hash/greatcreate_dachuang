@@ -568,13 +568,14 @@ def test_stateful_stream_emits_events_and_persists_final_response(tmp_path: Path
     assert stored["messages"][-1]["metadata"]["responseSnapshot"]["schemaVersion"] == 1
 
 
-def test_stateful_stream_uses_bounded_backpressure_and_cancels_worker(tmp_path: Path):
+def test_stateful_stream_keeps_worker_running_after_client_disconnect(tmp_path: Path):
     runtime = started_runtime(settings_for(tmp_path, agent_stream_buffer_size=1))
     request = AgentMessageRequest.model_validate(message_payload(
         clientTurnId="turn-bounded-stream",
     ))
     progress: list[str] = []
     cancelled = asyncio.Event()
+    reached_wait = asyncio.Event()
 
     async def fake_stream_turn(*args):
         emit = args[8]
@@ -585,6 +586,7 @@ def test_stateful_stream_uses_bounded_backpressure_and_cancels_worker(tmp_path: 
             progress.append("before-second")
             await emit("token", {"delta": "第二段"})
             progress.append("after-second")
+            reached_wait.set()
             await asyncio.Future()
         except asyncio.CancelledError:
             cancelled.set()
@@ -596,33 +598,24 @@ def test_stateful_stream_uses_bounded_backpressure_and_cancels_worker(tmp_path: 
         stream = runtime.stream_events(request)
         try:
             first = await anext(stream)
-            await asyncio.sleep(0)
-            assert progress == ["before-first"]
-
-            second = await anext(stream)
-            await asyncio.sleep(0)
-            assert progress == ["before-first", "after-first", "before-second"]
-
-            third = await anext(stream)
-            await asyncio.sleep(0)
-            assert progress == [
-                "before-first", "after-first", "before-second", "after-second"
-            ]
-
-            fourth = await anext(stream)
-            await asyncio.sleep(0)
         finally:
             await stream.aclose()
+        await asyncio.wait_for(reached_wait.wait(), timeout=1)
+        assert progress == [
+            "before-first", "after-first", "before-second", "after-second"
+        ]
+        assert not cancelled.is_set()
+        await runtime.cancel_turn(
+            request.client_turn_id,
+            request.owner_id,
+            request.scope_type,
+            request.scope_id,
+        )
         await asyncio.wait_for(cancelled.wait(), timeout=1)
-        return [first, second, third, fourth]
+        return first
 
-    events = run_async(exercise_stream())
-    assert [event.splitlines()[0] for event in events] == [
-        "event: phase.started",
-        "event: phase.completed",
-        "event: token",
-        "event: token",
-    ]
+    event = run_async(exercise_stream())
+    assert event.splitlines()[0] == "event: phase.started"
 
 
 def test_disconnect_aware_streaming_response_cancels_idle_producer() -> None:
