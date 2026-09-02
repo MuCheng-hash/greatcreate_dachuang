@@ -20,7 +20,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.List;
 
 @RestController
-@RequestMapping({"/api/student", "/student"})
+@RequestMapping("/api/student")
 public class StudentTaskSubmissionController {
     private final TaskSubmissionService service;
     public StudentTaskSubmissionController(TaskSubmissionService service) { this.service = service; }

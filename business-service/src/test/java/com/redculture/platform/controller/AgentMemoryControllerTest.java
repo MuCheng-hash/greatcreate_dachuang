@@ -142,6 +142,25 @@ class AgentMemoryControllerTest {
     }
 
     @Test
+    void teacherAndStudentCanUseMemoryRoutesWhenBoundToASchool() {
+        AgentRuntimeClient client = org.mockito.Mockito.mock(AgentRuntimeClient.class);
+        org.mockito.Mockito.when(client.getMemorySetting(
+                        org.mockito.ArgumentMatchers.anyString(),
+                        org.mockito.ArgumentMatchers.eq("SCHOOL"),
+                        org.mockito.ArgumentMatchers.eq(7L)))
+                .thenReturn(reactor.core.publisher.Mono.empty());
+        AgentMemoryController controller = new AgentMemoryController(client);
+
+        controller.settings(schoolRequest("teacher")).block();
+        controller.settings(schoolRequest("student")).block();
+
+        org.mockito.Mockito.verify(client, org.mockito.Mockito.times(2)).getMemorySetting(
+                org.mockito.ArgumentMatchers.anyString(),
+                org.mockito.ArgumentMatchers.eq("SCHOOL"),
+                org.mockito.ArgumentMatchers.eq(7L));
+    }
+
+    @Test
     void forwardsConflictAsNoSideEffectWithoutRetryingReplacement() throws Exception {
         HttpServer server = HttpServer.create(new InetSocketAddress(0), 0);
         List<String> bodies = new ArrayList<>();
@@ -177,11 +196,15 @@ class AgentMemoryControllerTest {
     }
 
     private MockHttpServletRequest schoolRequest() {
+        return schoolRequest("school_admin");
+    }
+
+    private MockHttpServletRequest schoolRequest(String roleCode) {
         MockHttpServletRequest request = new MockHttpServletRequest();
         AuthCurrentUserVO user = new AuthCurrentUserVO();
         user.setAccountId(1L);
         user.setSchoolId(7L);
-        user.setRoleCode("school_admin");
+        user.setRoleCode(roleCode);
         request.setAttribute(AuthContext.CURRENT_USER_ATTRIBUTE, user);
         return request;
     }

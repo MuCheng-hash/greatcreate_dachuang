@@ -44,11 +44,15 @@ class RoleAuthorizationInterceptorTest {
     }
 
     @Test
-    void teacherAndStudentCanOnlyUseTheirDedicatedApis() throws Exception {
+    void teacherAndStudentCanUseTheirDedicatedApisAndStudentCanUseMemoryRoutes() throws Exception {
         assertTrue(call("/api/teacher/classes/mine", user("teacher", 8L)).allowed());
         assertFalse(call("/api/student/class-tasks", user("teacher", 8L)).allowed());
         assertTrue(call("/api/student/class-tasks", user("student", 8L)).allowed());
         assertFalse(call("/api/teacher/classes/mine", user("student", 8L)).allowed());
+        assertTrue(call("/api/ai/memory-settings", user("student", 8L)).allowed());
+        assertTrue(call("/api/ai/memories", user("student", 8L)).allowed());
+        assertFalse(call("/api/ai/memory-settings", user("student", null)).allowed());
+        assertFalse(call("/api/ai/qa/stream", user("student", 8L)).allowed());
     }
 
     private Result call(String path, AuthCurrentUserVO user) throws Exception {

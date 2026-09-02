@@ -22,15 +22,14 @@ public class PortalRouteController {
 /map	地图资源页
 /teaching-plans	AI 教学方案页
 /assistant	AI 助手问答页
-/agent-debug	Agent 调试/观测页面
 /profile	个人中心页
 这里是“服务器内部转发”，不是浏览器重定向
      */
     @GetMapping({
             "/login", "/register",
-            "/map", "/teaching-plans", "/classes", "/tasks", "/resource-discovery", "/assistant", "/agent-debug", "/profile",
+            "/map", "/teaching-plans", "/classes", "/tasks", "/resource-discovery", "/assistant", "/profile",
             "/student", "/student/home", "/student/learning-footprint", "/student/tasks", "/student/resource-discovery", "/student/assistant", "/student/map", "/student/profile", "/student-home", "/learning-footprint",
-            "/teacher", "/teacher/map", "/teacher/teaching-plans", "/teacher/classes", "/teacher/tasks", "/teacher/resource-discovery", "/teacher/assistant", "/teacher/agent-debug", "/teacher/profile"
+            "/teacher", "/teacher/map", "/teacher/teaching-plans", "/teacher/classes", "/teacher/tasks", "/teacher/resource-discovery", "/teacher/assistant", "/teacher/profile"
     })
     public String portal() {
         return "forward:/portal/index.html";

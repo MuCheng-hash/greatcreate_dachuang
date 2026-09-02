@@ -44,11 +44,7 @@ const adminState = {
     agentDebugAbortController: null,
     ragStatus: null,
     ragLastReindexReport: null,
-    ragRetrieveResult: null,
-    ragWebSources: [],
-    editingRagWebSourceId: null,
-    ragWebSourcePage: 1,
-    ragWebSourcePageSize: 10
+    ragRetrieveResult: null
 };
 
 const adminElements = {
@@ -700,7 +696,7 @@ function initializeRagKnowledgePanel() {
             <div>
                 <p class="eyebrow">Module 05</p>
                 <h2>RAG 知识库管理</h2>
-                <p class="panel-description">查看内容分块、向量索引、Qdrant 连接状态，并直接测试知识检索命中效果。</p>
+                <p class="panel-description">集中查看索引健康度、最近一次维护结果，并验证知识检索命中效果。</p>
             </div>
             <div class="panel-tools">
                 <button class="ghost-button" id="ragRefreshButton" type="button">刷新状态</button>
@@ -708,36 +704,22 @@ function initializeRagKnowledgePanel() {
             </div>
         </div>
 
-        <div class="rag-status-banner" id="ragStatusSummary">正在等待状态数据。</div>
-        <div class="agent-metric-grid">
-            <article class="agent-metric-card"><span>内容分块</span><strong id="ragChunkMetric">-</strong><small>全部可检索文本块</small></article>
-            <article class="agent-metric-card"><span>当前索引</span><strong id="ragIndexedMetric">-</strong><small>匹配当前模型与版本</small></article>
-            <article class="agent-metric-card"><span>失败分块</span><strong id="ragFailedMetric">-</strong><small>需要重建或检查配置</small></article>
-            <article class="agent-metric-card"><span>Qdrant</span><strong id="ragQdrantMetric">-</strong><small>向量库连接与点位</small></article>
+        <div class="rag-status-banner" id="ragStatusSummary" role="status">正在等待状态数据。</div>
+        <div class="rag-metric-grid">
+            <article class="rag-metric-card"><span>内容分块</span><strong id="ragChunkMetric">-</strong><small>全部可检索文本块</small></article>
+            <article class="rag-metric-card"><span>当前索引</span><strong id="ragIndexedMetric">-</strong><small>匹配当前模型与索引版本</small></article>
+            <article class="rag-metric-card rag-metric-card--alert"><span>待处理 / 失败</span><strong id="ragFailedMetric">-</strong><small>需要关注的异常分块</small></article>
+            <article class="rag-metric-card"><span>Qdrant 点位</span><strong id="ragQdrantMetric">-</strong><small>向量库连接与存储规模</small></article>
         </div>
 
         <div class="rag-grid">
-            <article class="table-card">
+            <article class="table-card rag-status-card">
                 <div class="card-topline"><h3>知识库索引状态</h3><span class="mini-stat">配置与连接</span></div>
                 <div id="ragStatusDetail" class="rag-detail-list"></div>
             </article>
-            <article class="table-card">
+            <article class="table-card rag-report-card">
                 <div class="card-topline"><h3>重建索引结果</h3><span class="mini-stat">最近一次</span></div>
                 <div id="ragReindexReport" class="rag-detail-list"></div>
-            </article>
-            <article class="table-card">
-                <div class="card-topline"><h3>权威 Web 来源白名单</h3><button class="ghost-button" id="ragWebSourceRefreshButton" type="button">刷新</button></div>
-                <form id="ragWebSourceForm" class="compact-form">
-                    <input id="ragWebSourceName" class="line-input" maxlength="120" placeholder="来源名称，例如 中国政府网">
-                    <input id="ragWebSourceDomain" class="line-input" maxlength="255" placeholder="HTTPS 域名，例如 www.gov.cn">
-                    <input id="ragWebSourceSort" class="line-input" type="number" min="0" value="100" placeholder="排序">
-                    <label class="check-row"><input id="ragWebSourceEnabled" type="checkbox" checked>启用</label>
-                    <button class="accent-button" id="ragWebSourceSubmitButton" type="submit">新增来源</button>
-                    <button class="ghost-button" id="ragWebSourceCancelButton" type="button" hidden>取消编辑</button>
-                </form>
-                <div class="table-shell"><table><thead><tr><th>名称</th><th>域名</th><th>状态</th><th>排序</th><th>操作</th></tr></thead><tbody id="ragWebSourceTable"></tbody></table></div>
-                <div class="inline-actions"><button class="ghost-button" id="ragWebSourcePrevButton" type="button">上一页</button><span id="ragWebSourcePageInfo">第 1 页</span><button class="ghost-button" id="ragWebSourceNextButton" type="button">下一页</button></div>
-                <p class="status-box">只有启用域名会在低召回时传给 Tavily 的 include_domains。</p>
             </article>
         </div>
 
@@ -786,19 +768,7 @@ function initializeRagKnowledgePanel() {
         ragTestThemeInput: document.querySelector("#ragTestThemeInput"),
         ragTestTopKInput: document.querySelector("#ragTestTopKInput"),
         ragTestRunButton: document.querySelector("#ragTestRunButton"),
-        ragTestResult: document.querySelector("#ragTestResult"),
-        ragWebSourceRefreshButton: document.querySelector("#ragWebSourceRefreshButton"),
-        ragWebSourceForm: document.querySelector("#ragWebSourceForm"),
-        ragWebSourceName: document.querySelector("#ragWebSourceName"),
-        ragWebSourceDomain: document.querySelector("#ragWebSourceDomain"),
-        ragWebSourceSort: document.querySelector("#ragWebSourceSort"),
-        ragWebSourceEnabled: document.querySelector("#ragWebSourceEnabled"),
-        ragWebSourceTable: document.querySelector("#ragWebSourceTable"),
-        ragWebSourceSubmitButton: document.querySelector("#ragWebSourceSubmitButton"),
-        ragWebSourceCancelButton: document.querySelector("#ragWebSourceCancelButton"),
-        ragWebSourcePrevButton: document.querySelector("#ragWebSourcePrevButton"),
-        ragWebSourceNextButton: document.querySelector("#ragWebSourceNextButton"),
-        ragWebSourcePageInfo: document.querySelector("#ragWebSourcePageInfo")
+        ragTestResult: document.querySelector("#ragTestResult")
     });
 }
 
@@ -910,33 +880,6 @@ function bindAdminEvents() {
     adminElements.agentDebugResetButton?.addEventListener("click", resetAgentDebug);
     adminElements.ragRefreshButton?.addEventListener("click", () => void loadRagStatus());
     adminElements.ragReindexButton?.addEventListener("click", () => void reindexRag());
-    adminElements.ragWebSourceRefreshButton?.addEventListener("click", () => void loadRagWebSources());
-    adminElements.ragWebSourceForm?.addEventListener("submit", event => {
-        event.preventDefault();
-        void createRagWebSource();
-    });
-    adminElements.ragWebSourceCancelButton?.addEventListener("click", resetRagWebSourceForm);
-    adminElements.ragWebSourcePrevButton?.addEventListener("click", () => {
-        adminState.ragWebSourcePage = Math.max(1, adminState.ragWebSourcePage - 1);
-        renderRagWebSources();
-    });
-    adminElements.ragWebSourceNextButton?.addEventListener("click", () => {
-        const totalPages = Math.max(1, Math.ceil(adminState.ragWebSources.length / adminState.ragWebSourcePageSize));
-        adminState.ragWebSourcePage = Math.min(totalPages, adminState.ragWebSourcePage + 1);
-        renderRagWebSources();
-    });
-    adminElements.ragWebSourceTable?.addEventListener("click", event => {
-        const button = event.target.closest("button[data-rag-web-source-action]");
-        if (!button) return;
-        const sourceId = parseNullableNumber(button.dataset.sourceId);
-        const source = adminState.ragWebSources.find(item => item.sourceId === sourceId);
-        if (!source) return;
-        if (button.dataset.ragWebSourceAction === "edit") {
-            beginEditRagWebSource(source);
-        } else if (button.dataset.ragWebSourceAction === "toggle") {
-            void toggleRagWebSource(source);
-        }
-    });
     document.querySelector("#ragTestForm")?.addEventListener("submit", event => {
         event.preventDefault();
         void runRagRetrieveTest();
@@ -1730,7 +1673,6 @@ async function loadRagStatus() {
         const status = await requestJson("/api/admin/rag/status");
         adminState.ragStatus = status || {};
         renderRagStatus();
-        await loadRagWebSources();
     } catch (error) {
         setGlobalStatus("RAG 状态异常", error.message || "RAG 状态读取失败。");
         if (adminElements.ragStatusSummary) adminElements.ragStatusSummary.textContent = error.message || "RAG 状态读取失败。";
@@ -1799,7 +1741,9 @@ function renderRagStatus() {
     }
     if (adminElements.ragChunkMetric) adminElements.ragChunkMetric.textContent = formatAgentNumber(chunks.total);
     if (adminElements.ragIndexedMetric) adminElements.ragIndexedMetric.textContent = formatAgentNumber(chunks.indexedForCurrentConfig);
-    if (adminElements.ragFailedMetric) adminElements.ragFailedMetric.textContent = formatAgentNumber(chunks.failed);
+    if (adminElements.ragFailedMetric) {
+        adminElements.ragFailedMetric.textContent = `${formatAgentNumber(chunks.pending)} / ${formatAgentNumber(chunks.failed)}`;
+    }
     if (adminElements.ragQdrantMetric) adminElements.ragQdrantMetric.textContent = qdrant.reachable ? `${formatAgentNumber(qdrant.pointCount)} points` : "不可用";
     if (adminElements.ragStatusDetail) {
         adminElements.ragStatusDetail.innerHTML = renderRagDetailRows([
@@ -1904,97 +1848,6 @@ function readCookie(name) {
     if (!item) return "";
     const value = item.slice(prefix.length);
     try { return decodeURIComponent(value); } catch { return value; }
-}
-
-async function loadRagWebSources() {
-    if (!adminElements.ragWebSourceTable) return;
-    try {
-        const sources = await requestJson("/api/admin/rag/web-sources");
-        adminState.ragWebSources = Array.isArray(sources) ? sources : [];
-        const totalPages = Math.max(1, Math.ceil(adminState.ragWebSources.length / adminState.ragWebSourcePageSize));
-        adminState.ragWebSourcePage = Math.min(adminState.ragWebSourcePage, totalPages);
-        renderRagWebSources();
-    } catch (error) {
-        adminElements.ragWebSourceTable.innerHTML = `<tr><td colspan="5">加载失败：${escapeHtml(error.message || "未知错误")}</td></tr>`;
-    }
-}
-
-function renderRagWebSources() {
-    if (!adminElements.ragWebSourceTable) return;
-    const sources = adminState.ragWebSources;
-    const totalPages = Math.max(1, Math.ceil(sources.length / adminState.ragWebSourcePageSize));
-    const start = (adminState.ragWebSourcePage - 1) * adminState.ragWebSourcePageSize;
-    const pageSources = sources.slice(start, start + adminState.ragWebSourcePageSize);
-    adminElements.ragWebSourceTable.innerHTML = pageSources.map(source => `<tr>
-            <td>${escapeHtml(source.displayName || "-")}</td>
-            <td>${escapeHtml(source.domain || "-")}</td>
-            <td>${source.enabled ? "启用" : "停用"}</td>
-            <td>${escapeHtml(source.sortOrder ?? 100)}</td>
-            <td class="inline-actions">
-                <button class="ghost-button" type="button" data-rag-web-source-action="edit" data-source-id="${escapeHtml(source.sourceId)}">编辑</button>
-                <button class="ghost-button" type="button" data-rag-web-source-action="toggle" data-source-id="${escapeHtml(source.sourceId)}">${source.enabled ? "停用" : "启用"}</button>
-            </td>
-        </tr>`).join("") || '<tr><td colspan="5">暂无权威 Web 来源；低召回时将跳过 Web Search。</td></tr>';
-    if (adminElements.ragWebSourcePageInfo) {
-        adminElements.ragWebSourcePageInfo.textContent = `第 ${adminState.ragWebSourcePage} / ${totalPages} 页，共 ${sources.length} 条`;
-    }
-    if (adminElements.ragWebSourcePrevButton) adminElements.ragWebSourcePrevButton.disabled = adminState.ragWebSourcePage <= 1;
-    if (adminElements.ragWebSourceNextButton) adminElements.ragWebSourceNextButton.disabled = adminState.ragWebSourcePage >= totalPages;
-}
-
-async function createRagWebSource() {
-    const domain = adminElements.ragWebSourceDomain?.value.trim();
-    if (!domain) {
-        setGlobalStatus("校验失败", "请输入 HTTPS 域名。");
-        return;
-    }
-    const editingSourceId = adminState.editingRagWebSourceId;
-    await requestJson(editingSourceId ? `/api/admin/rag/web-sources/${editingSourceId}` : "/api/admin/rag/web-sources", {
-        method: editingSourceId ? "PUT" : "POST",
-        body: {
-            displayName: adminElements.ragWebSourceName?.value.trim() || null,
-            domain,
-            sortOrder: parseNullableNumber(adminElements.ragWebSourceSort?.value) ?? 100,
-            enabled: Boolean(adminElements.ragWebSourceEnabled?.checked)
-        }
-    });
-    resetRagWebSourceForm();
-    setGlobalStatus("已保存", `权威 Web 来源已${editingSourceId ? "更新" : "新增"}，将于 Agent 缓存刷新后用于低召回检索。`);
-    await loadRagWebSources();
-}
-
-function beginEditRagWebSource(source) {
-    adminState.editingRagWebSourceId = source.sourceId;
-    if (adminElements.ragWebSourceName) adminElements.ragWebSourceName.value = source.displayName || "";
-    if (adminElements.ragWebSourceDomain) adminElements.ragWebSourceDomain.value = source.domain || "";
-    if (adminElements.ragWebSourceSort) adminElements.ragWebSourceSort.value = source.sortOrder ?? 100;
-    if (adminElements.ragWebSourceEnabled) adminElements.ragWebSourceEnabled.checked = Boolean(source.enabled);
-    if (adminElements.ragWebSourceSubmitButton) adminElements.ragWebSourceSubmitButton.textContent = "保存修改";
-    if (adminElements.ragWebSourceCancelButton) adminElements.ragWebSourceCancelButton.hidden = false;
-    adminElements.ragWebSourceName?.focus();
-}
-
-function resetRagWebSourceForm() {
-    adminState.editingRagWebSourceId = null;
-    adminElements.ragWebSourceForm?.reset();
-    if (adminElements.ragWebSourceSort) adminElements.ragWebSourceSort.value = "100";
-    if (adminElements.ragWebSourceEnabled) adminElements.ragWebSourceEnabled.checked = true;
-    if (adminElements.ragWebSourceSubmitButton) adminElements.ragWebSourceSubmitButton.textContent = "新增来源";
-    if (adminElements.ragWebSourceCancelButton) adminElements.ragWebSourceCancelButton.hidden = true;
-}
-
-async function toggleRagWebSource(source) {
-    await requestJson(`/api/admin/rag/web-sources/${source.sourceId}`, {
-        method: "PUT",
-        body: {
-            displayName: source.displayName,
-            domain: source.domain,
-            sortOrder: source.sortOrder,
-            enabled: !source.enabled
-        }
-    });
-    setGlobalStatus("已更新", `来源 ${source.domain} 已${source.enabled ? "停用" : "启用"}。`);
-    await loadRagWebSources();
 }
 
 function readCsrfToken() {
@@ -2908,6 +2761,7 @@ function bindUserManagementEvents() {
     });
     adminElements.profileResetButton?.addEventListener("click", resetUserProfileForm);
     adminElements.profileSearchButton?.addEventListener("click", () => void loadUserProfiles());
+    adminElements.profileSchoolSelect?.addEventListener("change", () => void loadUserClasses(parseNullableNumber(adminElements.profileSchoolSelect.value)));
     adminElements.studentImportButton?.addEventListener("click", () => void importStudentsFromText());
     adminElements.roleForm?.addEventListener("submit", event => {
         event.preventDefault();
@@ -2937,8 +2791,10 @@ async function loadUserRoles() {
     renderRoleTable();
 }
 
-async function loadUserClasses() {
-    adminState.userClasses = await requestJson("/api/admin/classes");
+async function loadUserClasses(schoolId = null) {
+    const query = schoolId ? `?schoolId=${encodeURIComponent(schoolId)}` : "";
+    adminState.userClasses = schoolId ? await requestJson(`/api/admin/classes${query}`) : [];
+    renderChecklist(adminElements.profileClassSelect, adminState.userClasses, "classId", item => `${item.className}${item.gradeName ? ` · ${item.gradeName}` : ""}`);
 }
 
 async function loadUserAccounts() {
@@ -3200,8 +3056,10 @@ function fillUserProfileForm(profile) {
     adminElements.profileStudentNoInput.value = profile.studentNo || "";
     adminElements.profileGradeInput.value = profile.gradeName || "";
     const classIds = new Set((profile.classIds || []).map(String));
-    adminElements.profileClassSelect.querySelectorAll('input[type="checkbox"]').forEach(input => {
-        input.checked = classIds.has(input.value);
+    void loadUserClasses(profile.schoolId).then(() => {
+        adminElements.profileClassSelect.querySelectorAll('input[type="checkbox"]').forEach(input => {
+            input.checked = classIds.has(input.value);
+        });
     });
 }
 

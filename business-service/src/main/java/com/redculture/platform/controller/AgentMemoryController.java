@@ -41,6 +41,7 @@ public class AgentMemoryController {
     private static final String SCHOOL_SCOPE = "SCHOOL";
     private static final Set<String> MEMORY_TYPES = Set.of("PROFILE", "TASK");
     private static final Set<String> MEMORY_STATUSES = Set.of("pending", "active", "deleted");
+    private static final Set<String> MEMORY_USER_ROLES = Set.of("school_admin", "teacher", "student");
 
     private final AgentRuntimeClient agentRuntimeClient;
 
@@ -198,7 +199,7 @@ public class AgentMemoryController {
         AuthCurrentUserVO user = AuthContext.currentUser(request);
         if (user == null
                 || user.getSchoolId() == null
-                || !"school_admin".equals(user.getRoleCode())) {
+                || !MEMORY_USER_ROLES.contains(user.getRoleCode())) {
             throw new IllegalArgumentException("school account is required");
         }
         return user;

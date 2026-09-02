@@ -1175,26 +1175,42 @@ body.modal-open { overflow: hidden; }
    RAG 知识库
    ============================================================ */
 .rag-status-banner {
-  margin-bottom: 14px; padding: 12px 16px; border: 1px solid var(--line);
-  border-radius: 10px; background: var(--surface); color: var(--muted);
-  font-size: 13px; line-height: 1.6; box-shadow: var(--shadow-sm);
+  position: relative; margin-bottom: 16px; padding: 13px 18px 13px 42px; border: 1px solid #c9d7cd;
+  border-radius: 8px; background: #f4f8f5; color: #486052;
+  font-size: 13px; line-height: 1.6;
 }
-.rag-grid { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 16px; margin-bottom: 16px; align-items: start; }
-.rag-detail-list { display: grid; gap: 0; padding: 6px 18px 16px; }
+.rag-status-banner::before {
+  content: ""; position: absolute; left: 18px; top: 50%; width: 8px; height: 8px;
+  border-radius: 50%; transform: translateY(-50%); background: var(--green); box-shadow: 0 0 0 4px rgba(47, 108, 75, .12);
+}
+.rag-metric-grid { display: grid; grid-template-columns: repeat(4, minmax(0,1fr)); gap: 12px; margin-bottom: 18px; }
+.rag-metric-card {
+  position: relative; display: grid; gap: 6px; min-height: 132px; padding: 17px 18px 16px;
+  border: 1px solid var(--line); border-radius: 8px; background: var(--surface); box-shadow: var(--shadow-sm); overflow: hidden;
+}
+.rag-metric-card::before { content: ""; position: absolute; top: 0; left: 0; width: 100%; height: 3px; background: var(--green); }
+.rag-metric-card--alert::before { background: var(--red); }
+.rag-metric-card span { color: var(--muted); font-size: 13px; font-weight: 700; }
+.rag-metric-card strong { color: var(--text); font-size: 29px; line-height: 1.15; }
+.rag-metric-card small { margin-top: auto; color: var(--muted); font-size: 12px; line-height: 1.45; }
+.rag-grid { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(320px, .8fr); gap: 16px; margin-bottom: 16px; align-items: stretch; }
+.rag-grid .table-card { min-width: 0; }
+.rag-detail-list { display: grid; gap: 0; padding: 4px 18px 16px; }
 .rag-detail-row {
-  display: flex; align-items: baseline; justify-content: space-between; gap: 14px;
-  padding: 10px 0; border-bottom: 1px dashed var(--line); font-size: 13px;
+  display: grid; grid-template-columns: minmax(110px, .75fr) minmax(0, 1.25fr); align-items: baseline; gap: 14px;
+  padding: 11px 0; border-bottom: 1px dashed var(--line); font-size: 13px;
 }
 .rag-detail-row:last-child { border-bottom: 0; }
 .rag-detail-row span { color: var(--muted); }
-.rag-detail-row strong { text-align: right; word-break: break-all; }
+.rag-detail-row strong { color: var(--text); text-align: right; word-break: break-word; }
 
-.rag-test-card { margin-top: 16px; }
-.rag-test-layout { display: grid; grid-template-columns: 360px minmax(0,1fr); gap: 18px; padding: 18px; }
+.rag-test-card { margin-top: 2px; }
+.rag-test-layout { display: grid; grid-template-columns: minmax(300px, 350px) minmax(0,1fr); gap: 0; padding: 0; }
+.rag-test-form { padding: 18px; border-right: 1px solid var(--line); background: #fafbf9; }
 .rag-test-form label { display: grid; gap: 7px; margin-bottom: 12px; color: #455149; font-size: 13px; font-weight: 600; }
 .rag-test-form textarea { font-size: 13px; }
-.rag-test-result { min-height: 260px; }
-.rag-result-summary { margin-bottom: 12px; font-size: 13px; color: var(--muted); }
+.rag-test-result { min-height: 286px; padding: 18px; }
+.rag-result-summary { display: flex; flex-wrap: wrap; gap: 6px 14px; margin-bottom: 14px; padding-bottom: 12px; border-bottom: 1px solid var(--line); font-size: 13px; color: var(--muted); }
 .rag-result-summary strong { color: var(--text); }
 .rag-result-section { margin-bottom: 14px; }
 .rag-result-section h4 { margin-bottom: 8px; font-size: 13px; color: #455149; }
@@ -1365,12 +1381,14 @@ body.modal-open { overflow: hidden; }
   .topbar-title p:last-child { display: none; }
   .admin-content { padding: 16px 14px 28px; }
   .overview-strip { grid-template-columns: repeat(2, minmax(0,1fr)); }
-  .agent-metric-grid, .agent-debug-metrics { grid-template-columns: repeat(2, minmax(0,1fr)); }
+  .agent-metric-grid, .agent-debug-metrics, .rag-metric-grid { grid-template-columns: repeat(2, minmax(0,1fr)); }
 }
 
 @media (max-width: 720px) {
   .workspace-grid, .school-map-shell, .agent-debug-layout, .rag-test-layout,
   .agent-debug-grid, .agent-ops-grid, .rag-grid { grid-template-columns: 1fr; }
+  .rag-metric-card { min-height: 116px; }
+  .rag-test-form { border-right: 0; border-bottom: 1px solid var(--line); }
   .field-grid.two-col { grid-template-columns: 1fr; }
   .panel-heading { flex-direction: column; }
   .panel-tools { justify-content: flex-start; }

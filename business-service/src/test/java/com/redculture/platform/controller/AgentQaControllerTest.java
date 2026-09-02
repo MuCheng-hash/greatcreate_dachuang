@@ -90,6 +90,23 @@ class AgentQaControllerTest {
     }
 
     @Test
+    void rejectsDebugRequestsFromSchoolAccounts() throws Exception {
+        AgentQaService agentQaService = mock(AgentQaService.class);
+        AuthCurrentUserVO user = new AuthCurrentUserVO();
+        user.setRoleCode("teacher");
+        user.setSchoolId(1L);
+
+        MockMvc mockMvc = MockMvcBuilders.standaloneSetup(new AgentQaController(agentQaService)).build();
+
+        mockMvc.perform(post("/api/ai/qa/ask")
+                        .requestAttr(AuthContext.CURRENT_USER_ATTRIBUTE, user)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"question\":\"测试\",\"debug\":true}"))
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.message").value("agent debug requires platform administrator"));
+    }
+
+    @Test
     void exposesTurnCancellationForCurrentSchoolUser() throws Exception {
         AgentQaService agentQaService = mock(AgentQaService.class);
         AuthCurrentUserVO user = new AuthCurrentUserVO();

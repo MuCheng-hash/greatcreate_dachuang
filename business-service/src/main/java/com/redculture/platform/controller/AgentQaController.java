@@ -47,6 +47,9 @@ public class AgentQaController {
         if (currentUser == null) {
             return response(HttpStatus.UNAUTHORIZED, "school account is required");
         }
+        if (Boolean.TRUE.equals(request.getDebug()) && !"platform_admin".equals(currentUser.getRoleCode())) {
+            return response(HttpStatus.FORBIDDEN, "agent debug requires platform administrator");
+        }
         return Mono.defer(() -> agentQaService.ask(request, currentUser))
                 .map(value -> ResponseEntity.ok(ApiResponse.success(value)))
                 .onErrorResume(error -> responseError(error, "agent request failed"));
@@ -65,6 +68,14 @@ public class AgentQaController {
                     "auth_required",
                     "school account is required",
                     request == null ? null : request.getClientTurnId(),
+                    false
+            );
+        }
+        if (Boolean.TRUE.equals(request.getDebug()) && !"platform_admin".equals(currentUser.getRoleCode())) {
+            return errorEvents(
+                    "agent_debug_forbidden",
+                    "agent debug requires platform administrator",
+                    request.getClientTurnId(),
                     false
             );
         }
