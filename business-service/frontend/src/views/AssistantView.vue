@@ -368,11 +368,11 @@ watch(threadId, (value) => {
 });
 
 function storageKey() {
-  return `school-portal-assistant-session:${auth.user?.schoolId || "unknown"}`;
+  return `school-portal-assistant-session:${assistantIdentityKey()}`;
 }
 
 function conversationStorageKey() {
-  return `school-portal-assistant-conversation:${auth.user?.schoolId || "unknown"}`;
+  return `school-portal-assistant-conversation:${assistantIdentityKey()}`;
 }
 
 function teachingContextStorageKey() {
@@ -467,7 +467,13 @@ function generationStatusClass(status?: string | null): string {
 }
 
 function threadStorageKey() {
-  return `school-portal-assistant-thread:${auth.user?.schoolId || "unknown"}`;
+  return `school-portal-assistant-thread:${assistantIdentityKey()}`;
+}
+
+function assistantIdentityKey(): string {
+  const schoolId = auth.user?.schoolId || "unknown";
+  const accountId = auth.user?.accountId || auth.user?.username || "unknown";
+  return `${schoolId}:${accountId}`;
 }
 
 function loadThreadId() {
@@ -759,7 +765,10 @@ async function recoverPersistedAssistantMessage(
   assistantMessage: AssistantMessage,
   userText: string,
 ): Promise<AssistantRecoveryOutcome> {
-  for (const delay of [0, 120, 300]) {
+  // The stream can drop just before the Agent persists its final response.
+  // Keep polling a known running turn long enough for that durable result to
+  // become available instead of immediately presenting a false failure.
+  for (const delay of [0, 200, 500, 1000, 2000, 4000]) {
     if (delay) await new Promise<void>((resolve) => window.setTimeout(resolve, delay));
     try {
       const recovery = await api.get<AssistantConversationTurnRecovery>(
@@ -803,7 +812,9 @@ async function recoverPersistedAssistantMessage(
         });
       }
       if (recovery.turnStatus === "cancelled") return "cancelled";
+      if (recovery.turnStatus === "running") continue;
       if (recovery.retryable) return "retryable";
+      return "none";
     } catch {
       // A transient recovery-read failure is retried before exposing manual retry.
     }

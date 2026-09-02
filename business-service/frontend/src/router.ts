@@ -20,7 +20,6 @@ const routes = [
   { path: "/teacher/tasks", name: "teacher-tasks", component: () => import("@/views/TaskCenterView.vue"), meta: { title: "学习任务", teacher: true } },
   { path: "/teacher/resource-discovery", name: "teacher-resource-discovery", component: () => import("@/views/ResourceDiscoveryView.vue"), meta: { title: "资源发现", teacher: true } },
   { path: "/teacher/assistant", name: "teacher-assistant", component: () => import("@/views/AssistantView.vue"), meta: { title: "智能问答", teacher: true } },
-  { path: "/teacher/agent-debug", name: "teacher-agent-debug", component: () => import("@/views/AgentDebugView.vue"), meta: { title: "Agent 调试", teacher: true } },
   { path: "/teacher/profile", name: "teacher-profile", component: () => import("@/views/ProfileView.vue"), meta: { title: "个人中心", teacher: true } },
   { path: "/map", name: "map", component: () => import("@/views/MapView.vue"), meta: { title: "地图资源" } },
   { path: "/student-home", name: "student-home", component: () => import("@/views/StudentHomeView.vue"), meta: { title: "学生首页", student: true } },
@@ -30,7 +29,6 @@ const routes = [
   { path: "/tasks", name: "tasks", component: () => import("@/views/TaskCenterView.vue"), meta: { title: "学习任务" } },
   { path: "/resource-discovery", name: "resource-discovery", component: () => import("@/views/ResourceDiscoveryView.vue"), meta: { title: "资源发现" } },
   { path: "/assistant", name: "assistant", component: () => import("@/views/AssistantView.vue"), meta: { title: "智能问答" } },
-  { path: "/agent-debug", name: "agent-debug", component: () => import("@/views/AgentDebugView.vue"), meta: { title: "Agent 调试" } },
   { path: "/profile", name: "profile", component: () => import("@/views/ProfileView.vue"), meta: { title: "个人中心" } },
   // ---- 管理后台页面 ----
   {

@@ -271,23 +271,18 @@ function statusLabel(status) {
   <AppShell title="教学方案" subtitle="结合本校周边资源生成可落地的课堂与实践活动方案">
     <div class="plan-layout">
       <section class="page-panel plan-form-panel">
-        <div class="panel-header"><div><h2>方案设置</h2><p>{{ schoolStore.school?.schoolName }}</p></div><FilePlus2 :size="21" /></div>
+        <div class="panel-header plan-form-header"><div><span class="plan-kicker">方案配置</span><h2>生成一份教学方案</h2><p>{{ schoolStore.school?.schoolName || "当前学校" }} · 按教学需要选择资源与活动形式</p></div><span class="form-step">01</span></div>
         <form class="panel-body form-stack" @submit.prevent="generate">
-          <label>适用年级<input v-model="form.grade" placeholder="例如：四年级" /></label>
-          <label>教学主题<input v-model="form.theme" maxlength="200" placeholder="例如：敬老志愿服务" /></label>
-          <label>教学目标<textarea v-model="form.objectives" maxlength="2000" rows="3" placeholder="可填写知识、能力与情感目标；支持换行填写多个目标" /></label>
-          <label>活动类型<select v-model="form.activityType"><option value="VOLUNTEER_SERVICE">志愿服务</option><option value="FIELD_TRIP">实地研学</option><option value="CLASSROOM">课堂教学</option><option value="LABOR_PRACTICE">劳动实践</option><option value="SCHOOL_BASED_COURSE">校本课程</option></select></label>
-          <label>活动时长（分钟）<input v-model.number="form.durationMinutes" type="number" min="20" step="10" /></label>
-          <label>生成模型<select v-model="selectedModelId" :disabled="loading"><option value="">系统默认</option><option v-for="item in structuredModels" :key="item.id" :value="item.id">{{ item.displayName }} · {{ item.provider }}</option></select></label>
-          <fieldset class="resource-picker"><legend>关联思政资源（最多 20 个）</legend><label class="resource-option"><input type="checkbox" :checked="form.resourceIds.length === 0" @change="form.resourceIds = []" />不指定资源</label><label v-for="item in schoolStore.resources" :key="item.resourceId" class="resource-option"><input type="checkbox" :checked="resourceSelected(item.resourceId)" @change="toggleResource(item.resourceId)" /><span>{{ item.resource?.resourceName || '未命名资源' }}</span><small>{{ item.distanceMeters ? `${item.distanceMeters} 米` : '' }}</small></label><p v-if="form.resourceIds.length" class="selected-summary">已选：{{ form.resourceIds.map(resourceName).join('、') }}</p></fieldset>
-          <label class="check-field"><input v-model="form.practiceRequired" type="checkbox" /><span>包含线下实践活动</span></label>
+          <section class="form-section"><div class="section-label"><span>基础信息</span><small>确定教学对象与主题</small></div><div class="form-grid compact-grid"><label>适用年级<input v-model="form.grade" placeholder="例如：四年级" /></label><label>活动时长（分钟）<input v-model.number="form.durationMinutes" type="number" min="20" step="10" /></label></div><label>教学主题<input v-model="form.theme" maxlength="200" placeholder="例如：敬老志愿服务" /></label><label>教学目标<textarea v-model="form.objectives" maxlength="2000" rows="3" placeholder="可填写知识、能力与情感目标；支持换行填写多个目标" /></label></section>
+          <section class="form-section"><div class="section-label"><span>活动方式</span><small>选择实施形式与生成模型</small></div><div class="form-grid compact-grid"><label>活动类型<select v-model="form.activityType"><option value="VOLUNTEER_SERVICE">志愿服务</option><option value="FIELD_TRIP">实地研学</option><option value="CLASSROOM">课堂教学</option><option value="LABOR_PRACTICE">劳动实践</option><option value="SCHOOL_BASED_COURSE">校本课程</option></select></label><label>生成模型<select v-model="selectedModelId" :disabled="loading"><option value="">系统默认</option><option v-for="item in structuredModels" :key="item.id" :value="item.id">{{ item.displayName }} · {{ item.provider }}</option></select></label></div><label class="check-field"><input v-model="form.practiceRequired" type="checkbox" /><span>包含线下实践活动</span></label></section>
+          <section class="form-section resource-section"><div class="section-label"><span>关联资源</span><small>最多选择 20 个，可不指定</small></div><fieldset class="resource-picker"><legend class="sr-only">关联思政资源</legend><label class="resource-option resource-option-none"><input type="checkbox" :checked="form.resourceIds.length === 0" @change="form.resourceIds = []" /><span>不指定资源，由系统综合推荐</span></label><div class="resource-options"><label v-for="item in schoolStore.resources" :key="item.resourceId" class="resource-option"><input type="checkbox" :checked="resourceSelected(item.resourceId)" @change="toggleResource(item.resourceId)" /><span>{{ item.resource?.resourceName || '未命名资源' }}</span><small>{{ item.distanceMeters ? `${item.distanceMeters} 米` : '校周边资源' }}</small></label></div><p v-if="form.resourceIds.length" class="selected-summary">已选 {{ form.resourceIds.length }} 项：{{ form.resourceIds.map(resourceName).join('、') }}</p></fieldset></section>
           <button v-if="!loading" class="primary-button full-button" type="submit"><Sparkles :size="18" />生成教学方案</button>
           <button v-else class="secondary-button full-button" type="button" @click="stopGeneration"><Square :size="16" />停止生成</button>
         </form>
       </section>
 
       <section class="page-panel result-panel">
-        <div class="panel-header"><div><h2>生成结果</h2><p>内容可保存为个人草稿，后续编辑和复用。</p></div><div class="result-actions"><button class="secondary-button" type="button" :disabled="!generated || saving" @click="editing ? updatePlan() : saveDraft()"><Save :size="17" />{{ saving ? "保存中" : (editing ? "更新方案" : "保存草稿") }}</button><button v-if="editing" class="ghost-button" type="button" @click="editing = false; selectedPlanId = null"><RefreshCw :size="16" />新建</button></div></div>
+        <div class="panel-header result-header"><div><span class="plan-kicker">方案预览</span><h2>{{ loading ? "正在生成" : (generated ? "教学方案" : "等待生成") }}</h2><p>{{ generated ? "支持保存、编辑、复制与导出。" : "生成后的课程结构、资源依据和实践安排将在这里呈现。" }}</p></div><div class="result-actions"><button class="secondary-button" type="button" :disabled="!generated || saving" @click="editing ? updatePlan() : saveDraft()"><Save :size="17" />{{ saving ? "保存中" : (editing ? "更新方案" : "保存草稿") }}</button><button v-if="editing" class="ghost-button" type="button" @click="editing = false; selectedPlanId = null"><RefreshCw :size="16" />新建</button></div></div>
         <div class="panel-body result-scroll">
           <InlineNotice v-if="notice.text" :tone="notice.tone">{{ notice.text }}</InlineNotice>
           <div v-if="loading || generated" :class="{ 'streaming-plan': loading }" aria-live="polite">
@@ -300,7 +295,7 @@ function statusLabel(status) {
             </div>
             <div v-else-if="loading" class="streaming-copy">正在等待结构化内容<span class="streaming-caret"></span></div>
           </div>
-          <div v-else class="empty-state"><BookOpenCheck :size="40" /><span>填写左侧参数后生成教学方案</span></div>
+          <div v-else class="empty-state plan-empty"><span class="empty-icon"><BookOpenCheck :size="28" /></span><strong>等待生成教学方案</strong><span>填写左侧基础信息，选择活动形式后即可开始生成。</span></div>
         </div>
       </section>
     </div>
@@ -316,30 +311,47 @@ function statusLabel(status) {
 </template>
 
 <style scoped>
-.plan-layout { display: grid; grid-template-columns: minmax(280px,360px) minmax(0,1fr); gap: 16px; }
-.panel-header > svg { color: var(--green); }
-.check-field { display: flex; align-items: center; gap: 9px; }
-.check-field input { width: 17px; min-height: 17px; }
-.resource-picker { border: 1px solid var(--line); padding: 10px; display: grid; gap: 7px; max-height: 190px; overflow-y: auto; }
-.resource-picker legend { font-size: 12px; color: var(--muted); padding: 0 4px; }
-.resource-option { display: flex; align-items: center; gap: 7px; font-size: 12px; }
-.resource-option small { margin-left: auto; color: var(--muted); }
-.selected-summary { margin: 3px 0 0; color: var(--green); font-size: 11px; line-height: 1.5; }
-.result-actions { display: flex; gap: 7px; }
+.plan-layout { display: grid; grid-template-columns: minmax(380px, 470px) minmax(0, 1fr); align-items: start; gap: 20px; }
+.plan-form-panel, .result-panel { overflow: hidden; }
+.plan-form-header, .result-header { min-height: 112px; }
+.plan-kicker { display: block; margin-bottom: 5px; color: var(--red); font-size: 11px; font-weight: 800; letter-spacing: .12em; }
+.form-step { display: grid; place-items: center; width: 36px; height: 36px; border: 1px solid #d8d1c2; border-radius: 50%; color: var(--green); font-family: var(--font-display); font-size: 14px; }
+.form-stack { gap: 20px; }
+.form-section { display: grid; gap: 13px; }
+.form-section + .form-section { padding-top: 19px; border-top: 1px solid var(--line); }
+.section-label { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.section-label span { color: var(--text); font-family: var(--font-display); font-size: 15px; font-weight: 700; }
+.section-label small { color: var(--muted); font-size: 12px; }
+.compact-grid { gap: 12px; }
+.check-field { display: flex; align-items: center; gap: 9px; width: fit-content; padding: 9px 11px; border-radius: 7px; background: var(--green-soft); color: var(--green); font-size: 13px; }
+.check-field input { width: 17px; min-height: 17px; margin: 0; accent-color: var(--green); }
+.resource-section { gap: 11px; }
+.resource-picker { min-width: 0; margin: 0; padding: 0; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; background: #fff; }
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; }
+.resource-options { display: grid; max-height: 178px; overflow-y: auto; border-top: 1px solid var(--line); }
+.resource-option { display: grid; grid-template-columns: 18px minmax(0, 1fr) auto; align-items: center; gap: 9px; min-height: 42px; padding: 8px 11px; border-bottom: 1px solid #eee9dd; color: var(--text); font-size: 12px; font-weight: 500; }
+.resource-option:last-child { border-bottom: 0; }
+.resource-option:hover { background: #faf8f1; }
+.resource-option input { width: 16px; min-height: 16px; margin: 0; accent-color: var(--green); }
+.resource-option span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.resource-option small { color: var(--muted); font-size: 11px; white-space: nowrap; }
+.resource-option-none { grid-template-columns: 18px minmax(0, 1fr); background: #faf8f1; color: #536057; }
+.selected-summary { margin: 0; padding: 9px 11px; border-top: 1px solid var(--line); background: var(--green-soft); color: var(--green); font-size: 12px; line-height: 1.55; }
+.result-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 7px; }
 .icon-button { border: 1px solid var(--line); background: #fff; padding: 5px 7px; margin-right: 5px; cursor: pointer; }
-.result-panel { min-height: 650px; }
-.result-scroll { max-height: calc(100vh - 170px); overflow-y: auto; }
-.streaming-plan { min-height: 460px; padding: 18px 0; }
+.result-panel { position: sticky; top: 91px; min-height: 680px; }
+.result-scroll { max-height: calc(100vh - 195px); overflow-y: auto; }
+.streaming-plan { min-height: 500px; padding: 18px 0; }
 .streaming-status { display: flex; align-items: center; gap: 8px; color: var(--green); font-size: 13px; font-weight: 700; }
 .streaming-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--red); animation: pulse 1.1s ease-in-out infinite; }
 .streaming-copy { margin-top: 18px; white-space: pre-wrap; color: var(--text); line-height: 1.85; font-size: 15px; }
 .streaming-caret { display: inline-block; width: 2px; height: 1.1em; margin-left: 3px; vertical-align: -2px; background: var(--red); animation: blink .8s steps(1) infinite; }
 @keyframes pulse { 50% { opacity: .35; transform: scale(.8); } }
 @keyframes blink { 50% { opacity: 0; } }
-.generated-plan { margin-top: 18px; }
+.generated-plan { max-width: 850px; margin: 18px auto 0; }
 .generated-plan header { padding-bottom: 18px; border-bottom: 1px solid var(--line); }
 .generated-plan header > div { display: flex; gap: 7px; }
-.generated-plan header h2 { margin: 12px 0 0; font-size: 24px; }
+.generated-plan header h2 { margin: 12px 0 0; font-size: 25px; }
 .generated-plan section { padding: 18px 0; border-bottom: 1px solid var(--line); }
 .generated-plan section h3 { margin-bottom: 10px; font-size: 15px; color: var(--green); }
 .generated-plan ul { display: grid; gap: 8px; margin: 0; padding-left: 20px; line-height: 1.7; }
@@ -347,13 +359,19 @@ function statusLabel(status) {
 .citation-list { display: grid; gap: 8px; }
 .citation-list article { padding: 12px; border-left: 3px solid var(--red); background: #f8f9f7; }
 .citation-list p { margin: 6px 0 0; color: var(--muted); font-size: 13px; line-height: 1.6; }
-.plan-library { margin-top: 16px; }
-.plan-filters { display: flex; flex-wrap: wrap; gap: 8px; padding: 0 18px 14px; }
+.plan-empty { min-height: 500px; }
+.plan-empty strong { color: var(--text); font-family: var(--font-display); font-size: 18px; }
+.plan-empty > span:last-child { max-width: 290px; font-size: 13px; line-height: 1.7; }
+.empty-icon { display: grid; place-items: center; width: 58px; height: 58px; border: 1px solid #cdd8d0; border-radius: 50%; background: var(--green-soft); color: var(--green); }
+.plan-library { margin-top: 20px; overflow: hidden; }
+.plan-filters { display: grid; grid-template-columns: 120px minmax(180px, 1fr) minmax(180px, 1fr) 148px 148px auto auto; gap: 9px; padding: 16px 20px; border-bottom: 1px solid var(--line); background: #faf8f1; }
 .plan-filters input, .plan-filters select { min-height: 34px; border: 1px solid var(--line); padding: 0 9px; background: #fff; }
 .pagination { display: flex; justify-content: center; align-items: center; gap: 14px; padding: 14px; }
 .plan-table-wrap { overflow-x: auto; }
 table { width: 100%; border-collapse: collapse; min-width: 680px; }
 th, td { padding: 13px 18px; border-bottom: 1px solid var(--line); text-align: left; font-size: 14px; }
 th { color: var(--muted); background: #f7f8f6; font-size: 12px; }
-@media (max-width: 1080px) { .plan-layout { grid-template-columns: 1fr; } .result-panel { min-height: 520px; } .result-scroll { max-height: none; } }
+@media (max-width: 1240px) { .plan-layout { grid-template-columns: minmax(350px, 410px) minmax(0, 1fr); } .plan-filters { grid-template-columns: 120px minmax(160px, 1fr) minmax(160px, 1fr) 132px 132px; } }
+@media (max-width: 1080px) { .plan-layout { grid-template-columns: 1fr; } .result-panel { position: static; min-height: 540px; } .result-scroll { max-height: none; } .plan-empty { min-height: 340px; } .plan-filters { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+@media (max-width: 640px) { .plan-form-header, .result-header { min-height: auto; } .section-label { align-items: flex-start; flex-direction: column; gap: 3px; } .result-actions { justify-content: flex-start; width: 100%; } .compact-grid, .plan-filters { grid-template-columns: 1fr; } .resource-option { grid-template-columns: 18px minmax(0, 1fr); } .resource-option small { grid-column: 2; } .plan-empty { min-height: 280px; } }
 </style>

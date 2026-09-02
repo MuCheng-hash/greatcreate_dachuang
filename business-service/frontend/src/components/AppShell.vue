@@ -1,7 +1,7 @@
 <script setup>
 import { computed } from "vue";
 import { useRoute, useRouter } from "vue-router";
-import { Bot, Bug, ClipboardList, Compass, GraduationCap, History, LogOut, Map, NotebookPen, UserRound } from "@lucide/vue";
+import { Bot, ClipboardList, Compass, GraduationCap, History, LogOut, Map, NotebookPen, UserRound } from "@lucide/vue";
 import { useAuthStore } from "@/stores/auth";
 
 defineProps({ title: { type: String, required: true }, subtitle: { type: String, default: "" } });
@@ -16,7 +16,6 @@ const teacherNavItems = [
   { to: "/teacher/tasks", label: "学习任务", icon: ClipboardList },
   { to: "/teacher/resource-discovery", label: "资源发现", icon: Compass },
   { to: "/teacher/assistant", label: "智能问答", icon: Bot },
-  { to: "/teacher/agent-debug", label: "Agent 调试", icon: Bug },
   { to: "/teacher/profile", label: "个人中心", icon: UserRound }
 ];
 const studentNavItems = [

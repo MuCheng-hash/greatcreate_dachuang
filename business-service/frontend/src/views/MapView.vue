@@ -19,6 +19,8 @@ const layers = reactive({ resources: true, redCulture: true, connections: true }
 let map;
 let AMapRef;
 let overlays = [];
+let routeOverlay = null;
+const routeLoading = ref(false);
 
 const selectedTitle = computed(() => {
   if (selected.value?.kind === "school") return schoolStore.school?.schoolName;
@@ -63,6 +65,44 @@ function initializeMap() {
 function clearOverlays() {
   if (map && overlays.length) map.remove(overlays);
   overlays = [];
+}
+
+function clearRoute() {
+  if (map && routeOverlay) map.remove(routeOverlay);
+  routeOverlay = null;
+}
+
+function planRoute(item) {
+  const school = schoolStore.school;
+  const resource = item?.resource || item;
+  if (!map || !AMapRef || !school?.longitude || !school?.latitude || !resource?.longitude || !resource?.latitude) {
+    mapStatus.value = "路线所需坐标不完整";
+    return;
+  }
+  routeLoading.value = true;
+  mapStatus.value = "正在规划路线";
+  clearRoute();
+  AMapRef.plugin(["AMap.Driving"], () => {
+    const driving = new AMapRef.Driving({ policy: AMapRef.DrivingPolicy.LEAST_TIME });
+    driving.search(
+      [Number(school.longitude), Number(school.latitude)],
+      [Number(resource.longitude), Number(resource.latitude)],
+      (status, result) => {
+        routeLoading.value = false;
+        if (status !== "complete" || !result?.routes?.length) {
+          mapStatus.value = "暂未找到可用路线";
+          return;
+        }
+        const path = result.routes[0].steps.flatMap((step) => step.path || []);
+        routeOverlay = new AMapRef.Polyline({ path, strokeColor: "#26734d", strokeWeight: 6, strokeOpacity: 0.85, showDir: true });
+        map.add(routeOverlay);
+        map.setFitView([routeOverlay], false, [80, 80, 80, 80], 16);
+        const distance = result.routes[0].distance;
+        const duration = result.routes[0].time;
+        mapStatus.value = `路线已规划 · ${distance >= 1000 ? `${(distance / 1000).toFixed(1)} 公里` : `${distance} 米`} · ${Math.ceil(duration / 60)} 分钟`;
+      }
+    );
+  });
 }
 
 function renderOverlays() {
@@ -245,6 +285,7 @@ function distanceText(meters) {
               <div><dt>活动建议</dt><dd>{{ selected.detail?.activitySuggestion || "暂无" }}</dd></div>
               <div><dt>数据来源</dt><dd>{{ selected.detail?.externalProvider === "amap" ? "高德地图 POI（已审核）" : "平台审核资源" }}</dd></div>
             </dl>
+            <button class="primary-button full-button" type="button" :disabled="routeLoading" @click="planRoute(selected.item)"><Route :size="16" />{{ routeLoading ? "正在规划路线" : "规划路线" }}</button>
           </template>
 
           <template v-else-if="selected?.kind === 'redCulture'">

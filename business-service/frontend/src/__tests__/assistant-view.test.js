@@ -2,7 +2,7 @@ import { flushPromises, mount } from "@vue/test-utils";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const apiMock = vi.hoisted(() => ({ get: vi.fn(), post: vi.fn(), delete: vi.fn() }));
-const authMock = vi.hoisted(() => ({ user: { schoolId: 1 } }));
+const authMock = vi.hoisted(() => ({ user: { accountId: 101, schoolId: 1, roleCode: "teacher" } }));
 const schoolMock = vi.hoisted(() => ({
   school: { schoolId: 1, schoolName: "里庄小学" },
   resources: [],
@@ -28,6 +28,7 @@ describe("assistant view", () => {
   beforeEach(() => {
     sessionStorage.clear();
     vi.clearAllMocks();
+    authMock.user = { accountId: 101, schoolId: 1, roleCode: "teacher" };
     delete apiMock.stream;
     schoolMock.load.mockResolvedValue(schoolMock);
     apiMock.get.mockImplementation(async (path) => path === "/api/ai/models" ? [
@@ -43,6 +44,24 @@ describe("assistant view", () => {
       retrievalStatus: "ok",
       generationStatus: "completed"
     });
+  });
+
+  it("does not restore a teacher's local conversation after a student signs in to the same school", async () => {
+    sessionStorage.setItem("school-portal-assistant-session:1:101", JSON.stringify([
+      { role: "user", text: "教师的备课问题" },
+      { role: "assistant", answer: "教师的备课回答", citations: [] },
+    ]));
+    sessionStorage.setItem("school-portal-assistant-thread:1:101", "teacher-thread");
+
+    authMock.user = { accountId: 202, schoolId: 1, roleCode: "student" };
+    const wrapper = mount(AssistantView, {
+      global: { stubs: { AppShell: { template: "<div><slot /></div>" }, InlineNotice: true } },
+    });
+    await flushPromises();
+
+    expect(wrapper.text()).not.toContain("教师的备课问题");
+    expect(wrapper.text()).toContain("你好！我可以用更容易理解的方式");
+    expect(apiMock.get).not.toHaveBeenCalledWith("/api/ai/qa/history/teacher-thread");
   });
 
   it("restores, continues, starts new, and archives historical conversations", async () => {
@@ -780,10 +799,21 @@ describe("assistant view", () => {
 
   it("recovers the exact persisted response when the stream ends before final", async () => {
     let requestedTurnId = "";
+    let recoveryReads = 0;
     apiMock.get.mockImplementation(async (path) => {
       if (path === "/api/ai/models" || path === "/api/ai/qa/history") return [];
       if (path.startsWith("/api/ai/qa/history/recovery/")) {
         requestedTurnId = path.split("/").at(-1);
+        recoveryReads += 1;
+        if (recoveryReads === 1) {
+          return {
+            found: false,
+            clientTurnId: requestedTurnId,
+            threadId: "recovered-thread",
+            turnStatus: "running",
+            retryable: false,
+          };
+        }
         return {
           found: true,
           threadId: "recovered-thread",
@@ -830,6 +860,7 @@ describe("assistant view", () => {
     expect(wrapper.text()).toContain("已恢复回答");
     expect(wrapper.text()).toContain("服务端完整内容");
     expect(wrapper.text()).toContain("已从历史记录恢复完整回答");
+    expect(recoveryReads).toBeGreaterThan(1);
     expect(apiMock.post).not.toHaveBeenCalled();
   });
 
@@ -957,7 +988,7 @@ describe("assistant view", () => {
     expect(wrapper.text()).toContain("已显示片段");
     expect(wrapper.text()).toContain("未找到可恢复的完整回答");
     expect(apiMock.post).not.toHaveBeenCalled();
-    expect(apiMock.get.mock.calls.filter(([path]) => String(path).includes("/history/recovery/"))).toHaveLength(3);
+    expect(apiMock.get.mock.calls.filter(([path]) => String(path).includes("/history/recovery/"))).toHaveLength(1);
     expect(wrapper.get(".stream-retry-button").text()).toContain("继续本轮");
 
     await wrapper.get(".stream-retry-button").trigger("click");
@@ -1087,8 +1118,8 @@ describe("assistant view", () => {
 
   it("restores a pending action after refresh without replacing its turn id", async () => {
     const expiresAt = new Date(Date.now() + 15 * 60 * 1000).toISOString();
-    sessionStorage.setItem("school-portal-assistant-thread:1", "thread-refresh");
-    sessionStorage.setItem("school-portal-assistant-session:1", JSON.stringify([
+    sessionStorage.setItem("school-portal-assistant-thread:1:101", "thread-refresh");
+    sessionStorage.setItem("school-portal-assistant-session:1:101", JSON.stringify([
       { role: "user", text: "刷新前的写操作" },
       {
         role: "assistant",
