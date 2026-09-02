@@ -23,7 +23,7 @@ MYSQL_CONFIG = {
     "host": "127.0.0.1",
     "port": 3306,
     "user": "root",
-    "password": "root",
+    "password": "123456",
     "database": "red_culture_platform",
     "charset": "utf8mb4",
     "cursorclass": pymysql.cursors.DictCursor,
@@ -43,20 +43,20 @@ NODE_SQL = {
         FROM administrative_region
     """,
     "sites": """
-        SELECT site_id, site_code, site_name, site_alias, region_id, address,
+        SELECT site_id, site_code, site_name, region_id, address,
                longitude, latitude, established_year, site_level, protection_level,
                historical_background, intro, opening_time_desc, is_active
         FROM red_site
         WHERE review_status = 'approved' AND is_active = 1
     """,
     "heroes": """
-        SELECT hero_id, hero_code, hero_name, hero_alias, gender, birth_year, death_year,
+        SELECT hero_id, hero_code, hero_name, gender, birth_year, death_year,
                native_place_region_id, native_place_text, profile_summary, main_deeds, is_active
         FROM hero_person
         WHERE review_status = 'approved' AND is_active = 1
     """,
     "events": """
-        SELECT event_id, event_code, event_name, event_alias, primary_region_id, event_time_text,
+        SELECT event_id, event_code, event_name, primary_region_id, event_time_text,
                start_date, end_date, start_year, end_year, longitude, latitude,
                historical_significance, event_process, result_impact, is_active
         FROM historical_event
@@ -89,7 +89,7 @@ NODE_SQL = {
         WHERE review_status = 'approved' AND is_active = 1
     """,
     "local_resources": """
-        SELECT resource_id, resource_code, resource_name, resource_alias,
+        SELECT resource_id, resource_code, resource_name,
                resource_category, resource_subcategory, region_id,
                county_region_id, township_region_id, address, longitude, latitude,
                organization_name, opening_time_desc, intro, education_value,
@@ -280,7 +280,6 @@ def sync_sites(mysql_conn, neo4j_driver, stats: SyncStats) -> None:
     MERGE (s:Site {id: $site_id})
     SET s.code = $site_code,
         s.name = $site_name,
-        s.alias = $site_alias,
         s.address = $address,
         s.longitude = $longitude,
         s.latitude = $latitude,
@@ -303,7 +302,6 @@ def sync_heroes(mysql_conn, neo4j_driver, stats: SyncStats) -> None:
     MERGE (h:Hero {id: $hero_id})
     SET h.code = $hero_code,
         h.name = $hero_name,
-        h.alias = $hero_alias,
         h.gender = $gender,
         h.birthYear = $birth_year,
         h.deathYear = $death_year,
@@ -326,7 +324,6 @@ def sync_events(mysql_conn, neo4j_driver, stats: SyncStats) -> None:
     MERGE (e:Event {id: $event_id})
     SET e.code = $event_code,
         e.name = $event_name,
-        e.alias = $event_alias,
         e.eventTimeText = $event_time_text,
         e.startDate = CASE WHEN $start_date IS NULL THEN NULL ELSE date($start_date) END,
         e.endDate = CASE WHEN $end_date IS NULL THEN NULL ELSE date($end_date) END,
@@ -424,7 +421,6 @@ def sync_local_resources(mysql_conn, neo4j_driver, stats: SyncStats) -> None:
     MERGE (r:LocalEduResource {id: $resource_id})
     SET r.code = $resource_code,
         r.name = $resource_name,
-        r.alias = $resource_alias,
         r.category = $resource_category,
         r.subcategory = $resource_subcategory,
         r.address = $address,
