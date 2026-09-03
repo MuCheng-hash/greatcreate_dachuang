@@ -446,9 +446,16 @@ public class UserManagementServiceImpl implements UserManagementService {
 
     private void replaceTeacherClasses(Long teacherId, List<Long> classIds, String teacherRole) {
         if (teacherId == null || classIds == null) return;
+        TeacherProfile teacher = teacherProfileMapper.selectById(teacherId);
         classTeacherMapper.delete(new LambdaQueryWrapper<ClassTeacher>().eq(ClassTeacher::getTeacherId, teacherId));
-        for (Long classId : classIds) {
+        Set<Long> uniqueClassIds = new LinkedHashSet<>(classIds);
+        for (Long classId : uniqueClassIds) {
             if (classId == null) continue;
+            ClassInfo clazz = classInfoMapper.selectById(classId);
+            if (clazz == null || teacher == null || !Objects.equals(clazz.getSchoolId(), teacher.getSchoolId())
+                    || !"active".equalsIgnoreCase(clazz.getStatus())) {
+                throw new IllegalArgumentException("teacher class must be active and in the same school");
+            }
             ClassTeacher rel = new ClassTeacher();
             rel.setTeacherId(teacherId);
             rel.setClassId(classId);
@@ -460,10 +467,17 @@ public class UserManagementServiceImpl implements UserManagementService {
 
     private void replaceStudentClasses(Long studentId, List<Long> classIds) {
         if (studentId == null || classIds == null) return;
+        StudentProfile student = studentProfileMapper.selectById(studentId);
         classMemberMapper.delete(new LambdaQueryWrapper<ClassMember>().eq(ClassMember::getStudentId, studentId));
         boolean primary = true;
-        for (Long classId : classIds) {
+        Set<Long> uniqueClassIds = new LinkedHashSet<>(classIds);
+        for (Long classId : uniqueClassIds) {
             if (classId == null) continue;
+            ClassInfo clazz = classInfoMapper.selectById(classId);
+            if (clazz == null || student == null || !Objects.equals(clazz.getSchoolId(), student.getSchoolId())
+                    || !"active".equalsIgnoreCase(clazz.getStatus())) {
+                throw new IllegalArgumentException("student class must be active and in the same school");
+            }
             ClassMember rel = new ClassMember();
             rel.setStudentId(studentId);
             rel.setClassId(classId);

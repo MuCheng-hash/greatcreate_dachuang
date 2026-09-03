@@ -7,6 +7,7 @@ import com.redculture.platform.service.AiTeachingPlanService;
 import com.redculture.platform.service.KnowledgeRetriever;
 import com.redculture.platform.service.SchoolMapService;
 import com.redculture.platform.service.TeachingActivityPlanService;
+import com.redculture.platform.service.TeachingPlanFeedbackService;
 import com.redculture.platform.service.agent.AgentRuntimeClient;
 import com.redculture.platform.service.agent.AgentBusyException;
 import com.redculture.platform.service.agent.AgentUpstreamException;
@@ -131,6 +132,21 @@ public class AiTeachingPlanServiceImpl implements AiTeachingPlanService {
                                      ObjectMapper objectMapper) {
         this(schoolMapService, teachingActivityPlanService, knowledgeRetriever,
                 appMapProperties, null, objectMapper, Schedulers.immediate(), null);
+    }
+
+    // Compatibility constructor retained for focused streaming/controller tests.
+    // Generation persistence is performed at the authenticated HTTP boundary.
+    public AiTeachingPlanServiceImpl(SchoolMapService schoolMapService,
+                                     TeachingActivityPlanService teachingActivityPlanService,
+                                     KnowledgeRetriever knowledgeRetriever,
+                                     AppMapProperties appMapProperties,
+                                     AgentRuntimeClient agentRuntimeClient,
+                                     ObjectMapper objectMapper,
+                                     TeachingPlanFeedbackService ignoredFeedbackService,
+                                     Scheduler agentBlockingScheduler) {
+        this(schoolMapService, teachingActivityPlanService, knowledgeRetriever,
+                appMapProperties, agentRuntimeClient, objectMapper,
+                agentBlockingScheduler, null);
     }
 
     @Override

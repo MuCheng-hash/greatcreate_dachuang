@@ -940,6 +940,7 @@ class AgentRuntime:
                 degraded_reasons=list(prefetched_reasons),
             )
             token = bind_tool_runtime(runtime)
+            prompt_run_id = await self._start_agent_prompt_run(request, thread, memory_context, config)
             try:
                 agent = injected_agent or await self._create_agent_for(
                     config, checkpoint_namespace
@@ -960,10 +961,13 @@ class AgentRuntime:
                     checkpoint_namespace=checkpoint_namespace,
                     resumed=registration.resumed,
                 )
-                return self._with_model_metadata(result, config)
+                result = self._with_model_metadata(result, config)
+                await self._finish_structured_prompt(prompt_run_id, "completed", 0, {"answer": result.answer}, "")
+                return result
             except (ActionConfirmationRequired, TurnConflictError, TurnLeaseLostError):
                 raise
             except Exception as exc:
+                await self._finish_structured_prompt(prompt_run_id, "failed", 0, {}, str(exc))
                 executions.extend(runtime.executions[len(prefetched_executions):])
                 if await self._has_executing_action(registration.turn.turn_id):
                     raise
@@ -1122,6 +1126,7 @@ class AgentRuntime:
                 degraded_reasons=list(prefetched_reasons),
             )
             token = bind_tool_runtime(runtime)
+            prompt_run_id = await self._start_agent_prompt_run(request, thread, memory_context, config)
             await emit(
                 "model.started",
                 {
@@ -1159,6 +1164,7 @@ class AgentRuntime:
                     partial_writer=partial_writer,
                 )
                 result = self._with_model_metadata(result, config)
+                await self._finish_structured_prompt(prompt_run_id, "completed", 0, {"answer": result.answer}, "")
                 await emit(
                     "model.completed",
                     {
@@ -1172,6 +1178,7 @@ class AgentRuntime:
             except (ActionConfirmationRequired, TurnConflictError, TurnLeaseLostError):
                 raise
             except Exception as exc:
+                await self._finish_structured_prompt(prompt_run_id, "failed", 0, {}, str(exc))
                 executions.extend(runtime.executions[len(prefetched_executions):])
                 if await self._has_executing_action(registration.turn.turn_id):
                     raise
@@ -1639,10 +1646,34 @@ class AgentRuntime:
         )
         return selection, run_id
 
+    async def _start_agent_prompt_run(
+        self,
+        request: AgentMessageRequest,
+        thread: ThreadRecord,
+        memory_context: MemoryContext,
+        config: ModelConfig,
+    ) -> str | None:
+        """Record a run for the general Agent prompt used by chat turns."""
+        if self.prompts is None:
+            return None
+        try:
+            subject_key = f"{request.scope_type}:{request.scope_id}"
+            selection = await self.prompts.resolve(
+                "agent",
+                subject_key,
+                task_context(request, memory_context.prompt),
+            )
+            return await self.prompts.start_run(
+                selection, subject_key, config.model, len(selection.content)
+            )
+        except Exception as exc:
+            LOGGER.warning("agent_prompt_run_start_failed", extra={"error": str(exc)[:300]})
+            return None
+
     async def _finish_structured_prompt(
-        self, run_id: str, status: str, elapsed: int, result: dict[str, Any], error_message: str
+        self, run_id: str | None, status: str, elapsed: int, result: dict[str, Any], error_message: str
     ) -> None:
-        if self.prompts is not None:
+        if self.prompts is not None and run_id is not None:
             await self.prompts.finish_run(
                 run_id, status, elapsed, len(json.dumps(result, ensure_ascii=False)), error_message
             )

@@ -8,8 +8,11 @@ import com.redculture.platform.common.PageResult;
 import com.redculture.platform.vo.*;
 import com.redculture.platform.vo.request.*;
 import org.springframework.stereotype.Service;
+import org.springframework.core.io.Resource;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
+import org.springframework.web.multipart.MultipartFile;
+import org.apache.poi.ss.usermodel.*;
 
 import java.security.SecureRandom;
 import java.time.LocalDateTime;
@@ -33,12 +36,13 @@ public class TeacherClassServiceImpl implements TeacherClassService {
     private final StudentTaskProgressMapper progressMapper;
     private final TaskResourceRelMapper taskResourceMapper;
     private final LocalEduResourceMapper resourceMapper;
+    private final com.redculture.platform.service.TaskSubmissionStorageService storage;
 
     public TeacherClassServiceImpl(ClassInfoMapper classMapper, ClassTeacherMapper classTeacherMapper,
                                    ClassMemberMapper classMemberMapper, TeacherProfileMapper teacherMapper,
                                    StudentProfileMapper studentMapper, ClassLearningTaskMapper taskMapper,
                                    StudentTaskProgressMapper progressMapper, TaskResourceRelMapper taskResourceMapper,
-                                   LocalEduResourceMapper resourceMapper) {
+                                   LocalEduResourceMapper resourceMapper, com.redculture.platform.service.TaskSubmissionStorageService storage) {
         this.classMapper = classMapper;
         this.classTeacherMapper = classTeacherMapper;
         this.classMemberMapper = classMemberMapper;
@@ -48,6 +52,7 @@ public class TeacherClassServiceImpl implements TeacherClassService {
         this.progressMapper = progressMapper;
         this.taskResourceMapper = taskResourceMapper;
         this.resourceMapper = resourceMapper;
+        this.storage = storage;
     }
 
     @Override
@@ -71,7 +76,7 @@ public class TeacherClassServiceImpl implements TeacherClassService {
 
     @Override
     public List<ClassTeacherVO> availableTeachers(AuthCurrentUserVO user) {
-        requireTeacherOrAdmin(user);
+        requireAdmin(user);
         if (user.getSchoolId() == null) throw new IllegalArgumentException("school account is required");
         return teacherMapper.selectList(new LambdaQueryWrapper<TeacherProfile>().eq(TeacherProfile::getSchoolId, user.getSchoolId())
                         .eq(TeacherProfile::getStatus, ACTIVE).orderByAsc(TeacherProfile::getTeacherName)).stream()
@@ -81,7 +86,7 @@ public class TeacherClassServiceImpl implements TeacherClassService {
     @Override
     @Transactional
     public TeacherClassVO create(TeacherClassSaveRequest request, AuthCurrentUserVO user) {
-        requireTeacherOrAdmin(user);
+        requireAdmin(user);
         validateSaveRequest(request, user);
         ClassInfo entity = new ClassInfo();
         fillClass(entity, request);
@@ -96,7 +101,7 @@ public class TeacherClassServiceImpl implements TeacherClassService {
     @Transactional
     public TeacherClassVO update(Long classId, TeacherClassSaveRequest request, AuthCurrentUserVO user) {
         ClassInfo entity = requireClass(classId);
-        requireHeadTeacherOrAdmin(entity, user);
+        requireAdmin(user);
         if (request != null && request.getSchoolId() != null && !request.getSchoolId().equals(entity.getSchoolId())) {
             throw new IllegalArgumentException("class school cannot be changed");
         }
@@ -114,7 +119,7 @@ public class TeacherClassServiceImpl implements TeacherClassService {
         Access access = requireClassAccess(entity, user);
         TeacherClassDetailVO detail = new TeacherClassDetailVO();
         copy(toClassVO(entity, user, true), detail);
-        detail.setCanManageStudents(access.headTeacher || isAdmin(user));
+        detail.setCanManageStudents(isAdmin(user));
         detail.setStudents(students(classId, user));
         detail.setTasks(tasks(classId, user));
         return detail;
@@ -141,7 +146,7 @@ public class TeacherClassServiceImpl implements TeacherClassService {
     @Override
     public List<ClassStudentVO> availableStudents(Long classId, AuthCurrentUserVO user) {
         ClassInfo entity = requireClass(classId);
-        requireHeadTeacherOrAdmin(entity, user);
+        requireAdmin(user);
         Set<Long> enrolled = classMemberMapper.selectList(new LambdaQueryWrapper<ClassMember>().eq(ClassMember::getClassId, classId).eq(ClassMember::getStatus, ACTIVE))
                 .stream().map(ClassMember::getStudentId).collect(Collectors.toSet());
         return studentMapper.selectList(new LambdaQueryWrapper<StudentProfile>().eq(StudentProfile::getSchoolId, entity.getSchoolId())
@@ -156,7 +161,7 @@ public class TeacherClassServiceImpl implements TeacherClassService {
     @Transactional
     public void addStudent(Long classId, Long studentId, AuthCurrentUserVO user) {
         ClassInfo entity = requireClass(classId);
-        requireHeadTeacherOrAdmin(entity, user);
+        requireAdmin(user);
         StudentProfile student = studentMapper.selectById(studentId);
         if (student == null || !ACTIVE.equals(student.getStatus()) || !entity.getSchoolId().equals(student.getSchoolId())) {
             throw new IllegalArgumentException("student must be an active student in this school");
@@ -168,7 +173,7 @@ public class TeacherClassServiceImpl implements TeacherClassService {
     @Override
     @Transactional
     public void removeStudent(Long classId, Long studentId, AuthCurrentUserVO user) {
-        requireHeadTeacherOrAdmin(requireClass(classId), user);
+        requireAdmin(user);
         ClassMember member = classMemberMapper.selectOne(new LambdaQueryWrapper<ClassMember>()
                 .eq(ClassMember::getClassId, classId).eq(ClassMember::getStudentId, studentId).last("LIMIT 1"));
         if (member == null || !ACTIVE.equals(member.getStatus())) throw new IllegalArgumentException("student is not in this class");
@@ -181,7 +186,7 @@ public class TeacherClassServiceImpl implements TeacherClassService {
     @Transactional
     public TeacherClassImportResultVO importStudents(Long classId, ClassStudentImportRequest request, AuthCurrentUserVO user) {
         ClassInfo entity = requireClass(classId);
-        requireHeadTeacherOrAdmin(entity, user);
+        requireAdmin(user);
         TeacherClassImportResultVO result = new TeacherClassImportResultVO();
         List<String> numbers = request == null || request.getStudentNos() == null ? Collections.emptyList() : request.getStudentNos();
         for (String raw : numbers) {
@@ -207,9 +212,40 @@ public class TeacherClassServiceImpl implements TeacherClassService {
 
     @Override
     @Transactional
+    public TeacherClassImportResultVO importStudentsExcel(Long classId, MultipartFile file, AuthCurrentUserVO user) {
+        requireAdmin(user);
+        if (file == null || file.isEmpty()) throw new IllegalArgumentException("请选择 Excel 文件");
+        String filename = file.getOriginalFilename();
+        if (filename == null || !filename.toLowerCase(Locale.ROOT).endsWith(".xlsx")) throw new IllegalArgumentException("仅支持 .xlsx 文件");
+        List<String> studentNos = new ArrayList<>();
+        try (Workbook workbook = WorkbookFactory.create(file.getInputStream())) {
+            Sheet sheet = workbook.getNumberOfSheets() > 0 ? workbook.getSheetAt(0) : null;
+            if (sheet == null || sheet.getPhysicalNumberOfRows() < 1) throw new IllegalArgumentException("Excel 没有数据");
+            Row header = sheet.getRow(sheet.getFirstRowNum());
+            int studentNoColumn = -1;
+            DataFormatter formatter = new DataFormatter();
+            for (Cell cell : header) {
+                String value = formatter.formatCellValue(cell).trim();
+                if (Set.of("学号", "studentNo", "student_no", "学生学号").contains(value)) { studentNoColumn = cell.getColumnIndex(); break; }
+            }
+            if (studentNoColumn < 0) throw new IllegalArgumentException("Excel 首行必须包含“学号”列");
+            for (int rowIndex = sheet.getFirstRowNum() + 1; rowIndex <= sheet.getLastRowNum(); rowIndex++) {
+                Row row = sheet.getRow(rowIndex); if (row == null) continue;
+                String studentNo = formatter.formatCellValue(row.getCell(studentNoColumn)).trim();
+                if (StringUtils.hasText(studentNo)) studentNos.add(studentNo);
+            }
+        } catch (IllegalArgumentException exception) { throw exception;
+        } catch (Exception exception) { throw new IllegalArgumentException("无法读取 Excel 文件：" + exception.getMessage()); }
+        ClassStudentImportRequest request = new ClassStudentImportRequest();
+        request.setStudentNos(studentNos);
+        return importStudents(classId, request, user);
+    }
+
+    @Override
+    @Transactional
     public String rotateInviteCode(Long classId, AuthCurrentUserVO user) {
         ClassInfo entity = requireClass(classId);
-        requireHeadTeacherOrAdmin(entity, user);
+        requireAdmin(user);
         for (int i = 0; i < 10; i++) {
             String code = nextInviteCode();
             if (classMapper.selectCount(new LambdaQueryWrapper<ClassInfo>().eq(ClassInfo::getInviteCode, code)) == 0) {
@@ -222,7 +258,7 @@ public class TeacherClassServiceImpl implements TeacherClassService {
     @Override
     public void disableInviteCode(Long classId, AuthCurrentUserVO user) {
         ClassInfo entity = requireClass(classId);
-        requireHeadTeacherOrAdmin(entity, user);
+        requireAdmin(user);
         entity.setInviteCode(null); classMapper.updateById(entity);
     }
 
@@ -251,29 +287,59 @@ public class TeacherClassServiceImpl implements TeacherClassService {
     @Override
     @Transactional
     public ClassTaskVO publishTask(Long classId, ClassTaskSaveRequest request, AuthCurrentUserVO user) {
+        return publishTask(classId, request, null, user);
+    }
+
+    @Override
+    @Transactional
+    public ClassTaskVO publishTask(Long classId, ClassTaskSaveRequest request, MultipartFile material, AuthCurrentUserVO user) {
         ClassInfo entity = requireClass(classId);
         Access access = requireClassAccess(entity, user);
         if (!access.teacher || access.teacherId == null) throw new IllegalArgumentException("an assigned teacher must publish the task");
         if (request == null || !StringUtils.hasText(request.getTitle())) throw new IllegalArgumentException("task title is required");
         if (request.getDueAt() != null && request.getDueAt().isBefore(LocalDateTime.now())) throw new IllegalArgumentException("dueAt must be in the future");
+        if (request.getStartAt() != null && request.getDueAt() != null && !request.getDueAt().isAfter(request.getStartAt())) throw new IllegalArgumentException("dueAt must be after startAt");
         String taskType = StringUtils.hasText(request.getTaskType()) ? request.getTaskType() : "red_culture_learning";
         String rule = StringUtils.hasText(request.getSubmissionRule()) ? request.getSubmissionRule() : "text_required";
         if (!Set.of("red_culture_learning", "map_exploration").contains(taskType)) throw new IllegalArgumentException("unsupported taskType");
-        if (!Set.of("text_only", "text_required", "attachment_required", "text_and_attachment").contains(rule)) throw new IllegalArgumentException("unsupported submissionRule");
+        if (!Set.of("text_only", "text_required", "attachment_required", "text_and_attachment", "image_required", "document_required", "image_or_document", "text_and_image", "text_and_document", "image_and_document", "text_and_image_and_document").contains(rule)) throw new IllegalArgumentException("unsupported submissionRule");
         List<Long> resourceIds = request.getResourceIds() == null ? Collections.emptyList() : request.getResourceIds().stream().filter(Objects::nonNull).distinct().toList();
         if ("map_exploration".equals(taskType) && resourceIds.isEmpty()) throw new IllegalArgumentException("map exploration tasks require at least one resource");
         for (Long resourceId : resourceIds) {
             LocalEduResource resource = resourceMapper.selectById(resourceId);
             if (resource == null || !Boolean.TRUE.equals(resource.getActive()) || resource.getReviewStatus() != com.redculture.platform.enums.ReviewStatus.APPROVED) throw new IllegalArgumentException("resource is not published");
         }
+        com.redculture.platform.service.TaskSubmissionStorageService.StoredFile stored = null;
+        if (material != null && !material.isEmpty()) {
+            String name = material.getOriginalFilename() == null ? "" : material.getOriginalFilename().toLowerCase(Locale.ROOT);
+            if (!name.endsWith(".docx")) throw new IllegalArgumentException("task material must be a DOCX Word document");
+            stored = storage.store(material);
+        }
         ClassLearningTask task = new ClassLearningTask();
         task.setClassId(classId); task.setPublisherTeacherId(access.teacherId); task.setTitle(request.getTitle().trim());
-        task.setDescription(request.getDescription()); task.setTaskType(taskType); task.setSubmissionRule(rule); task.setAllowLateSubmission(!Boolean.FALSE.equals(request.getAllowLateSubmission())); task.setPublishedAt(LocalDateTime.now()); task.setDueAt(request.getDueAt()); task.setStatus("published");
-        taskMapper.insert(task);
+        task.setDescription(request.getDescription()); task.setTaskType(taskType); task.setSubmissionRule(rule); task.setAllowLateSubmission(!Boolean.FALSE.equals(request.getAllowLateSubmission())); task.setPublishedAt(LocalDateTime.now()); task.setStartAt(request.getStartAt()); task.setDueAt(request.getDueAt()); task.setStatus("published");
+        if (stored != null) { task.setMaterialFilename(stored.filename()); task.setMaterialStorageKey(stored.key()); task.setMaterialContentType(stored.contentType()); }
+        try { taskMapper.insert(task); } catch (RuntimeException e) { if (stored != null) storage.delete(stored.key()); throw e; }
         for (int index = 0; index < resourceIds.size(); index++) { TaskResourceRel rel = new TaskResourceRel(); rel.setTaskId(task.getTaskId()); rel.setResourceId(resourceIds.get(index)); rel.setSortOrder(index); taskResourceMapper.insert(rel); }
         classMemberMapper.selectList(new LambdaQueryWrapper<ClassMember>().eq(ClassMember::getClassId, classId).eq(ClassMember::getStatus, ACTIVE))
                 .forEach(member -> insertProgressIfMissing(task.getTaskId(), member.getStudentId()));
         return toTaskVO(task, null);
+    }
+
+    @Override
+    public TeacherClassService.TaskMaterial downloadTaskMaterial(Long taskId, AuthCurrentUserVO user) {
+        ClassLearningTask task = requireTask(taskId);
+        if (!"published".equals(task.getStatus()) || !StringUtils.hasText(task.getMaterialStorageKey())) throw new IllegalArgumentException("task material not found");
+        boolean allowed = isAdmin(user);
+        if (!allowed && "student".equals(user == null ? null : user.getRoleCode())) {
+            StudentProfile student = requireStudent(user);
+            allowed = classMemberMapper.selectCount(new LambdaQueryWrapper<ClassMember>().eq(ClassMember::getClassId, task.getClassId()).eq(ClassMember::getStudentId, student.getStudentId()).eq(ClassMember::getStatus, ACTIVE)) > 0;
+        } else if (!allowed && "teacher".equals(user == null ? null : user.getRoleCode())) {
+            TeacherProfile teacher = requireTeacher(user); allowed = teacher.getTeacherId().equals(task.getPublisherTeacherId());
+        }
+        if (!allowed) throw new IllegalArgumentException("task material access denied");
+        Resource resource = storage.load(task.getMaterialStorageKey());
+        return new TeacherClassService.TaskMaterial(resource, task.getMaterialFilename(), task.getMaterialContentType());
     }
 
     @Override
@@ -406,7 +472,7 @@ public class TeacherClassServiceImpl implements TeacherClassService {
         TeacherClassVO vo = new TeacherClassVO();
         vo.setClassId(entity.getClassId()); vo.setSchoolId(entity.getSchoolId()); vo.setClassName(entity.getClassName());
         vo.setGradeName(entity.getGradeName()); vo.setClassType(entity.getClassType()); vo.setStatus(entity.getStatus());
-        Access access = requireClassAccess(entity, user); vo.setHeadTeacher(access.headTeacher); if (includeInvite && (access.headTeacher || isAdmin(user))) vo.setInviteCode(entity.getInviteCode());
+        Access access = requireClassAccess(entity, user); vo.setHeadTeacher(access.headTeacher); if (includeInvite && isAdmin(user)) vo.setInviteCode(entity.getInviteCode());
         List<ClassTeacher> relations = classTeacherMapper.selectList(new LambdaQueryWrapper<ClassTeacher>().eq(ClassTeacher::getClassId, entity.getClassId()).eq(ClassTeacher::getStatus, ACTIVE));
         Map<Long, TeacherProfile> teachers = relations.isEmpty() ? Collections.emptyMap() : teacherMapper.selectBatchIds(relations.stream().map(ClassTeacher::getTeacherId).toList()).stream().collect(Collectors.toMap(TeacherProfile::getTeacherId, Function.identity()));
         vo.setTeachers(relations.stream().map(rel -> { ClassTeacherVO item = new ClassTeacherVO(); item.setTeacherId(rel.getTeacherId()); item.setTeacherRole(rel.getTeacherRole()); TeacherProfile profile = teachers.get(rel.getTeacherId()); item.setTeacherName(profile == null ? "Unknown" : profile.getTeacherName()); return item; }).toList());
@@ -419,7 +485,7 @@ public class TeacherClassServiceImpl implements TeacherClassService {
     }
 
     private ClassTaskVO toTaskVO(ClassLearningTask task, StudentTaskProgress studentProgress) {
-        ClassTaskVO vo = new ClassTaskVO(); vo.setTaskId(task.getTaskId()); vo.setClassId(task.getClassId()); vo.setTitle(task.getTitle()); vo.setDescription(task.getDescription()); vo.setPublishedAt(task.getPublishedAt()); vo.setDueAt(task.getDueAt()); vo.setStatus(task.getStatus()); vo.setTaskType(task.getTaskType()); vo.setSubmissionRule(task.getSubmissionRule()); vo.setAllowLateSubmission(Boolean.TRUE.equals(task.getAllowLateSubmission()));
+        ClassTaskVO vo = new ClassTaskVO(); vo.setTaskId(task.getTaskId()); vo.setClassId(task.getClassId()); vo.setTitle(task.getTitle()); vo.setDescription(task.getDescription()); vo.setPublishedAt(task.getPublishedAt()); vo.setStartAt(task.getStartAt()); vo.setDueAt(task.getDueAt()); vo.setMaterialFilename(task.getMaterialFilename()); vo.setStatus(task.getStatus()); vo.setTaskType(task.getTaskType()); vo.setSubmissionRule(task.getSubmissionRule()); vo.setAllowLateSubmission(Boolean.TRUE.equals(task.getAllowLateSubmission()));
         TeacherProfile publisher = task.getPublisherTeacherId() == null ? null : teacherMapper.selectById(task.getPublisherTeacherId()); vo.setPublisherName(publisher == null ? "School administrator" : publisher.getTeacherName());
         List<StudentTaskProgress> progress = progressMapper.selectList(new LambdaQueryWrapper<StudentTaskProgress>().eq(StudentTaskProgress::getTaskId, task.getTaskId()));
         long completed = progress.stream().filter(item -> "completed".equals(item.getStatus())).count();
@@ -438,10 +504,12 @@ public class TeacherClassServiceImpl implements TeacherClassService {
     }
 
     private ClassInfo requireClass(Long classId) { ClassInfo entity = classMapper.selectById(classId); if (entity == null || !ACTIVE.equals(entity.getStatus())) throw new IllegalArgumentException("class not found"); return entity; }
+    private ClassLearningTask requireTask(Long taskId) { ClassLearningTask task = taskMapper.selectById(taskId); if (task == null) throw new IllegalArgumentException("task not found"); return task; }
     private TeacherProfile requireTeacher(AuthCurrentUserVO user) { TeacherProfile teacher = teacherMapper.selectOne(new LambdaQueryWrapper<TeacherProfile>().eq(TeacherProfile::getAccountId, user.getAccountId()).eq(TeacherProfile::getStatus, ACTIVE).last("LIMIT 1")); if (teacher == null) throw new IllegalArgumentException("active teacher profile is required"); return teacher; }
     private StudentProfile requireStudent(AuthCurrentUserVO user) { if (user == null || !"student".equals(user.getRoleCode())) throw new IllegalArgumentException("student access required"); StudentProfile student = studentMapper.selectOne(new LambdaQueryWrapper<StudentProfile>().eq(StudentProfile::getAccountId, user.getAccountId()).eq(StudentProfile::getStatus, ACTIVE).last("LIMIT 1")); if (student == null) throw new IllegalArgumentException("active student profile is required"); return student; }
     private TeacherProfile requireActiveTeacher(Long teacherId, Long schoolId) { if (teacherId == null) throw new IllegalArgumentException("teacherId is required"); TeacherProfile teacher = teacherMapper.selectById(teacherId); if (teacher == null || !ACTIVE.equals(teacher.getStatus()) || !schoolId.equals(teacher.getSchoolId())) throw new IllegalArgumentException("teacher must be active and in this school"); return teacher; }
     private void requireTeacherOrAdmin(AuthCurrentUserVO user) { if (user == null || !Set.of("teacher", "school_admin", "platform_admin").contains(user.getRoleCode())) throw new IllegalArgumentException("teacher access required"); if (!"platform_admin".equals(user.getRoleCode()) && user.getSchoolId() == null) throw new IllegalArgumentException("school account is required"); }
+    private void requireAdmin(AuthCurrentUserVO user) { requireTeacherOrAdmin(user); if (!isAdmin(user)) throw new IllegalArgumentException("administrator access required"); }
     private void requireSchoolAccess(Long schoolId, AuthCurrentUserVO user) { requireTeacherOrAdmin(user); if (!"platform_admin".equals(user.getRoleCode()) && !schoolId.equals(user.getSchoolId())) throw new IllegalArgumentException("cannot access another school"); }
     private Access requireClassAccess(ClassInfo entity, AuthCurrentUserVO user) { requireTeacherOrAdmin(user); requireSchoolAccess(entity.getSchoolId(), user); if (isAdmin(user)) return new Access(null, true, true); TeacherProfile teacher = requireTeacher(user); ClassTeacher relation = classTeacherMapper.selectOne(new LambdaQueryWrapper<ClassTeacher>().eq(ClassTeacher::getClassId, entity.getClassId()).eq(ClassTeacher::getTeacherId, teacher.getTeacherId()).eq(ClassTeacher::getStatus, ACTIVE).last("LIMIT 1")); if (relation == null) throw new IllegalArgumentException("cannot access this class"); return new Access(teacher.getTeacherId(), true, "head_teacher".equals(relation.getTeacherRole())); }
     private void requireHeadTeacherOrAdmin(ClassInfo entity, AuthCurrentUserVO user) { if (!requireClassAccess(entity, user).headTeacher && !isAdmin(user)) throw new IllegalArgumentException("head teacher access required"); }

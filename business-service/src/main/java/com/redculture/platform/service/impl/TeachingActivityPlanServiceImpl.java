@@ -152,8 +152,6 @@ public class TeachingActivityPlanServiceImpl extends ServiceImpl<TeachingActivit
                 .eq(schoolId != null, TeachingActivityPlan::getSchoolId, schoolId)
                 .eq(resourceId != null, TeachingActivityPlan::getResourceId, resourceId)
                 .eq(reviewStatus != null, TeachingActivityPlan::getReviewStatus, reviewStatus)
-                // 管理员方案列表只展示教师已提交反馈的 AI 生成方案。
-                .apply("EXISTS (SELECT 1 FROM ai_teaching_plan_generation g JOIN teaching_plan_feedback f ON f.generation_id = g.generation_id WHERE g.saved_plan_id = teaching_activity_plan.plan_id AND g.actor_role = 'teacher' AND f.feedback_id IS NOT NULL)")
                 .orderByDesc(TeachingActivityPlan::getCreatedAt);
 
         if (StringUtils.hasText(theme)) {
@@ -229,6 +227,16 @@ public class TeachingActivityPlanServiceImpl extends ServiceImpl<TeachingActivit
             document.write(output);
             return output.toByteArray();
         }
+    }
+
+    @Override
+    public TeachingActivityPlanAdminVO adoptMine(Long planId, AuthCurrentUserVO user) {
+        TeachingActivityPlan plan = requireOwned(planId, user);
+        if (plan.getReviewStatus() != ReviewStatus.ADOPTED) {
+            plan.setReviewStatus(ReviewStatus.ADOPTED);
+            updateById(plan);
+        }
+        return buildAdminVO(plan);
     }
 
     private void addPayloadOrText(XWPFDocument document, TeachingActivityPlanAdminVO vo) {

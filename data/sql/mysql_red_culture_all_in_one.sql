@@ -840,7 +840,7 @@ CREATE TABLE IF NOT EXISTS teaching_activity_plan (
   generation_source      VARCHAR(30) NULL,
   ai_run_id              BIGINT NULL,
   published_status       VARCHAR(20) NOT NULL DEFAULT 'draft',
-  review_status          ENUM('draft', 'pending', 'approved', 'rejected') NOT NULL DEFAULT 'draft',
+  review_status          ENUM('draft', 'pending', 'approved', 'adopted', 'rejected') NOT NULL DEFAULT 'draft',
   is_active              TINYINT(1) NOT NULL DEFAULT 1,
   created_at             DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at             DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,

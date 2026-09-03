@@ -12,6 +12,8 @@ public class ClassTaskVO {
     private String publisherName;
     private LocalDateTime publishedAt;
     private LocalDateTime dueAt;
+    private LocalDateTime startAt;
+    private String materialFilename;
     private String status;
     private String taskType;
     private String submissionRule;

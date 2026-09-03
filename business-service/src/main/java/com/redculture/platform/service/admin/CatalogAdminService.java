@@ -119,6 +119,15 @@ public class CatalogAdminService {
     }
 
     @Transactional
+    public CatalogEntityVO activate(EntityType type, Long id) {
+        Object entity = require(type, id);
+        setActive(entity, true);
+        setReviewStatus(entity, ReviewStatus.APPROVED);
+        update(type, entity);
+        return detail(type, id);
+    }
+
+    @Transactional
     public CatalogMediaRequest uploadMedia(EntityType type, Long id, MultipartFile file) {
         Object entity = require(type, id);
         if (!Boolean.TRUE.equals(active(entity))) {

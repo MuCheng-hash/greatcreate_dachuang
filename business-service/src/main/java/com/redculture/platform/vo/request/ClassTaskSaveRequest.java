@@ -10,6 +10,7 @@ public class ClassTaskSaveRequest {
     private String title;
     private String description;
     private LocalDateTime dueAt;
+    private LocalDateTime startAt;
     private String taskType = "red_culture_learning";
     private String submissionRule = "text_required";
     private Boolean allowLateSubmission = true;

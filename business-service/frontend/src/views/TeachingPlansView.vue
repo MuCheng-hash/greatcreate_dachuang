@@ -1,6 +1,6 @@
 <script setup>
 import { computed, onMounted, reactive, ref } from "vue";
-import { BookOpenCheck, Copy, Download, FilePlus2, Save, Search, Sparkles, Square, RefreshCw } from "@lucide/vue";
+import { BookOpenCheck, Copy, Download, FilePlus2, Save, Search, Sparkles, Square, RefreshCw, Star } from "@lucide/vue";
 import AppShell from "@/components/AppShell.vue";
 import InlineNotice from "@/components/InlineNotice.vue";
 import LoadingBlock from "@/components/LoadingBlock.vue";
@@ -33,6 +33,15 @@ const pageNum = ref(1);
 const pageSize = ref(20);
 const totalPlans = ref(0);
 const exportingPlanId = ref(null);
+const feedbackBusy = ref(false);
+const feedbackStatus = ref("pending");
+const generationRecords = ref([]);
+const feedbackDraft = reactive({ adopted: true, rating: 0, reasonCodes: [], teacherNote: "" });
+const feedbackReasons = [
+  ["CONTENT_INCOMPLETE", "内容不完整"], ["THEME_DEVIATION", "偏离主题"], ["GRADE_MISMATCH", "年级不适配"],
+  ["HARD_TO_IMPLEMENT", "活动难落地"], ["RESOURCE_MISMATCH", "资源不匹配"], ["SAFETY_RISK", "安全需完善"],
+  ["DURATION_UNREASONABLE", "时长不合适"], ["UNCLEAR_EXPRESSION", "表达不清"], ["OTHER", "其他"]
+];
 
 const visiblePlan = computed(() => loading.value ? draftPlan.value : generated.value);
 const sections = computed(() => visiblePlan.value ? [
@@ -44,7 +53,7 @@ const sections = computed(() => visiblePlan.value ? [
 onMounted(async () => {
   threadId.value = sessionStorage.getItem(threadStorageKey()) || "";
   await Promise.all([schoolStore.load(), loadModels()]);
-  await loadPlans();
+  await Promise.all([loadPlans(), loadGenerationRecords()]);
   const theme = schoolStore.resources.find((item) => item.educationThemeSummary)?.educationThemeSummary;
   if (theme) form.theme = theme.slice(0, 40);
 });
@@ -111,9 +120,63 @@ async function exportPlan(planId, theme) {
     const blob = await api.download(`/api/ai/teaching-plans/mine/${planId}/export`);
     const url = URL.createObjectURL(blob);
     const anchor = document.createElement("a"); anchor.href = url; anchor.download = `教学方案-${(theme || "方案").replace(/[\\/:*?"<>|]/g, "_")}.docx`; anchor.click(); URL.revokeObjectURL(url);
-    notice.tone = "success"; notice.text = "方案已导出。";
+    notice.tone = "success"; notice.text = "方案已导出，状态已更新为已采纳。";
+    await loadPlans();
   } catch (error) { notice.tone = "error"; notice.text = error.message || "导出失败。"; }
   finally { exportingPlanId.value = null; }
+}
+
+async function loadGenerationRecords() {
+  try {
+    const result = await api.get(`/api/ai/teaching-plans/generations/mine?feedbackStatus=${feedbackStatus.value}&pageNum=1&pageSize=20`);
+    generationRecords.value = result?.records || [];
+  } catch {
+    generationRecords.value = [];
+  }
+}
+
+function selectFeedbackStatus(value) { feedbackStatus.value = value; loadGenerationRecords(); }
+function resetFeedbackDraft() { feedbackDraft.adopted = true; feedbackDraft.rating = 0; feedbackDraft.reasonCodes = []; feedbackDraft.teacherNote = ""; }
+function toggleReason(code) {
+  const index = feedbackDraft.reasonCodes.indexOf(code);
+  if (index >= 0) feedbackDraft.reasonCodes.splice(index, 1);
+  else feedbackDraft.reasonCodes.push(code);
+}
+function reasonLabel(code) { return feedbackReasons.find(([value]) => value === code)?.[1] || code; }
+
+function openGenerationFeedback(item) {
+  generated.value = {
+    ...(item.plan || {}), generationId: item.generationId, theme: item.theme || item.plan?.theme,
+    grade: item.grade || item.plan?.grade, durationMinutes: item.durationMinutes || item.plan?.durationMinutes,
+    feedback: item.feedback || null
+  };
+  draftPlan.value = null;
+  editing.value = false;
+  resetFeedbackDraft();
+  notice.tone = "info";
+  notice.text = "已载入该生成方案，可在预览区填写评分与反馈。";
+  window.scrollTo({ top: 0, behavior: "smooth" });
+}
+
+async function submitFeedback(plan = generated.value) {
+  if (!plan?.generationId || feedbackBusy.value) return;
+  if (!feedbackDraft.rating) { notice.tone = "error"; notice.text = "请先选择 1–5 分评分。"; return; }
+  if (!feedbackDraft.adopted && feedbackDraft.reasonCodes.includes("OTHER") && !feedbackDraft.teacherNote.trim()) {
+    notice.tone = "error"; notice.text = "选择“其他”原因后，请填写教师备注。"; return;
+  }
+  feedbackBusy.value = true;
+  try {
+    const feedback = await api.put(`/api/ai/teaching-plans/generations/${plan.generationId}/feedback`, {
+      adopted: feedbackDraft.adopted, rating: feedbackDraft.rating,
+      reasonCodes: feedbackDraft.adopted ? [] : feedbackDraft.reasonCodes,
+      teacherNote: feedbackDraft.teacherNote.trim() || null
+    });
+    plan.feedback = feedback;
+    notice.tone = "success"; notice.text = feedback.adopted ? "已保存评分与反馈，方案已采纳。" : "已保存评分与改进反馈。";
+    resetFeedbackDraft();
+    await Promise.all([loadGenerationRecords(), loadPlans()]);
+  } catch (error) { notice.tone = "error"; notice.text = error.message || "反馈保存失败。"; }
+  finally { feedbackBusy.value = false; }
 }
 
 async function generate() {
@@ -159,6 +222,7 @@ async function generate() {
         } else if (eventName === "final") {
           const finalPlan = data.response?.teachingPlan || data.response || data.teachingPlan || data;
           generated.value = finalPlan;
+          resetFeedbackDraft();
           mergePlanPatch(finalPlan);
           if (data.threadId || data.response?.threadId || generated.value.threadId) {
             threadId.value = data.threadId || data.response?.threadId || generated.value.threadId;
@@ -263,7 +327,7 @@ async function updatePlan() {
 }
 
 function statusLabel(status) {
-  return { DRAFT: "草稿", PENDING: "待审核", APPROVED: "已通过", REJECTED: "已驳回", draft: "草稿", pending: "待审核", approved: "已通过", rejected: "已驳回" }[status] || status || "草稿";
+  return { DRAFT: "草稿", PENDING: "待审核", APPROVED: "已通过", ADOPTED: "已采纳", REJECTED: "已驳回", draft: "草稿", pending: "待审核", approved: "已通过", adopted: "已采纳", rejected: "已驳回" }[status] || status || "草稿";
 }
 </script>
 
@@ -292,6 +356,21 @@ function statusLabel(status) {
               <header><div><span class="badge badge-red">{{ visiblePlan.grade }}</span><span class="badge">{{ visiblePlan.durationMinutes }} 分钟</span><span v-if="visiblePlan.practiceRequired" class="badge">实践活动</span></div><h2>{{ visiblePlan.theme }}</h2><p v-if="visiblePlan.selectedResources?.length" class="resource-meta">资源：{{ visiblePlan.selectedResources.map(item => item.resource?.resourceName || item.resourceId).join('、') }}</p></header>
               <section v-for="([title, items]) in sections" :key="title"><h3>{{ title }}</h3><textarea v-if="editing" class="plan-edit-textarea" :value="sectionText(items)" @input="updateSection({ '教学目标':'objectives', '资源依据':'resourceBasis', '活动流程':'activityFlow', '课前准备':'preparation', '现场任务':'fieldTasks', '安全提示':'safetyNotes', '课后反思':'reflection', '评价方式':'evaluation' }[title], $event)" /><ul v-else><li v-for="item in items" :key="item">{{ item }}</li></ul></section>
               <section v-if="visiblePlan.citations?.length"><h3>引用来源</h3><div class="citation-list"><article v-for="item in visiblePlan.citations" :key="item.citationId"><strong>{{ item.title || item.citationId }}</strong><p>{{ item.excerpt }}</p></article></div></section>
+              <section v-if="!loading && visiblePlan.generationId" class="feedback-card">
+                <h3>教师使用反馈</h3>
+                <p class="feedback-hint">导出方案会自动标记为“已采纳”；请留下 1–5 分评分和文字建议，帮助持续优化生成质量。</p>
+                <template v-if="visiblePlan.feedback">
+                  <p class="submitted-feedback"><strong>{{ visiblePlan.feedback.adopted ? '已采纳' : '未采纳' }} · {{ visiblePlan.feedback.rating }} 分</strong><span v-if="visiblePlan.feedback.reasonCodes?.length"> · {{ visiblePlan.feedback.reasonCodes.map(reasonLabel).join('、') }}</span></p>
+                  <p v-if="visiblePlan.feedback.teacherNote">{{ visiblePlan.feedback.teacherNote }}</p>
+                </template>
+                <template v-else>
+                  <div class="feedback-choice" role="group" aria-label="是否采纳"><button type="button" :class="{ active: feedbackDraft.adopted }" @click="feedbackDraft.adopted = true; feedbackDraft.reasonCodes = []">采纳方案</button><button type="button" :class="{ active: !feedbackDraft.adopted }" @click="feedbackDraft.adopted = false">暂不采纳</button></div>
+                  <div class="star-rating" role="radiogroup" aria-label="方案评分"><button v-for="score in 5" :key="score" type="button" :class="{ active: score <= feedbackDraft.rating }" :aria-label="`${score} 分`" :aria-checked="score === feedbackDraft.rating" role="radio" @click="feedbackDraft.rating = score"><Star :size="19" :fill="score <= feedbackDraft.rating ? 'currentColor' : 'none'" /></button><span>{{ feedbackDraft.rating ? `${feedbackDraft.rating} 分` : '请选择评分' }}</span></div>
+                  <div v-if="!feedbackDraft.adopted" class="reason-options"><button v-for="[code, label] in feedbackReasons" :key="code" type="button" :class="{ active: feedbackDraft.reasonCodes.includes(code) }" @click="toggleReason(code)">{{ label }}</button></div>
+                  <label class="feedback-note">文字反馈<textarea v-model="feedbackDraft.teacherNote" maxlength="2000" placeholder="可写下方案亮点、需要补充的内容或实际使用建议" /></label>
+                  <button class="primary-button" type="button" :disabled="feedbackBusy" @click="submitFeedback(visiblePlan)">{{ feedbackBusy ? '保存中…' : '保存反馈' }}</button>
+                </template>
+              </section>
             </div>
             <div v-else-if="loading" class="streaming-copy">正在等待结构化内容<span class="streaming-caret"></span></div>
           </div>
@@ -306,6 +385,13 @@ function statusLabel(status) {
       <div class="plan-filters"><input v-model="filters.grade" placeholder="年级" /><input v-model="filters.theme" placeholder="主题关键词" /><select v-model="filters.resourceId"><option value="">全部资源</option><option v-for="item in schoolStore.resources" :key="item.resourceId" :value="item.resourceId">{{ item.resource?.resourceName || '未命名资源' }}</option></select><input v-model="filters.createdFrom" type="date" /><input v-model="filters.createdTo" type="date" /><button class="secondary-button" type="button" @click="searchPlans"><Search :size="15" />查询</button><button class="ghost-button" type="button" @click="resetPlanFilters">重置</button></div>
       <div v-if="!historyLoading && plans.length" class="plan-table-wrap"><table><thead><tr><th>主题</th><th>年级</th><th>资源</th><th>创建时间</th><th>状态</th><th>操作</th></tr></thead><tbody><tr v-for="plan in plans" :key="plan.planId"><td><strong>{{ plan.theme }}</strong></td><td>{{ plan.suitableGrade || "-" }}</td><td>{{ plan.resourceName || (plan.resourceIds?.length ? `${plan.resourceIds.length} 个资源` : "-") }}</td><td>{{ formatDate(plan.createdAt) }}</td><td><span class="badge" :class="plan.reviewStatus?.toLowerCase() === 'approved' ? 'badge-green' : ''">{{ statusLabel(plan.reviewStatus) }}</span></td><td><button class="icon-button" title="查看并编辑" @click="loadPlan(plan.planId)"><FilePlus2 :size="15" /></button><button class="icon-button" title="复制方案" @click="copyPlan(plan.planId)"><Copy :size="15" /></button><button class="icon-button" :title="exportingPlanId === plan.planId ? '导出中' : '导出 Word'" :disabled="Boolean(exportingPlanId)" @click="exportPlan(plan.planId, plan.theme)"><Download :size="15" /></button></td></tr></tbody></table><div class="pagination"><button class="ghost-button" :disabled="pageNum <= 1" @click="changePage(pageNum - 1)">上一页</button><span>{{ pageNum }} / {{ Math.max(1, Math.ceil(totalPlans / pageSize)) }}</span><button class="ghost-button" :disabled="pageNum >= Math.ceil(totalPlans / pageSize)" @click="changePage(pageNum + 1)">下一页</button></div></div>
       <div v-else-if="!historyLoading" class="empty-state">尚未保存教学方案</div>
+    </section>
+
+    <section class="page-panel feedback-library">
+      <div class="panel-header"><div><h2>生成方案反馈</h2><p>已提交的评分会同步给管理员用于采纳率、评分和改进原因统计。</p></div></div>
+      <div class="feedback-tabs" role="tablist"><button type="button" role="tab" :aria-selected="feedbackStatus === 'pending'" :class="{ active: feedbackStatus === 'pending' }" @click="selectFeedbackStatus('pending')">待评价</button><button type="button" role="tab" :aria-selected="feedbackStatus === 'submitted'" :class="{ active: feedbackStatus === 'submitted' }" @click="selectFeedbackStatus('submitted')">已评价</button></div>
+      <div v-if="generationRecords.length" class="generation-list"><article v-for="item in generationRecords" :key="item.generationId" class="generation-card"><div><strong>{{ item.theme }}</strong><p>{{ item.grade || '未指定年级' }} · {{ formatDate(item.createdAt) }}</p></div><div v-if="item.feedback" class="submitted-feedback"><strong>{{ item.feedback.adopted ? '已采纳' : '未采纳' }} · {{ item.feedback.rating }} 分</strong><p v-if="item.feedback.reasonCodes?.length">{{ item.feedback.reasonCodes.map(reasonLabel).join('、') }}</p><p v-if="item.feedback.teacherNote">{{ item.feedback.teacherNote }}</p></div><button v-else class="secondary-button" type="button" @click="openGenerationFeedback(item)">填写评分</button></article></div>
+      <div v-else class="empty-state compact-empty">当前筛选条件下暂无方案反馈。</div>
     </section>
   </AppShell>
 </template>
@@ -359,6 +445,28 @@ function statusLabel(status) {
 .citation-list { display: grid; gap: 8px; }
 .citation-list article { padding: 12px; border-left: 3px solid var(--red); background: #f8f9f7; }
 .citation-list p { margin: 6px 0 0; color: var(--muted); font-size: 13px; line-height: 1.6; }
+.feedback-card { display: grid; gap: 12px; padding: 18px; border: 1px solid #d5dfd6; border-radius: 9px; background: linear-gradient(135deg, #f7faf5, #fffdf8); }
+.feedback-card h3 { margin: 0; }
+.feedback-hint, .feedback-note { color: var(--muted); font-size: 13px; line-height: 1.6; }
+.feedback-choice, .star-rating, .reason-options { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.feedback-choice button, .reason-options button, .star-rating button { border: 1px solid var(--line); background: #fff; color: var(--muted); cursor: pointer; }
+.feedback-choice button { padding: 7px 11px; border-radius: 999px; }
+.feedback-choice button.active, .reason-options button.active { border-color: var(--green); background: var(--green-soft); color: var(--green); }
+.star-rating button { display: grid; place-items: center; padding: 4px; border: 0; color: #b3a991; }
+.star-rating button.active { color: #ca8b25; }
+.reason-options button { padding: 5px 8px; border-radius: 5px; font-size: 12px; }
+.feedback-note { display: grid; gap: 6px; font-weight: 700; }
+.feedback-note textarea { min-height: 78px; resize: vertical; }
+.submitted-feedback { color: var(--green); font-size: 13px; line-height: 1.6; }
+.submitted-feedback p { margin: 3px 0; color: var(--text); }
+.feedback-library { margin-top: 20px; overflow: hidden; }
+.feedback-tabs { display: flex; gap: 8px; padding: 0 20px 14px; border-bottom: 1px solid var(--line); }
+.feedback-tabs button { padding: 7px 11px; border: 1px solid var(--line); border-radius: 999px; background: #fff; color: var(--muted); }
+.feedback-tabs button.active { background: var(--green); border-color: var(--green); color: #fff; }
+.generation-list { display: grid; }
+.generation-card { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; padding: 15px 20px; border-bottom: 1px solid var(--line); }
+.generation-card p { margin: 5px 0 0; color: var(--muted); font-size: 13px; }
+.compact-empty { min-height: 100px; }
 .plan-empty { min-height: 500px; }
 .plan-empty strong { color: var(--text); font-family: var(--font-display); font-size: 18px; }
 .plan-empty > span:last-child { max-width: 290px; font-size: 13px; line-height: 1.7; }

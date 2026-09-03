@@ -371,6 +371,22 @@ button:disabled { cursor: not-allowed; opacity: .55; }
   max-width: none;
 }
 
+body.catalog-editor-open::before {
+  content: ""; position: fixed; inset: 0; z-index: 40;
+  background: rgba(24, 34, 28, .48); backdrop-filter: blur(3px);
+}
+body.catalog-editor-open { overflow: hidden; }
+body.catalog-editor-open .catalog-directory-details { display: none; }
+body.catalog-editor-open #catalogDirectoryEditor {
+  display: block; position: fixed; z-index: 41; top: 50%; left: 50%;
+  width: min(960px, calc(100vw - 32px)); max-height: calc(100vh - 32px);
+  overflow: auto; transform: translate(-50%, -50%); margin: 0;
+  border-radius: 18px; box-shadow: 0 28px 80px rgba(24, 34, 28, .3);
+}
+body.catalog-editor-open #catalogDirectoryEditor .card-topline {
+  position: sticky; top: 0; z-index: 2; background: var(--paper-strong);
+}
+
 .catalog-directory-details {
   display: grid;
   grid-template-columns: minmax(300px, .8fr) minmax(0, 1.2fr);
@@ -1094,6 +1110,107 @@ button:disabled { cursor: not-allowed; opacity: .55; }
   overflow: auto; border-radius: 12px; background: #fff;
   box-shadow: 0 24px 64px rgba(0,0,0,.28); animation: modal-in 180ms ease;
 }
+#schoolModal .modal-card {
+  width: min(100%, 960px);
+  max-height: calc(100vh - 80px);
+  border-radius: 18px;
+  background: #fff;
+  box-shadow: 0 28px 80px rgba(22, 34, 26, .3);
+}
+#schoolModal .card-topline {
+  min-height: 105px;
+  padding: 20px 28px;
+  border-bottom-color: #e5e1d8;
+}
+#schoolModal .card-topline h3 {
+  margin: 0;
+  color: #252d27;
+  font-family: var(--headline);
+  font-size: 24px;
+  font-weight: 700;
+  letter-spacing: .02em;
+}
+#schoolModal .card-topline .ghost-button {
+  min-width: 92px;
+  min-height: 60px;
+  padding: 0 20px;
+  border-radius: 12px;
+  font-size: 20px;
+}
+#schoolModal .data-form {
+  padding: 24px 28px 28px;
+}
+#schoolModal .field-grid {
+  column-gap: 20px;
+}
+#schoolModal .data-form label {
+  gap: 8px;
+  margin: 0 0 20px;
+  color: #536057;
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: .015em;
+}
+#schoolModal .data-form input,
+#schoolModal .data-form select {
+  min-height: 60px;
+  padding: 0 18px;
+  border-radius: 11px;
+  border-color: #cbd5ce;
+  color: #2a332c;
+  font-size: 17px;
+  font-weight: 600;
+  letter-spacing: .01em;
+}
+#schoolModal .data-form select {
+  padding-right: 42px;
+}
+#schoolModal .data-form input:disabled,
+#schoolModal .data-form select:disabled {
+  background: #f1f3f1;
+  color: #a5ada8;
+}
+#schoolModal .data-form > label {
+  margin-left: 0;
+  margin-right: 0;
+}
+#schoolModal .data-form textarea {
+  min-height: 144px;
+  padding: 16px 18px;
+  border-radius: 11px;
+  border-color: #cbd5ce;
+  font-size: 17px;
+  font-weight: 600;
+  line-height: 1.65;
+}
+#schoolModal .form-actions {
+  margin: -1px 0 20px;
+  padding: 0;
+  gap: 12px;
+}
+#schoolModal .form-actions .ghost-button,
+#schoolModal .form-actions .accent-button {
+  min-height: 60px;
+  padding: 0 24px;
+  border-radius: 12px;
+  font-size: 17px;
+  font-weight: 700;
+}
+#schoolModal .form-actions:last-child {
+  margin: 0;
+  padding: 4px 0 0;
+}
+#schoolModal #schoolGeocodeButton {
+  min-width: 198px;
+}
+#schoolModal #schoolResetButton {
+  min-width: 92px;
+}
+#schoolModal #schoolSubmitButton {
+  min-width: 134px;
+  background: #ad3d31;
+}
+#schoolModal #schoolSubmitButton:hover { background: #8e3026; }
 @keyframes modal-in { from { opacity: 0; transform: translateY(10px) scale(.98); } to { opacity: 1; transform: none; } }
 body.modal-open { overflow: hidden; }
 
@@ -1108,6 +1225,35 @@ body.modal-open { overflow: hidden; }
 }
 .user-section-chip:hover { border-color: #b8c8bd; color: var(--text); }
 .user-section-chip.is-active { background: var(--green); border-color: var(--green); color: #fff; }
+
+/* 账号编辑改为聚焦式悬浮面板，列表保持整洁 */
+.account-editor-card { display: none !important; }
+body.account-modal-open::before {
+  content: ""; position: fixed; inset: 0; z-index: 40;
+  background: rgba(24, 34, 28, .48); backdrop-filter: blur(3px);
+}
+.account-editor-card.is-open {
+  display: block !important; position: fixed; z-index: 41;
+  top: 50%; left: 50%; width: min(560px, calc(100vw - 32px));
+  max-height: calc(100vh - 32px); overflow: auto;
+  transform: translate(-50%, -50%); margin: 0;
+  border-radius: 18px; box-shadow: 0 28px 80px rgba(24, 34, 28, .3);
+}
+.account-editor-card .card-topline { position: sticky; top: 0; z-index: 1; background: var(--paper-strong); }
+.account-editor-card .card-topline { justify-content: flex-start; }
+.account-editor-card .card-topline h3 { margin-right: auto; }
+.account-pagination { display: flex; align-items: center; justify-content: center; gap: 14px; padding: 18px; color: var(--muted); font-size: 13px; font-weight: 700; }
+.account-pagination .action-button { min-width: 68px; }
+.card-topline-actions { display: inline-flex; align-items: center; gap: 12px; }
+.card-topline-actions .accent-button { min-height: 34px; padding: 0 14px; font-size: 13px; }
+.user-section[data-user-panel="accounts"] .table-card { min-width: 0; }
+.user-section[data-user-panel="accounts"] .workspace-grid { grid-template-columns: minmax(0, 1fr); }
+.user-section[data-user-panel="profiles"] .workspace-grid,
+.user-section[data-user-panel="roles"] .workspace-grid { grid-template-columns: minmax(0, 1fr); }
+.user-section[data-user-panel="accounts"] .table-shell { overflow-x: auto; }
+.user-section[data-user-panel="accounts"] table { min-width: 900px; }
+.user-section[data-user-panel="accounts"] td,
+.user-section[data-user-panel="accounts"] th { vertical-align: middle; }
 .user-section { display: none; }
 .user-section.is-active { display: block; animation: panel-in 200ms ease; }
 
@@ -1397,6 +1543,17 @@ body.modal-open { overflow: hidden; }
   .metric-card { padding: 14px 16px 12px; }
   .metric-card strong { font-size: 24px; }
   .modal-card { max-height: calc(100vh - 24px); }
+  #schoolModal { padding: 12px; }
+  #schoolModal .card-topline { min-height: 78px; padding: 14px 18px; }
+  #schoolModal .card-topline h3 { font-size: 20px; }
+  #schoolModal .card-topline .ghost-button { min-height: 48px; min-width: 76px; font-size: 16px; }
+  #schoolModal .data-form { padding: 18px 18px 20px; }
+  #schoolModal .data-form label { font-size: 14px; }
+  #schoolModal .data-form input,
+  #schoolModal .data-form select,
+  #schoolModal .data-form textarea { font-size: 16px; }
+  #schoolModal .form-actions .ghost-button,
+  #schoolModal .form-actions .accent-button { min-height: 52px; font-size: 16px; }
 }
 
 @media (max-width: 480px) {

@@ -8,7 +8,7 @@ import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.web.bind.annotation.*;
 
 @RestController
-@RequestMapping({"/api/student", "/student"})
+@RequestMapping("/api/student")
 public class StudentHomeController {
     private final StudentHomeService homeService;
     private final StudentResourceBrowseService browseService;

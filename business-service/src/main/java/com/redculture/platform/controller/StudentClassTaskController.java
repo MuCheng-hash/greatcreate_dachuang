@@ -8,6 +8,11 @@ import com.redculture.platform.vo.TeacherClassVO;
 import com.redculture.platform.vo.request.InviteJoinRequest;
 import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.web.bind.annotation.*;
+import org.springframework.http.MediaType;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.ContentDisposition;
+import org.springframework.http.ResponseEntity;
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 import com.redculture.platform.common.PageResult;
 import com.redculture.platform.vo.StudentClassSummaryVO;
@@ -30,4 +35,5 @@ public class StudentClassTaskController {
     @GetMapping("/classes/{classId}") public ApiResponse<StudentClassDetailVO> classDetail(@PathVariable Long classId, HttpServletRequest request) { try { return ApiResponse.success(service.studentClassDetail(classId, AuthContext.requireUser(request))); } catch (IllegalArgumentException e) { return ApiResponse.fail(e.getMessage()); } }
     @GetMapping("/classes/{classId}/tasks") public ApiResponse<PageResult<ClassTaskVO>> classTasks(@PathVariable Long classId, @RequestParam(required = false) Long pageNum, @RequestParam(required = false) Long pageSize, HttpServletRequest request) { try { return ApiResponse.success(service.studentClassTasks(classId, pageNum, pageSize, AuthContext.requireUser(request))); } catch (IllegalArgumentException e) { return ApiResponse.fail(e.getMessage()); } }
     @GetMapping("/classes/{classId}/activities") public ApiResponse<PageResult<StudentClassActivityVO>> activities(@PathVariable Long classId, @RequestParam(required = false) Long pageNum, @RequestParam(required = false) Long pageSize, HttpServletRequest request) { try { return ApiResponse.success(service.studentClassActivities(classId, pageNum, pageSize, AuthContext.requireUser(request))); } catch (IllegalArgumentException e) { return ApiResponse.fail(e.getMessage()); } }
+    @GetMapping("/tasks/{taskId}/material") public ResponseEntity<?> taskMaterial(@PathVariable Long taskId, HttpServletRequest request) { try { TeacherClassService.TaskMaterial material = service.downloadTaskMaterial(taskId, AuthContext.requireUser(request)); return ResponseEntity.ok().contentType(MediaType.parseMediaType(material.contentType())).header(HttpHeaders.CONTENT_DISPOSITION, ContentDisposition.attachment().filename(material.filename(), StandardCharsets.UTF_8).build().toString()).body(material.resource()); } catch (IllegalArgumentException exception) { return ResponseEntity.status(403).body(ApiResponse.fail(exception.getMessage())); } }
 }

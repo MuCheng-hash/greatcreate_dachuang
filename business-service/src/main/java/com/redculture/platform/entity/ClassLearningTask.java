@@ -31,8 +31,16 @@ public class ClassLearningTask extends BaseAuditEntity {
     private Boolean allowLateSubmission;
     @TableField("published_at")
     private LocalDateTime publishedAt;
+    @TableField("start_at")
+    private LocalDateTime startAt;
     @TableField("due_at")
     private LocalDateTime dueAt;
+    @TableField("material_filename")
+    private String materialFilename;
+    @TableField("material_storage_key")
+    private String materialStorageKey;
+    @TableField("material_content_type")
+    private String materialContentType;
     @TableField("status")
     private String status;
 }

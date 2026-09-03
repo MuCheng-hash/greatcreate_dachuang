@@ -40,7 +40,10 @@ public class RoleAuthorizationInterceptor implements org.springframework.web.ser
                 && ("GET".equalsIgnoreCase(request.getMethod())
                     && (uri.startsWith("/api/map/") || uri.startsWith("/api/school-map/")
                     || uri.startsWith("/api/ai/") || "/api/teacher/resources/nearby".equals(uri))
-                    || ("POST".equalsIgnoreCase(request.getMethod()) && "/api/ai/qa/ask".equals(uri)));
+                    || ("POST".equalsIgnoreCase(request.getMethod())
+                    && ("/api/ai/qa/ask".equals(uri)
+                    || "/api/ai/qa/stream".equals(uri)
+                    || uri.matches("/api/ai/qa/turns/[^/]+/cancel"))));
         if (studentReadEndpoint && user.getSchoolId() != null) return true;
         if (uri.startsWith("/api/teacher/") && !Set.of(PLATFORM_ADMIN, SCHOOL_ADMIN, TEACHER).contains(role)
                 && !(STUDENT.equals(role) && "/api/teacher/resources/nearby".equals(uri))) {

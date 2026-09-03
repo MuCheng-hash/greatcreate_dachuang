@@ -52,11 +52,16 @@ class RoleAuthorizationInterceptorTest {
         assertTrue(call("/api/ai/memory-settings", user("student", 8L)).allowed());
         assertTrue(call("/api/ai/memories", user("student", 8L)).allowed());
         assertFalse(call("/api/ai/memory-settings", user("student", null)).allowed());
-        assertFalse(call("/api/ai/qa/stream", user("student", 8L)).allowed());
+        assertTrue(call("/api/ai/qa/stream", "POST", user("student", 8L)).allowed());
+        assertTrue(call("/api/ai/qa/turns/turn-1/cancel", "POST", user("student", 8L)).allowed());
     }
 
     private Result call(String path, AuthCurrentUserVO user) throws Exception {
-        MockHttpServletRequest request = new MockHttpServletRequest("GET", path);
+        return call(path, "GET", user);
+    }
+
+    private Result call(String path, String method, AuthCurrentUserVO user) throws Exception {
+        MockHttpServletRequest request = new MockHttpServletRequest(method, path);
         request.setAttribute(AuthContext.CURRENT_USER_ATTRIBUTE, user);
         MockHttpServletResponse response = new MockHttpServletResponse();
         return new Result(interceptor.preHandle(request, response, new Object()), response);

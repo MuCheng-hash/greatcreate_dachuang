@@ -12,6 +12,7 @@ public enum ReviewStatus {
     DRAFT("draft"),
     PENDING("pending"),
     APPROVED("approved"),
+    ADOPTED("adopted"),
     REJECTED("rejected");
 
     @EnumValue

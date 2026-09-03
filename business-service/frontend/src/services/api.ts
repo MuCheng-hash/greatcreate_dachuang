@@ -96,7 +96,7 @@ function errorMessage(error: unknown): string {
 function prepareHeaders(options: RequestInit, method: string): Headers {
   const headers = new Headers(options.headers || {});
   headers.set("Accept", headers.get("Accept") || "application/json");
-  if (options.body && !headers.has("Content-Type")) {
+  if (options.body && !headers.has("Content-Type") && !(typeof FormData !== "undefined" && options.body instanceof FormData)) {
     headers.set("Content-Type", "application/json");
   }
   if (isMutating(method)) {

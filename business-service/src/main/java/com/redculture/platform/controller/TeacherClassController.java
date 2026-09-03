@@ -9,6 +9,12 @@ import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
+import org.springframework.web.multipart.MultipartFile;
+import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.ContentDisposition;
+import java.nio.charset.StandardCharsets;
 
 @RestController
 @RequestMapping({"/api/teacher/classes", "/teacher/classes"})
@@ -37,6 +43,8 @@ public class TeacherClassController {
     public ApiResponse<Void> removeStudent(@PathVariable Long classId, @PathVariable Long studentId, HttpServletRequest request) { return run(() -> { service.removeStudent(classId, studentId, AuthContext.requireUser(request)); return null; }); }
     @PostMapping("/{classId}/students/import")
     public ApiResponse<TeacherClassImportResultVO> importStudents(@PathVariable Long classId, @RequestBody ClassStudentImportRequest body, HttpServletRequest request) { return run(() -> service.importStudents(classId, body, AuthContext.requireUser(request))); }
+    @PostMapping(value = "/{classId}/students/import-excel", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+    public ApiResponse<TeacherClassImportResultVO> importStudentsExcel(@PathVariable Long classId, @RequestPart("file") MultipartFile file, HttpServletRequest request) { return run(() -> service.importStudentsExcel(classId, file, AuthContext.requireUser(request))); }
     @PostMapping("/{classId}/invite-code")
     public ApiResponse<String> rotateInvite(@PathVariable Long classId, HttpServletRequest request) { return run(() -> service.rotateInviteCode(classId, AuthContext.requireUser(request))); }
     @DeleteMapping("/{classId}/invite-code")
@@ -45,6 +53,10 @@ public class TeacherClassController {
     public ApiResponse<List<ClassTaskVO>> tasks(@PathVariable Long classId, HttpServletRequest request) { return run(() -> service.tasks(classId, AuthContext.requireUser(request))); }
     @PostMapping("/{classId}/tasks")
     public ApiResponse<ClassTaskVO> publishTask(@PathVariable Long classId, @RequestBody ClassTaskSaveRequest body, HttpServletRequest request) { return run(() -> service.publishTask(classId, body, AuthContext.requireUser(request))); }
+    @PostMapping(value = "/{classId}/tasks/with-material", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+    public ApiResponse<ClassTaskVO> publishTaskWithMaterial(@PathVariable Long classId, @RequestPart("task") ClassTaskSaveRequest body, @RequestPart(value = "material", required = false) MultipartFile material, HttpServletRequest request) { return run(() -> service.publishTask(classId, body, material, AuthContext.requireUser(request))); }
+    @GetMapping("/tasks/{taskId}/material")
+    public ResponseEntity<?> downloadTaskMaterial(@PathVariable Long taskId, HttpServletRequest request) { try { TeacherClassService.TaskMaterial material = service.downloadTaskMaterial(taskId, AuthContext.requireUser(request)); return ResponseEntity.ok().contentType(MediaType.parseMediaType(material.contentType())).header(HttpHeaders.CONTENT_DISPOSITION, ContentDisposition.attachment().filename(material.filename(), StandardCharsets.UTF_8).build().toString()).body(material.resource()); } catch (IllegalArgumentException exception) { return ResponseEntity.status(403).body(ApiResponse.fail(exception.getMessage())); } }
 
     private <T> ApiResponse<T> run(ThrowingSupplier<T> action) { try { return ApiResponse.success(action.get()); } catch (IllegalArgumentException exception) { return ApiResponse.fail(exception.getMessage()); } }
     @FunctionalInterface private interface ThrowingSupplier<T> { T get(); }

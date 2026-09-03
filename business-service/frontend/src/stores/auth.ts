@@ -31,7 +31,7 @@ export const useAuthStore = defineStore("auth", {
   }),
   getters: {
     isAuthenticated: (state): boolean => Boolean(state.user?.accountId),
-    isAdmin: (state): boolean => state.user?.roleCode === "platform_admin",
+    isAdmin: (state): boolean => ["school_admin", "platform_admin"].includes(state.user?.roleCode || ""),
     schoolLabel: (state): string => state.user?.schoolName || state.user?.displayName || state.user?.username || "学校账号",
   },
   actions: {

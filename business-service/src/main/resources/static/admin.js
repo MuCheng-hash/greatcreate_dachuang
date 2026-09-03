@@ -1,6 +1,9 @@
 const adminState = {
     activeTab: "dashboard",
     schools: [],
+    schoolsPage: 1,
+    schoolsPageSize: 10,
+    schoolsTotal: 0,
     resources: [],
     schoolProvinceRegions: [],
     schoolCityRegions: [],
@@ -21,8 +24,17 @@ const adminState = {
     schoolMapMarkerIndex: new Map(),
     schoolMapInfoWindow: null,
     userAccounts: [],
+    userAccountsTotal: 0,
+    userAccountsPage: 1,
+    userAccountsPageSize: 10,
     userProfiles: [],
+    userProfilesTotal: 0,
+    userProfilesPage: 1,
+    userProfilesPageSize: 10,
     userRoles: [],
+    userRolesTotal: 0,
+    userRolesPage: 1,
+    userRolesPageSize: 10,
     userPermissions: [],
     userClasses: [],
     discoveryCandidates: [],
@@ -124,6 +136,7 @@ const adminElements = {
     schoolModalCloseButton: document.querySelector("#schoolModalCloseButton"),
     schoolTableBody: document.querySelector("#schoolTableBody"),
     schoolListCount: document.querySelector("#schoolListCount"),
+    schoolPagination: document.querySelector("#schoolPagination"),
 
     resourceForm: document.querySelector("#resourceForm"),
     resourceIdInput: document.querySelector("#resourceIdInput"),
@@ -406,9 +419,10 @@ function initializeUserManagementPanel() {
 
         <div class="user-section is-active" data-user-panel="accounts">
             <div class="workspace-grid">
-                <article class="form-card">
+                <article class="form-card account-editor-card" id="accountEditorCard">
                     <div class="card-topline">
                         <h3>账号信息</h3>
+                        <button class="ghost-button" id="accountModalCloseButton" type="button">关闭</button>
                         <button class="ghost-button" id="accountResetButton" type="button">清空</button>
                     </div>
                     <form id="accountForm" class="data-form">
@@ -433,7 +447,7 @@ function initializeUserManagementPanel() {
                 <article class="table-card">
                     <div class="card-topline">
                         <h3>账号列表</h3>
-                        <span class="mini-stat" id="accountListCount">0 条</span>
+                        <div class="card-topline-actions"><span class="mini-stat" id="accountListCount">0 条</span><button class="ghost-button" id="accountTemplateButton" type="button">下载 Excel 模板</button><button class="accent-button" id="accountImportButton" type="button">导入数据</button></div>
                     </div>
                     <div class="panel-tools compact-tools">
                         <input id="accountKeywordInput" class="line-input" type="search" placeholder="账号、姓名、电话">
@@ -442,19 +456,21 @@ function initializeUserManagementPanel() {
                     </div>
                     <div class="table-shell">
                         <table>
-                            <thead><tr><th>账号</th><th>人员</th><th>学校</th><th>角色</th><th>状态</th><th>操作</th></tr></thead>
+                            <thead><tr><th>账号</th><th>人员</th><th>联系电话</th><th>学校</th><th>角色</th><th>状态</th><th>操作</th></tr></thead>
                             <tbody id="accountTableBody"></tbody>
                         </table>
                     </div>
+                    <div class="account-pagination" id="accountPagination"></div>
                 </article>
             </div>
         </div>
 
         <div class="user-section" data-user-panel="profiles">
             <div class="workspace-grid">
-                <article class="form-card">
+                <article class="form-card account-editor-card" id="profileEditorCard">
                     <div class="card-topline">
                         <h3>档案信息</h3>
+                        <button class="ghost-button" id="profileModalCloseButton" type="button">关闭</button>
                         <button class="ghost-button" id="profileResetButton" type="button">清空</button>
                     </div>
                     <form id="profileForm" class="data-form">
@@ -478,7 +494,7 @@ function initializeUserManagementPanel() {
                 <article class="table-card">
                     <div class="card-topline">
                         <h3>档案列表</h3>
-                        <span class="mini-stat" id="profileListCount">0 条</span>
+                        <div class="card-topline-actions"><span class="mini-stat" id="profileListCount">0 条</span><button class="ghost-button" id="profileTemplateButton" type="button">下载 Excel 模板</button><button class="accent-button" id="profileImportButton" type="button">导入数据</button></div>
                     </div>
                     <div class="panel-tools compact-tools">
                         <input id="profileKeywordInput" class="line-input" type="search" placeholder="姓名、电话">
@@ -491,19 +507,17 @@ function initializeUserManagementPanel() {
                             <tbody id="profileTableBody"></tbody>
                         </table>
                     </div>
-                    <div class="student-import-box">
-                        <h3>学生导入</h3>
-                        <textarea id="studentImportInput" placeholder='支持 JSON 数组，例如：[{"username":"s001","password":"123456","realName":"张三","studentNo":"2026001","schoolId":1,"classId":1}]'></textarea>
-                        <button class="ghost-button" id="studentImportButton" type="button">导入学生</button>
-                    </div>
+                    <div class="account-pagination" id="profilePagination"></div>
+                    <input id="studentImportFileInput" type="file" accept=".xlsx,.csv" hidden>
+                    <input id="accountImportFileInput" type="file" accept=".xlsx,.csv" hidden>
                 </article>
             </div>
         </div>
 
         <div class="user-section" data-user-panel="roles">
             <div class="workspace-grid">
-                <article class="form-card">
-                    <div class="card-topline"><h3>角色信息</h3><button class="ghost-button" id="roleResetButton" type="button">清空</button></div>
+                <article class="form-card account-editor-card" id="roleEditorCard">
+                    <div class="card-topline"><h3>角色信息</h3><button class="ghost-button" id="roleModalCloseButton" type="button">关闭</button><button class="ghost-button" id="roleResetButton" type="button">清空</button></div>
                     <form id="roleForm" class="data-form">
                         <input id="roleIdInput" type="hidden">
                         <label><span>角色编码</span><input id="roleCodeInput" type="text" placeholder="例如 school_admin"></label>
@@ -517,13 +531,14 @@ function initializeUserManagementPanel() {
                     </form>
                 </article>
                 <article class="table-card">
-                    <div class="card-topline"><h3>角色与权限</h3><span class="mini-stat" id="roleListCount">0 个角色</span></div>
+                    <div class="card-topline"><h3>角色与权限</h3><div class="card-topline-actions"><span class="mini-stat" id="roleListCount">0 个角色</span><button class="accent-button" id="roleCreateButton" type="button">新建角色</button></div></div>
                     <div class="table-shell">
                         <table>
                             <thead><tr><th>角色编码</th><th>角色名称</th><th>范围</th><th>状态</th><th>操作</th></tr></thead>
                             <tbody id="roleTableBody"></tbody>
                         </table>
                     </div>
+                    <div class="account-pagination" id="rolePagination"></div>
                     <div id="permissionList" class="permission-list"></div>
                 </article>
             </div>
@@ -538,6 +553,11 @@ function initializeUserManagementPanel() {
         userSectionButtons: Array.from(document.querySelectorAll("[data-user-section]")),
         userSections: Array.from(document.querySelectorAll("[data-user-panel]")),
         accountForm: document.querySelector("#accountForm"),
+        accountEditorCard: document.querySelector("#accountEditorCard"),
+        accountModalCloseButton: document.querySelector("#accountModalCloseButton"),
+        accountTemplateButton: document.querySelector("#accountTemplateButton"),
+        accountImportButton: document.querySelector("#accountImportButton"),
+        accountImportFileInput: document.querySelector("#accountImportFileInput"),
         accountIdInput: document.querySelector("#accountIdInput"),
         accountUsernameInput: document.querySelector("#accountUsernameInput"),
         accountPasswordInput: document.querySelector("#accountPasswordInput"),
@@ -554,7 +574,14 @@ function initializeUserManagementPanel() {
         accountSearchButton: document.querySelector("#accountSearchButton"),
         accountTableBody: document.querySelector("#accountTableBody"),
         accountListCount: document.querySelector("#accountListCount"),
+        accountPagination: document.querySelector("#accountPagination"),
         profileForm: document.querySelector("#profileForm"),
+        profileEditorCard: document.querySelector("#profileEditorCard"),
+        profileModalCloseButton: document.querySelector("#profileModalCloseButton"),
+        profileCreateButton: document.querySelector("#profileCreateButton"),
+        profileTemplateButton: document.querySelector("#profileTemplateButton"),
+        profileImportButton: document.querySelector("#profileImportButton"),
+        profilePagination: document.querySelector("#profilePagination"),
         profileIdInput: document.querySelector("#profileIdInput"),
         profileAccountSelect: document.querySelector("#profileAccountSelect"),
         profileTypeInput: document.querySelector("#profileTypeInput"),
@@ -572,9 +599,12 @@ function initializeUserManagementPanel() {
         profileSearchButton: document.querySelector("#profileSearchButton"),
         profileTableBody: document.querySelector("#profileTableBody"),
         profileListCount: document.querySelector("#profileListCount"),
-        studentImportInput: document.querySelector("#studentImportInput"),
-        studentImportButton: document.querySelector("#studentImportButton"),
+        studentImportFileInput: document.querySelector("#studentImportFileInput"),
         roleForm: document.querySelector("#roleForm"),
+        roleEditorCard: document.querySelector("#roleEditorCard"),
+        roleModalCloseButton: document.querySelector("#roleModalCloseButton"),
+        roleCreateButton: document.querySelector("#roleCreateButton"),
+        rolePagination: document.querySelector("#rolePagination"),
         roleIdInput: document.querySelector("#roleIdInput"),
         roleCodeInput: document.querySelector("#roleCodeInput"),
         roleNameInput: document.querySelector("#roleNameInput"),
@@ -808,7 +838,7 @@ function bindAdminEvents() {
         event.preventDefault();
         await submitSchoolForm();
     });
-    adminElements.schoolSearchButton?.addEventListener("click", () => void loadSchools());
+    adminElements.schoolSearchButton?.addEventListener("click", () => { adminState.schoolsPage = 1; void loadSchools(); });
     adminElements.schoolRefreshButton?.addEventListener("click", () => void loadSchools());
     adminElements.schoolTemplateButton?.addEventListener("click", () => void downloadSchoolImportTemplate());
     adminElements.schoolImportButton?.addEventListener("click", () => adminElements.schoolImportFileInput?.click());
@@ -1928,11 +1958,13 @@ async function requestJson(url, options = {}, state = { refreshAttempted: false,
 
 async function loadSchools() {
     const keyword = adminElements.schoolKeywordInput?.value?.trim() || "";
-    const result = await requestJson(`/api/admin/schools?pageNum=1&pageSize=50${keyword ? `&keyword=${encodeURIComponent(keyword)}` : ""}`);
+    const result = await requestJson(`/api/admin/schools?pageNum=1&pageSize=100${keyword ? `&keyword=${encodeURIComponent(keyword)}` : ""}`);
     adminState.schools = result.records || [];
+    const total = Number(result.total ?? result.totalCount ?? adminState.schools.length);
+    adminState.schoolsTotal = total > adminState.schools.length ? total : adminState.schools.length;
     renderSchoolTable(adminState.schools);
     if (adminElements.schoolTotalMetric) {
-        adminElements.schoolTotalMetric.textContent = String(result.total || 0);
+        adminElements.schoolTotalMetric.textContent = String(adminState.schoolsTotal || 0);
     }
     syncSelectOptions();
     syncAgentDebugSchoolOptions();
@@ -2413,19 +2445,23 @@ function regionNameById(regions, regionId) {
 }
 
 function renderSchoolTable(records) {
-    adminElements.schoolListCount.textContent = `${records.length} 条`;
+    const page = Math.max(1, Number(adminState.schoolsPage || 1));
+    const size = Number(adminState.schoolsPageSize || 10);
+    const total = Number(adminState.schoolsTotal || records.length);
+    const pages = Math.max(1, Math.ceil(total / size));
+    const pageRecords = records.slice((page - 1) * size, page * size);
+    adminElements.schoolListCount.textContent = `${total} 条`;
     adminElements.schoolTableBody.innerHTML = "";
     if (!records.length) {
         adminElements.schoolTableBody.innerHTML = `<tr><td colspan="5">暂无学校数据。</td></tr>`;
         return;
     }
 
-    records.forEach(record => {
+    pageRecords.forEach(record => {
         const tr = document.createElement("tr");
         tr.innerHTML = `
             <td>
                 <strong>${escapeHtml(record.schoolName || "-")}</strong>
-                <div class="status-box">${escapeHtml(regionPathText(record))}</div>
             </td>
             <td>${escapeHtml(record.schoolType || "-")}</td>
             <td>${escapeHtml(record.address || "未填写详细地址")}</td>
@@ -2441,6 +2477,12 @@ function renderSchoolTable(records) {
         tr.querySelector('[data-action="delete"]').addEventListener("click", () => void deleteSchool(record));
         adminElements.schoolTableBody.appendChild(tr);
     });
+    const pagination = adminElements.schoolPagination;
+    if (pagination) {
+        pagination.innerHTML = `<button class="action-button" type="button" data-school-page="prev" ${page <= 1 ? "disabled" : ""}>上一页</button><span>第 ${page} / ${pages} 页</span><button class="action-button" type="button" data-school-page="next" ${page >= pages ? "disabled" : ""}>下一页</button>`;
+        pagination.querySelector('[data-school-page="prev"]')?.addEventListener("click", () => { adminState.schoolsPage = page - 1; renderSchoolTable(adminState.schools); });
+        pagination.querySelector('[data-school-page="next"]')?.addEventListener("click", () => { adminState.schoolsPage = page + 1; renderSchoolTable(adminState.schools); });
+    }
 }
 
 async function deleteSchool(record) {
@@ -2753,21 +2795,31 @@ function bindUserManagementEvents() {
         void submitUserAccountForm();
     });
     adminElements.accountResetButton?.addEventListener("click", resetUserAccountForm);
-    adminElements.accountSearchButton?.addEventListener("click", () => void loadUserAccounts());
+    adminElements.accountModalCloseButton?.addEventListener("click", resetUserAccountForm);
+    adminElements.accountTemplateButton?.addEventListener("click", () => downloadUserTemplate("account"));
+    adminElements.accountImportButton?.addEventListener("click", () => adminElements.accountImportFileInput?.click());
+    adminElements.accountImportFileInput?.addEventListener("change", () => void importStudentsFromExcel(adminElements.accountImportFileInput));
+    adminElements.accountSearchButton?.addEventListener("click", () => { adminState.userAccountsPage = 1; void loadUserAccounts(); });
     adminElements.accountResetPasswordButton?.addEventListener("click", () => void resetSelectedAccountPassword());
     adminElements.profileForm?.addEventListener("submit", event => {
         event.preventDefault();
         void submitUserProfileForm();
     });
     adminElements.profileResetButton?.addEventListener("click", resetUserProfileForm);
-    adminElements.profileSearchButton?.addEventListener("click", () => void loadUserProfiles());
+    adminElements.profileModalCloseButton?.addEventListener("click", resetUserProfileForm);
+    adminElements.profileCreateButton?.addEventListener("click", () => { resetUserProfileForm(); adminElements.profileEditorCard?.classList.add("is-open"); document.body.classList.add("account-modal-open"); });
+    adminElements.profileTemplateButton?.addEventListener("click", () => downloadUserTemplate("profile"));
+    adminElements.profileImportButton?.addEventListener("click", () => adminElements.studentImportFileInput?.click());
+    adminElements.profileSearchButton?.addEventListener("click", () => { adminState.userProfilesPage = 1; void loadUserProfiles(); });
     adminElements.profileSchoolSelect?.addEventListener("change", () => void loadUserClasses(parseNullableNumber(adminElements.profileSchoolSelect.value)));
-    adminElements.studentImportButton?.addEventListener("click", () => void importStudentsFromText());
+    adminElements.studentImportFileInput?.addEventListener("change", () => void importStudentsFromExcel());
     adminElements.roleForm?.addEventListener("submit", event => {
         event.preventDefault();
         void submitRoleForm();
     });
     adminElements.roleResetButton?.addEventListener("click", resetRoleForm);
+    adminElements.roleModalCloseButton?.addEventListener("click", resetRoleForm);
+    adminElements.roleCreateButton?.addEventListener("click", () => { resetRoleForm(); adminElements.roleEditorCard?.classList.add("is-open"); document.body.classList.add("account-modal-open"); });
 }
 
 function setActiveUserSection(section = "accounts") {
@@ -2788,6 +2840,7 @@ async function loadUserManagementData() {
 
 async function loadUserRoles() {
     adminState.userRoles = await requestJson("/api/admin/roles");
+    adminState.userRolesTotal = adminState.userRoles.length;
     renderRoleTable();
 }
 
@@ -2799,6 +2852,7 @@ async function loadUserClasses(schoolId = null) {
 
 async function loadUserAccounts() {
     if (!adminElements.accountTableBody) return;
+    // 一次读取候选账号，前端统一切片，兼容后端分页参数未生效的部署版本
     const params = new URLSearchParams({ pageNum: "1", pageSize: "100" });
     const keyword = adminElements.accountKeywordInput?.value?.trim();
     const schoolId = adminElements.accountFilterSchoolSelect?.value;
@@ -2806,6 +2860,10 @@ async function loadUserAccounts() {
     if (schoolId) params.set("schoolId", schoolId);
     const result = await requestJson(`/api/admin/user-accounts?${params}`);
     adminState.userAccounts = result.records || [];
+    const reportedTotal = Number(result.total ?? result.totalCount ?? result.count);
+    adminState.userAccountsTotal = Number.isFinite(reportedTotal) && reportedTotal > adminState.userAccounts.length
+        ? reportedTotal
+        : adminState.userAccounts.length;
     renderAccountTable();
     syncUserManagementSelectOptions();
 }
@@ -2819,6 +2877,8 @@ async function loadUserProfiles() {
     if (profileType) params.set("profileType", profileType);
     const result = await requestJson(`/api/admin/user-profiles?${params}`);
     adminState.userProfiles = result.records || [];
+    const profileTotal = Number(result.total ?? result.totalCount ?? result.count);
+    adminState.userProfilesTotal = Number.isFinite(profileTotal) && profileTotal > adminState.userProfiles.length ? profileTotal : adminState.userProfiles.length;
     renderProfileTable();
 }
 
@@ -2878,15 +2938,20 @@ function getChecklistSelectedValues(container) {
 
 function renderAccountTable() {
     if (!adminElements.accountTableBody) return;
-    adminElements.accountListCount.textContent = `${adminState.userAccounts.length} 条`;
+    const total = adminState.userAccountsTotal ?? adminState.userAccounts.length;
+    adminElements.accountListCount.textContent = `${total} 条`;
     if (!adminState.userAccounts.length) {
-        adminElements.accountTableBody.innerHTML = `<tr><td colspan="6">暂无账号数据。</td></tr>`;
+        adminElements.accountTableBody.innerHTML = `<tr><td colspan="7">暂无账号数据。</td></tr>`;
         return;
     }
-    adminElements.accountTableBody.innerHTML = adminState.userAccounts.map(account => `
+    const page = Math.max(1, Number(adminState.userAccountsPage || 1));
+    const size = Number(adminState.userAccountsPageSize || 10);
+    const pageRecords = adminState.userAccounts.slice((page - 1) * size, page * size);
+    adminElements.accountTableBody.innerHTML = pageRecords.map(account => `
         <tr>
-            <td><strong>${escapeHtml(account.username)}</strong><div class="status-box">ID ${escapeHtml(account.accountId)}</div></td>
-            <td>${escapeHtml(account.realName || account.displayName || "-")}<div class="status-box">${escapeHtml(account.contactPhone || "")}</div></td>
+            <td><strong>${escapeHtml(account.username)}</strong></td>
+            <td>${escapeHtml(account.realName || account.displayName || "-")}</td>
+            <td>${escapeHtml(account.contactPhone || "-")}</td>
             <td>${escapeHtml(account.schoolName || "未绑定")}</td>
             <td>${escapeHtml((account.roleNames || []).join("、") || "未分配")}</td>
             <td>${renderStatus(account.status || "active")}</td>
@@ -2902,18 +2967,34 @@ function renderAccountTable() {
     document.querySelectorAll("[data-account-toggle]").forEach(button => {
         button.addEventListener("click", () => void toggleUserAccountStatus(button.dataset.accountToggle));
     });
+    renderAccountPagination();
+}
+
+function renderAccountPagination() {
+    const root = adminElements.accountPagination;
+    if (!root) return;
+    const total = Number(adminState.userAccountsTotal || 0);
+    const size = Number(adminState.userAccountsPageSize || 10);
+    const pages = Math.max(1, Math.ceil(total / size));
+    const page = Math.min(Math.max(1, Number(adminState.userAccountsPage || 1)), pages);
+    root.innerHTML = `<button class="action-button" type="button" data-account-page="prev" ${page <= 1 ? "disabled" : ""}>上一页</button><span>第 ${page} / ${pages} 页</span><button class="action-button" type="button" data-account-page="next" ${page >= pages ? "disabled" : ""}>下一页</button>`;
+    root.querySelector('[data-account-page="prev"]')?.addEventListener("click", () => { adminState.userAccountsPage = page - 1; void loadUserAccounts(); });
+    root.querySelector('[data-account-page="next"]')?.addEventListener("click", () => { adminState.userAccountsPage = page + 1; void loadUserAccounts(); });
 }
 
 function renderProfileTable() {
     if (!adminElements.profileTableBody) return;
-    adminElements.profileListCount.textContent = `${adminState.userProfiles.length} 条`;
+    adminElements.profileListCount.textContent = `${adminState.userProfilesTotal ?? adminState.userProfiles.length} 条`;
     if (!adminState.userProfiles.length) {
         adminElements.profileTableBody.innerHTML = `<tr><td colspan="6">暂无档案数据。</td></tr>`;
         return;
     }
-    adminElements.profileTableBody.innerHTML = adminState.userProfiles.map(profile => `
+    const profilePage = Math.max(1, Number(adminState.userProfilesPage || 1));
+    const profileSize = Number(adminState.userProfilesPageSize || 10);
+    const pageProfiles = adminState.userProfiles.slice((profilePage - 1) * profileSize, profilePage * profileSize);
+    adminElements.profileTableBody.innerHTML = pageProfiles.map(profile => `
         <tr>
-            <td><strong>${escapeHtml(profile.realName)}</strong><div class="status-box">${escapeHtml(profile.studentNo || profile.teacherNo || "")}</div></td>
+            <td><strong>${escapeHtml(profile.realName || "-")}</strong></td>
             <td>${profileTypeLabel(profile.profileType)}</td>
             <td>${escapeHtml(profile.username || "-")}</td>
             <td>${escapeHtml(profile.schoolName || "-")}</td>
@@ -2924,12 +3005,28 @@ function renderProfileTable() {
     document.querySelectorAll("[data-profile-edit]").forEach(button => {
         button.addEventListener("click", () => fillUserProfileForm(adminState.userProfiles.find(item => String(item.profileId) === button.dataset.profileEdit)));
     });
+    renderProfilePagination();
+}
+
+function renderProfilePagination() {
+    const root = adminElements.profilePagination;
+    if (!root) return;
+    const total = Number(adminState.userProfilesTotal || 0), size = Number(adminState.userProfilesPageSize || 10);
+    const pages = Math.max(1, Math.ceil(total / size)), page = Math.min(Math.max(1, Number(adminState.userProfilesPage || 1)), pages);
+    root.innerHTML = `<button class="action-button" type="button" data-profile-page="prev" ${page <= 1 ? "disabled" : ""}>上一页</button><span>第 ${page} / ${pages} 页</span><button class="action-button" type="button" data-profile-page="next" ${page >= pages ? "disabled" : ""}>下一页</button>`;
+    root.querySelector('[data-profile-page="prev"]')?.addEventListener("click", () => { adminState.userProfilesPage = page - 1; void loadUserProfiles(); });
+    root.querySelector('[data-profile-page="next"]')?.addEventListener("click", () => { adminState.userProfilesPage = page + 1; void loadUserProfiles(); });
 }
 
 function renderRoleTable() {
     if (!adminElements.roleTableBody) return;
-    adminElements.roleListCount.textContent = `${adminState.userRoles.length} 个角色`;
-    adminElements.roleTableBody.innerHTML = (adminState.userRoles || []).map(role => `
+    const total = adminState.userRolesTotal ?? adminState.userRoles.length;
+    const size = adminState.userRolesPageSize || 10;
+    const pages = Math.max(1, Math.ceil(total / size));
+    const page = Math.min(Math.max(1, adminState.userRolesPage || 1), pages);
+    const rows = (adminState.userRoles || []).slice((page - 1) * size, page * size);
+    adminElements.roleListCount.textContent = `${total} 个角色`;
+    adminElements.roleTableBody.innerHTML = rows.map(role => `
         <tr>
             <td>${escapeHtml(role.roleCode)}</td>
             <td>${escapeHtml(role.roleName)}</td>
@@ -2941,6 +3038,12 @@ function renderRoleTable() {
     document.querySelectorAll("[data-role-edit]").forEach(button => {
         button.addEventListener("click", () => fillRoleForm(adminState.userRoles.find(item => String(item.roleId) === button.dataset.roleEdit)));
     });
+    const root = adminElements.rolePagination;
+    if (root) {
+        root.innerHTML = `<button class="action-button" type="button" data-role-page="prev" ${page <= 1 ? "disabled" : ""}>上一页</button><span>第 ${page} / ${pages} 页</span><button class="action-button" type="button" data-role-page="next" ${page >= pages ? "disabled" : ""}>下一页</button>`;
+        root.querySelector('[data-role-page="prev"]')?.addEventListener("click", () => { adminState.userRolesPage = page - 1; renderRoleTable(); });
+        root.querySelector('[data-role-page="next"]')?.addEventListener("click", () => { adminState.userRolesPage = page + 1; renderRoleTable(); });
+    }
 }
 
 async function submitUserAccountForm() {
@@ -2973,6 +3076,8 @@ async function submitUserAccountForm() {
 
 function fillUserAccountForm(account) {
     if (!account) return;
+    adminElements.accountEditorCard?.classList.add("is-open");
+    document.body.classList.add("account-modal-open");
     adminElements.accountIdInput.value = account.accountId || "";
     adminElements.accountUsernameInput.value = account.username || "";
     adminElements.accountUsernameInput.disabled = true;
@@ -2993,6 +3098,8 @@ function resetUserAccountForm() {
     adminElements.accountForm?.reset();
     if (adminElements.accountIdInput) adminElements.accountIdInput.value = "";
     if (adminElements.accountUsernameInput) adminElements.accountUsernameInput.disabled = false;
+    adminElements.accountEditorCard?.classList.remove("is-open");
+    document.body.classList.remove("account-modal-open");
 }
 
 async function toggleUserAccountStatus(accountId) {
@@ -3045,6 +3152,8 @@ async function submitUserProfileForm() {
 
 function fillUserProfileForm(profile) {
     if (!profile) return;
+    adminElements.profileEditorCard?.classList.add("is-open");
+    document.body.classList.add("account-modal-open");
     adminElements.profileIdInput.value = profile.profileId || "";
     adminElements.profileAccountSelect.value = profile.accountId || "";
     adminElements.profileTypeInput.value = profile.profileType || "teacher";
@@ -3066,6 +3175,8 @@ function fillUserProfileForm(profile) {
 function resetUserProfileForm() {
     adminElements.profileForm?.reset();
     if (adminElements.profileIdInput) adminElements.profileIdInput.value = "";
+    adminElements.profileEditorCard?.classList.remove("is-open");
+    document.body.classList.remove("account-modal-open");
 }
 
 async function importStudentsFromText() {
@@ -3113,6 +3224,8 @@ async function submitRoleForm() {
 
 function fillRoleForm(role) {
     if (!role) return;
+    adminElements.roleEditorCard?.classList.add("is-open");
+    document.body.classList.add("account-modal-open");
     adminElements.roleIdInput.value = role.roleId || "";
     adminElements.roleCodeInput.value = role.roleCode || "";
     adminElements.roleCodeInput.disabled = true;
@@ -3128,6 +3241,35 @@ function resetRoleForm() {
     adminElements.roleForm?.reset();
     if (adminElements.roleIdInput) adminElements.roleIdInput.value = "";
     if (adminElements.roleCodeInput) adminElements.roleCodeInput.disabled = false;
+    adminElements.roleEditorCard?.classList.remove("is-open");
+    document.body.classList.remove("account-modal-open");
+}
+
+async function importStudentsFromExcel(sourceInput = adminElements.studentImportFileInput) {
+    const input = sourceInput, file = input?.files?.[0];
+    if (!file) return;
+    if (!/\.(xlsx|csv)$/i.test(file.name)) { setGlobalStatus("导入失败", "仅支持 .xlsx 或 .csv 文件。"); input.value = ""; return; }
+    if (adminElements.studentImportHint) adminElements.studentImportHint.textContent = `正在导入：${file.name}`;
+    const headers = { Accept: "application/json" }, token = readCookie("XSRF-TOKEN"); if (token) headers["X-CSRF-TOKEN"] = token;
+    const body = new FormData(); body.append("file", file);
+    try {
+        const response = await fetch("/api/admin/students/import-excel", { method: "POST", credentials: "include", headers, body });
+        const payload = await response.json();
+        if (!response.ok || payload.code !== 200) throw new Error(payload.message || "Excel 导入失败");
+        const result = payload.data || {};
+        setGlobalStatus("学生导入完成", `成功 ${result.successCount || 0} 条，失败 ${result.failedCount || 0} 条。`);
+        await Promise.all([loadUserAccounts(), loadUserProfiles()]);
+    } catch (error) { setGlobalStatus("导入失败", error.message || "Excel 导入失败"); }
+    finally { input.value = ""; if (adminElements.studentImportHint) adminElements.studentImportHint.textContent = "未选择文件"; }
+}
+
+function downloadUserTemplate(kind) {
+    const account = kind === "account";
+    const header = account ? ["登录账号", "密码", "真实姓名", "学校名称", "电话", "邮箱"] : ["登录账号", "密码", "真实姓名", "学号", "学校名称", "班级名称", "年级", "电话", "邮箱"];
+    const csv = "\ufeff" + header.join(",") + "\r\n";
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob), anchor = document.createElement("a");
+    anchor.href = url; anchor.download = account ? "账号导入模板.csv" : "档案导入模板.csv"; anchor.click(); URL.revokeObjectURL(url);
 }
 
 function profileTypeLabel(type) {
@@ -3964,10 +4106,16 @@ function setDashboardStatus(element, status, label) {
 function dashboardStatusLabel(status) {
     return ({ ok: "正常", degraded: "降级", unavailable: "不可用", disabled: "已停用" })[String(status || "").toLowerCase()] || "未知";
 }
-const catalogDirectoryState = { selected: null, relationOptions: [], pendingMediaPreviewUrls: [], regionOptions: new Map(), relationEntityOptions: { source: new Map(), target: new Map() } };
+const catalogDirectoryState = { selected: null, relationOptions: [], pendingMediaPreviewUrls: [], regionOptions: new Map(), relationEntityOptions: { source: new Map(), target: new Map() }, page: 1, pageSize: 10 };
 
 const catalogEntityLabels = {
-    RESOURCE: "资源", SITE: "遗址", MEMORIAL: "纪念馆", HERO: "人物", EVENT: "历史事件", STORY: "红色故事"
+    MEMORIAL: "纪念馆", HERO: "革命英雄", SITE: "革命遗址", STORY: "革命故事", EVENT: "历史事件", RESOURCE: "思政教育资源"
+};
+const catalogCategoryLabels = {
+    red_culture: "红色文化", intangible_culture: "非遗文化", traditional_culture: "传统文化",
+    local_history: "地方历史", public_culture: "公共文化", labor_education: "劳动教育",
+    public_welfare: "公益实践", ecological_civilization: "生态文明", patriotism_base: "爱国主义基地",
+    social_practice: "社会实践", other: "其他"
 };
 
 function mountUnifiedCatalogResourceWorkspace() {
@@ -4023,7 +4171,7 @@ function mountUnifiedCatalogResourceWorkspace() {
             </article>
             <article class="table-card">
                 <div class="card-topline"><h3>全平台资源与图谱实体</h3><span id="catalogDirectoryCount" class="mini-stat">0 条</span></div>
-                <div class="table-shell"><table><thead><tr><th>封面</th><th>实体</th><th>类型 / 分类</th><th>坐标</th><th>状态</th><th>操作</th></tr></thead><tbody id="catalogDirectoryTable"></tbody></table></div>
+                <div class="table-shell"><table><thead><tr><th>实体</th><th>类型 / 分类</th><th>坐标</th><th>状态</th><th>操作</th></tr></thead><tbody id="catalogDirectoryTable"></tbody></table></div><div class="account-pagination" id="catalogDirectoryPagination"></div>
             </article>
         </div>
         <div id="catalogDirectoryDetails" class="catalog-directory-details" hidden>
@@ -4031,7 +4179,9 @@ function mountUnifiedCatalogResourceWorkspace() {
             <article class="form-card"><div class="card-topline"><h3>关联故事与图谱关系</h3></div><form id="catalogDirectoryRelationForm" class="data-form"><div class="field-grid two-col"><label><span>源实体类型</span><select id="catalogDirectoryRelationSourceType"></select></label><label><span>源实体</span><div class="catalog-picker"><input id="catalogDirectoryRelationSourceName" autocomplete="off" placeholder="搜索名称或编码" role="combobox" aria-autocomplete="list" aria-expanded="false"><button id="catalogDirectoryRelationSourceToggle" class="catalog-picker-toggle" type="button" title="展开源实体候选" aria-label="展开源实体候选" aria-expanded="false"><span></span></button><div id="catalogDirectoryRelationSourceOptions" class="catalog-picker-menu" role="listbox" hidden></div></div><input id="catalogDirectoryRelationSourceId" type="hidden"></label><label><span>目标实体类型</span><select id="catalogDirectoryRelationTargetType"></select></label><label><span>目标实体</span><div class="catalog-picker"><input id="catalogDirectoryRelationTargetName" autocomplete="off" placeholder="搜索名称或编码" role="combobox" aria-autocomplete="list" aria-expanded="false"><button id="catalogDirectoryRelationTargetToggle" class="catalog-picker-toggle" type="button" title="展开目标实体候选" aria-label="展开目标实体候选" aria-expanded="false"><span></span></button><div id="catalogDirectoryRelationTargetOptions" class="catalog-picker-menu" role="listbox" hidden></div></div><input id="catalogDirectoryRelationTargetId" type="hidden"></label><label><span>关系类型</span><select id="catalogDirectoryRelationType"></select></label><label><span>备注</span><input id="catalogDirectoryRelationRemark"></label></div><div class="form-actions"><button class="accent-button" type="submit">创建关系</button></div></form><div id="catalogDirectoryRelationList" class="compact-list"></div></article>
         </div>
         <div id="catalogDirectoryImagePreviewModal" class="modal-shell" role="dialog" aria-modal="true" aria-labelledby="catalogDirectoryImagePreviewTitle" hidden><div class="modal-backdrop" data-close-catalog-image-preview></div><section class="modal-card catalog-image-preview-modal"><div class="card-topline"><h3 id="catalogDirectoryImagePreviewTitle">图片预览</h3><button id="catalogDirectoryCloseImagePreview" class="ghost-button" type="button">关闭</button></div><img id="catalogDirectoryImagePreviewImage" alt=""><p id="catalogDirectoryImagePreviewName" class="status-box"></p></section></div>`;
-    root.querySelector("#catalogDirectorySearch").addEventListener("click", () => void loadResources());
+    root.querySelector("#catalogDirectorySearch").addEventListener("click", () => { catalogDirectoryState.page = 1; void loadResources(); });
+    root.querySelector("#catalogDirectoryType").addEventListener("change", () => { catalogDirectoryState.page = 1; void loadResources(); });
+    root.querySelector("#catalogDirectoryCategory").addEventListener("change", () => { catalogDirectoryState.page = 1; void loadResources(); });
     root.querySelector("#catalogDirectoryImport").addEventListener("click", () => document.querySelector('[data-tab="catalog"]')?.click());
     root.querySelector("#catalogDirectoryReset").addEventListener("click", closeCatalogDirectoryEditor);
     root.querySelector("#catalogDirectoryForm").addEventListener("submit", event => { event.preventDefault(); void saveCatalogDirectoryEntity(); });
@@ -4058,7 +4208,7 @@ function mountUnifiedCatalogResourceWorkspace() {
 async function loadResources() {
     const root = document.querySelector("#catalogResourceWorkspace");
     if (!root?.dataset.ready) return;
-    const params = new URLSearchParams({ pageNum: "1", pageSize: "50" });
+    const params = new URLSearchParams({ pageNum: String(catalogDirectoryState.page || 1), pageSize: String(catalogDirectoryState.pageSize || 10) });
     const type = root.querySelector("#catalogDirectoryType").value;
     const category = root.querySelector("#catalogDirectoryCategory").value;
     const keyword = root.querySelector("#catalogDirectoryKeyword").value.trim();
@@ -4066,7 +4216,7 @@ async function loadResources() {
     if (category) params.set("resourceCategory", category);
     if (keyword) params.set("keyword", keyword);
     const result = await requestJson(`/api/admin/catalog/entities?${params}`);
-    renderCatalogDirectoryTable(result.records || [], result.total || 0);
+    renderCatalogDirectoryTable(result.records || [], result.total || result.totalCount || 0);
     if (adminElements.resourceTotalMetric) adminElements.resourceTotalMetric.textContent = String(result.total || 0);
 }
 
@@ -4074,10 +4224,19 @@ function renderCatalogDirectoryTable(records, total) {
     const root = document.querySelector("#catalogResourceWorkspace");
     root.querySelector("#catalogDirectoryCount").textContent = `${total} 条`;
     const table = root.querySelector("#catalogDirectoryTable");
-    if (!records.length) { table.innerHTML = '<tr><td colspan="6">暂无符合条件的实体。</td></tr>'; return; }
-    table.innerHTML = records.map(item => `<tr><td>${item.coverUrl ? `<img class="catalog-cover" src="${escapeHtml(item.coverUrl)}" alt="">` : "-"}</td><td><strong>${escapeHtml(item.name || "-")}</strong><div class="status-box">${escapeHtml(item.code || "-")}</div></td><td>${escapeHtml(catalogEntityLabels[item.entityType?.toUpperCase()] || item.entityType || "-")}<div class="status-box">${escapeHtml(item.resourceCategory || "-")}</div></td><td>${item.longitude && item.latitude ? `${escapeHtml(item.longitude)}, ${escapeHtml(item.latitude)}` : "未设置"}</td><td>${item.active ? "启用" : "已停用"}</td><td><div class="table-actions"><button class="action-button" data-edit="${item.entityType}:${item.entityId}">编辑</button>${item.active ? `<button class="action-button" data-deactivate="${item.entityType}:${item.entityId}">停用</button>` : "-"}</div></td></tr>`).join("");
+    if (!records.length) { table.innerHTML = '<tr><td colspan="5">暂无符合条件的实体。</td></tr>'; return; }
+    table.innerHTML = records.map(item => `<tr><td><strong>${escapeHtml(item.name || "-")}</strong></td><td>${escapeHtml(catalogEntityLabels[item.entityType?.toUpperCase()] || item.entityType || "-")}<div class="status-box">${escapeHtml(catalogCategoryLabels[item.resourceCategory] || item.resourceCategory || "-")}</div></td><td>${item.longitude && item.latitude ? `${escapeHtml(item.longitude)}, ${escapeHtml(item.latitude)}` : "未设置"}</td><td>${item.active ? "启用" : "已停用"}</td><td><div class="table-actions"><button class="action-button" data-edit="${item.entityType}:${item.entityId}">编辑</button>${item.active ? `<button class="action-button" data-deactivate="${item.entityType}:${item.entityId}">停用</button>` : `<button class="action-button" data-activate="${item.entityType}:${item.entityId}">启用</button>`}</div></td></tr>`).join("");
     table.querySelectorAll("[data-edit]").forEach(button => button.addEventListener("click", () => { const [type, id] = button.dataset.edit.split(":"); void openCatalogDirectoryEntity(type.toUpperCase(), id); }));
     table.querySelectorAll("[data-deactivate]").forEach(button => button.addEventListener("click", () => void deactivateCatalogEntity(button.dataset.deactivate)));
+    table.querySelectorAll("[data-activate]").forEach(button => button.addEventListener("click", () => void activateCatalogEntity(button.dataset.activate)));
+    const pagination = root.querySelector("#catalogDirectoryPagination");
+    const pages = Math.max(1, Math.ceil(Number(total || records.length) / catalogDirectoryState.pageSize));
+    const page = Math.min(Math.max(1, catalogDirectoryState.page), pages);
+    if (pagination) {
+        pagination.innerHTML = `<button class="action-button" type="button" data-catalog-page="prev" ${page <= 1 ? "disabled" : ""}>上一页</button><span>第 ${page} / ${pages} 页</span><button class="action-button" type="button" data-catalog-page="next" ${page >= pages ? "disabled" : ""}>下一页</button>`;
+        pagination.querySelector('[data-catalog-page="prev"]')?.addEventListener("click", () => { catalogDirectoryState.page = page - 1; void loadResources(); });
+        pagination.querySelector('[data-catalog-page="next"]')?.addEventListener("click", () => { catalogDirectoryState.page = page + 1; void loadResources(); });
+    }
 }
 
 function catalogDirectoryPayload({ includeSources = false, includeMedia = false } = {}) {
@@ -4119,6 +4278,7 @@ async function openCatalogDirectoryEntity(type, id) {
     root.querySelector("#catalogDirectoryFormType").disabled = true;
     root.querySelector("#catalogDirectoryFormTitle").textContent = `编辑：${item.name}`;
     root.querySelector("#catalogDirectoryEditor").hidden = false;
+    document.body.classList.add("catalog-editor-open");
     root.querySelector("#catalogDirectoryDetails").hidden = false;
     updateCatalogDirectoryFieldVisibility(); renderCatalogDirectorySources(); await loadCatalogDirectoryRelations();
     root.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -4126,7 +4286,7 @@ async function openCatalogDirectoryEntity(type, id) {
 
 function closeCatalogDirectoryEditor() {
     const root = document.querySelector("#catalogResourceWorkspace");
-    root.querySelector("#catalogDirectoryForm").reset(); root.querySelector("#catalogDirectoryId").value = ""; root.querySelector("#catalogDirectoryRegion").value = ""; catalogDirectoryState.regionOptions.clear(); root.querySelector("#catalogDirectoryRegionOptions").innerHTML = ""; closeCatalogPickers(); root.querySelector("#catalogDirectoryFormType").disabled = false; root.querySelector("#catalogDirectoryEditor").hidden = true; root.querySelector("#catalogDirectoryDetails").hidden = true; catalogDirectoryState.selected = null; renderCatalogDirectoryPendingMedia(); updateCatalogDirectoryFieldVisibility();
+    root.querySelector("#catalogDirectoryForm").reset(); root.querySelector("#catalogDirectoryId").value = ""; root.querySelector("#catalogDirectoryRegion").value = ""; catalogDirectoryState.regionOptions.clear(); root.querySelector("#catalogDirectoryRegionOptions").innerHTML = ""; closeCatalogPickers(); root.querySelector("#catalogDirectoryFormType").disabled = false; root.querySelector("#catalogDirectoryEditor").hidden = true; root.querySelector("#catalogDirectoryDetails").hidden = true; document.body.classList.remove("catalog-editor-open"); catalogDirectoryState.selected = null; renderCatalogDirectoryPendingMedia(); updateCatalogDirectoryFieldVisibility();
 }
 
 function setCatalogPickerOpen(input, menu, toggle, open) { menu.hidden = !open; input.setAttribute("aria-expanded", String(open)); toggle.setAttribute("aria-expanded", String(open)); }
@@ -4144,6 +4304,7 @@ function openCatalogDirectoryImagePreview(url, name) { const root=document.query
 function closeCatalogDirectoryImagePreview() { const root=document.querySelector("#catalogResourceWorkspace"), modal=root.querySelector("#catalogDirectoryImagePreviewModal");if(!modal)return;modal.hidden=true;document.body.classList.remove("modal-open"); }
 
 async function deactivateCatalogEntity(key) { if (!window.confirm("停用后该实体将从地图、图谱和 RAG 检索中隐藏，是否继续？")) return; const [rawType,id]=key.split(":"), type=rawType.toUpperCase(); await requestJson(`/api/admin/catalog/entities/${type}/${id}`,{method:"DELETE"}); setGlobalStatus("已停用","实体历史数据已保留，公开投影已移除。"); closeCatalogDirectoryEditor(); await loadResources(); }
+async function activateCatalogEntity(key) { if (!window.confirm("启用后该实体将重新出现在地图、图谱和 RAG 检索中，是否继续？")) return; const [rawType,id]=key.split(":"), type=rawType.toUpperCase(); await requestJson(`/api/admin/catalog/entities/${type}/${id}/activate`,{method:"POST",body:{}}); setGlobalStatus("已启用","实体已恢复公开投影。"); await loadResources(); }
 
 async function uploadCatalogDirectoryMediaFiles(entityType, entityId, files) { for (const file of files) { const headers={ Accept:"application/json" }; const token=readCookie("XSRF-TOKEN"); if(token)headers["X-CSRF-TOKEN"]=token; const body=new FormData();body.append("file",file);const response=await fetch(`/api/admin/catalog/entities/${entityType.toUpperCase()}/${entityId}/media`,{method:"POST",credentials:"include",headers,body});const payload=await response.json();if(!response.ok||payload.code!==200)throw new ApiError(payload.message||"图片上传失败",response.status); } }
 

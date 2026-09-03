@@ -45,4 +45,7 @@ public interface TeachingActivityPlanService extends IService<TeachingActivityPl
     TeachingActivityPlanAdminVO copyMine(Long planId, AuthCurrentUserVO user);
 
     byte[] exportMine(Long planId, AuthCurrentUserVO user) throws IOException;
+
+    /** Marks a teacher-owned plan as adopted after it has been exported for use. */
+    TeachingActivityPlanAdminVO adoptMine(Long planId, AuthCurrentUserVO user);
 }

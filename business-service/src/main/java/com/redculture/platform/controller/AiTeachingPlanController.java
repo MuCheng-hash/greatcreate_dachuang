@@ -5,6 +5,7 @@ import com.redculture.platform.common.PageResult;
 import com.redculture.platform.config.AuthContext;
 import com.redculture.platform.service.AiTeachingPlanService;
 import com.redculture.platform.service.TeachingActivityPlanService;
+import com.redculture.platform.service.TeachingPlanFeedbackService;
 import com.redculture.platform.service.agent.AgentBusyException;
 import com.redculture.platform.service.agent.AgentUpstreamException;
 import com.redculture.platform.vo.AuthCurrentUserVO;
@@ -22,6 +23,8 @@ import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.bind.annotation.PutMapping;
+import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.format.annotation.DateTimeFormat;
 import java.time.LocalDate;
@@ -45,11 +48,14 @@ public class AiTeachingPlanController {
      */
     private final AiTeachingPlanService aiTeachingPlanService;
     private final TeachingActivityPlanService teachingActivityPlanService;
+    private final TeachingPlanFeedbackService feedbackService;
 
     public AiTeachingPlanController(AiTeachingPlanService aiTeachingPlanService,
-                                    TeachingActivityPlanService teachingActivityPlanService) {
+                                    TeachingActivityPlanService teachingActivityPlanService,
+                                    TeachingPlanFeedbackService feedbackService) {
         this.aiTeachingPlanService = aiTeachingPlanService;
         this.teachingActivityPlanService = teachingActivityPlanService;
+        this.feedbackService = feedbackService;
     }
 
     //同步生成教学方案。等待 AI 完整生成后，一次性返回结果。
@@ -64,7 +70,7 @@ public class AiTeachingPlanController {
                     request,
                     user.getAccountId(),
                     request == null ? null : request.getThreadId()
-            );
+            ).map(value -> recordGeneration(request, value, user));
         }).map(value -> ResponseEntity.ok(ApiResponse.success(value)))
                 .onErrorResume(IllegalArgumentException.class, error -> Mono.just(
                         ResponseEntity.badRequest().body(ApiResponse.fail(error.getMessage()))
@@ -91,7 +97,7 @@ public class AiTeachingPlanController {
                     request,
                     user.getAccountId(),
                     request == null ? null : request.getThreadId()
-            );
+            ).map(event -> recordStreamGeneration(request, user, event));
         });
     }
 
@@ -102,7 +108,10 @@ public class AiTeachingPlanController {
         try {
             AuthCurrentUserVO user = AuthContext.requireUser(servletRequest);
             requireSchoolAccess(request == null ? null : request.getSchoolId(), user);
-            return ApiResponse.success("draft activity plan created", aiTeachingPlanService.saveDraft(request, user.getAccountId()));
+            TeachingActivityPlanAdminVO saved = request != null && request.getGenerationId() != null
+                    ? feedbackService.saveDraftForGeneration(request.getGenerationId(), user.getAccountId(), null)
+                    : aiTeachingPlanService.saveDraft(request, user.getAccountId());
+            return ApiResponse.success("draft activity plan created", saved);
         } catch (IllegalArgumentException exception) {
             return ApiResponse.fail(exception.getMessage());
         }
@@ -137,7 +146,9 @@ public class AiTeachingPlanController {
                                         HttpServletRequest servletRequest) {
         try {
             TeachingActivityPlanAdminVO plan = teachingActivityPlanService.getMine(planId, AuthContext.requireUser(servletRequest));
-            byte[] content = teachingActivityPlanService.exportMine(planId, AuthContext.requireUser(servletRequest));
+            AuthCurrentUserVO user = AuthContext.requireUser(servletRequest);
+            byte[] content = teachingActivityPlanService.exportMine(planId, user);
+            teachingActivityPlanService.adoptMine(planId, user);
             String fileName = "教学方案-" + safeFilePart(plan.getTheme()) + ".docx";
             return ResponseEntity.ok()
                     .contentType(MediaType.parseMediaType("application/vnd.openxmlformats-officedocument.wordprocessingml.document"))
@@ -148,6 +159,56 @@ public class AiTeachingPlanController {
         } catch (java.io.IOException exception) {
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(ApiResponse.fail("DOCX export failed"));
         }
+    }
+
+    @GetMapping("/generations/mine")
+    public ResponseEntity<?> generationHistory(@RequestParam(required = false) String feedbackStatus,
+                                                @RequestParam(required = false) Long pageNum,
+                                                @RequestParam(required = false) Long pageSize,
+                                                HttpServletRequest servletRequest) {
+        try {
+            return ResponseEntity.ok(ApiResponse.success(feedbackService.mine(
+                    AuthContext.requireUser(servletRequest), feedbackStatus, pageNum, pageSize)));
+        } catch (com.redculture.platform.exception.TeachingPlanFeedbackException exception) {
+            return ResponseEntity.status(exception.getStatus())
+                    .body(ApiResponse.fail(exception.getStatus().value(), exception.getMessage()));
+        }
+    }
+
+    @PutMapping("/generations/{generationId}/feedback")
+    public ResponseEntity<?> submitGenerationFeedback(@PathVariable Long generationId,
+                                                       @RequestBody com.redculture.platform.vo.request.TeachingPlanFeedbackRequest request,
+                                                       HttpServletRequest servletRequest) {
+        try {
+            return ResponseEntity.ok(ApiResponse.success(feedbackService.submitFeedback(
+                    generationId, request, AuthContext.requireUser(servletRequest))));
+        } catch (com.redculture.platform.exception.TeachingPlanFeedbackException exception) {
+            return ResponseEntity.status(exception.getStatus())
+                    .body(ApiResponse.fail(exception.getStatus().value(), exception.getMessage()));
+        }
+    }
+
+    private GeneratedTeachingPlanResponse recordGeneration(TeachingPlanGenerateRequest request,
+                                                            GeneratedTeachingPlanResponse response,
+                                                            AuthCurrentUserVO user) {
+        if (response != null && response.getGenerationId() == null) {
+            response.setGenerationId(feedbackService.recordGeneration(
+                    request, response, user.getAccountId(), user.getRoleCode()));
+        }
+        return response;
+    }
+
+    @SuppressWarnings("unchecked")
+    private ServerSentEvent<Map<String, Object>> recordStreamGeneration(
+            TeachingPlanGenerateRequest request, AuthCurrentUserVO user,
+            ServerSentEvent<Map<String, Object>> event) {
+        if (!"final".equals(event.event()) || event.data() == null) return event;
+        Object response = event.data().get("response");
+        if (!(response instanceof Map<?, ?> rawResponse)) return event;
+        Object teachingPlan = rawResponse.get("teachingPlan");
+        if (!(teachingPlan instanceof GeneratedTeachingPlanResponse plan)) return event;
+        recordGeneration(request, plan, user);
+        return event;
     }
 
     private String safeFilePart(String value) {

@@ -41,6 +41,10 @@ DELIMITER ;
 CALL add_task_column_if_missing('class_learning_task', 'task_type', "VARCHAR(40) NOT NULL DEFAULT 'red_culture_learning'");
 CALL add_task_column_if_missing('class_learning_task', 'submission_rule', "VARCHAR(40) NOT NULL DEFAULT 'text_required'");
 CALL add_task_column_if_missing('class_learning_task', 'allow_late_submission', 'TINYINT(1) NOT NULL DEFAULT 1');
+CALL add_task_column_if_missing('class_learning_task', 'start_at', 'DATETIME NULL');
+CALL add_task_column_if_missing('class_learning_task', 'material_filename', 'VARCHAR(255) NULL');
+CALL add_task_column_if_missing('class_learning_task', 'material_storage_key', 'VARCHAR(255) NULL');
+CALL add_task_column_if_missing('class_learning_task', 'material_content_type', 'VARCHAR(100) NULL');
 DROP PROCEDURE add_task_column_if_missing;
 
 CREATE TABLE IF NOT EXISTS task_resource_rel (
