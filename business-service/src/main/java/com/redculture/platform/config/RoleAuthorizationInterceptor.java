@@ -7,18 +7,54 @@ import org.springframework.stereotype.Component;
 
 import java.util.Set;
 
+/**
+ * 根据请求路径、当前角色和学校归属执行访问授权。
+ */
 @Component
 public class RoleAuthorizationInterceptor implements org.springframework.web.servlet.HandlerInterceptor {
 
+    /**
+     * 平台管理员角色编码。
+     */
     private static final String PLATFORM_ADMIN = "platform_admin";
+    /**
+     * 学校管理员角色编码。
+     */
     private static final String SCHOOL_ADMIN = "school_admin";
+    /**
+     * 教师角色编码。
+     */
     private static final String TEACHER = "teacher";
+    /**
+     * 学生角色编码。
+     */
     private static final String STUDENT = "student";
+    /**
+     * 允许访问教师端通用接口的角色集合。
+     */
     private static final Set<String> COMMON_ROLES = Set.of(PLATFORM_ADMIN, SCHOOL_ADMIN, TEACHER);
+    /**
+     * 需要校验学校数据范围的角色集合。
+     */
     private static final Set<String> SCHOOL_SCOPED_ROLES = Set.of(SCHOOL_ADMIN, TEACHER);
+    /**
+     * 允许使用 Agent 记忆功能的角色集合。
+     */
     private static final Set<String> MEMORY_USER_ROLES = Set.of(SCHOOL_ADMIN, TEACHER, STUDENT);
+    /**
+     * 平台认可的全部已认证角色集合。
+     */
     private static final Set<String> AUTHENTICATED_ROLES = Set.of(PLATFORM_ADMIN, SCHOOL_ADMIN, TEACHER, STUDENT);
 
+    /**
+     * 在控制器执行前完成当前拦截器负责的校验。
+     *
+     * @param request 当前 HTTP 请求
+     * @param response 当前 HTTP 响应
+     * @param handler 即将执行的处理器
+     * @return 校验通过时返回 {@code true}；响应已被拦截时返回 {@code false}
+     * @throws Exception 校验或响应写入失败时抛出
+     */
     @Override
     public boolean preHandle(HttpServletRequest request, HttpServletResponse response, Object handler) throws Exception {
         AuthCurrentUserVO user = AuthContext.currentUser(request);

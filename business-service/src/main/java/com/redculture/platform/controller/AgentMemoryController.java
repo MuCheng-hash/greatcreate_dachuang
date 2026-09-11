@@ -280,7 +280,7 @@ public class AgentMemoryController {
     //确保 URL 中的记忆 ID 不为空，并去掉首尾空格。
     /*
     " mem_001 " -> "mem_001"
-null 或 "   " -> 报错
+    null 或 "   " -> 报错
      */
     private String requireMemoryId(String id) {
         if (!StringUtils.hasText(id)) {
@@ -293,10 +293,10 @@ null 或 "   " -> 报错
     /*
     当新增、修改、确认或恢复记忆时，若发现记忆冲突，例如：
     旧记忆：回答应简洁
-新记忆：回答应详细展开
-Agent 服务会抛出 AgentMemoryConflictException。该方法会把异常转换为标准 HTTP 响应：
-HTTP 409 Conflict
-并将冲突说明和 exception.getPreview() 中的冲突预览数据返回给前端。前端据此弹出确认窗口，让用户选择是否覆盖冲突的旧记忆。
+    新记忆：回答应详细展开
+    Agent 服务会抛出 AgentMemoryConflictException。该方法会把异常转换为标准 HTTP 响应：
+    HTTP 409 Conflict
+    并将冲突说明和 exception.getPreview() 中的冲突预览数据返回给前端。前端据此弹出确认窗口，让用户选择是否覆盖冲突的旧记忆。
      */
     @ExceptionHandler(AgentMemoryConflictException.class)
     public ResponseEntity<ApiResponse<AgentMemoryConflictPreview>> handleMemoryConflict(
