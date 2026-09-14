@@ -9,13 +9,32 @@ import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Component;
 import org.springframework.util.StringUtils;
 
+/**
+ * 在应用启动后按配置确保平台管理员账号存在。
+ */
 @Component
 public class AdminAccountInitializer {
 
+    /**
+     * 学校用户账号服务。
+     */
     private final SchoolUserAccountService schoolUserAccountService;
+    /**
+     * 账号密码编码器。
+     */
     private final PasswordEncoder passwordEncoder;
+    /**
+     * 当前组件使用的配置属性。
+     */
     private final AdminAccountProperties properties;
 
+    /**
+     * 创建平台管理员账号初始化器。
+     *
+     * @param schoolUserAccountService 学校用户账号服务
+     * @param passwordEncoder 密码编码器
+     * @param properties 相关配置属性
+     */
     public AdminAccountInitializer(SchoolUserAccountService schoolUserAccountService,
                                    PasswordEncoder passwordEncoder,
                                    AdminAccountProperties properties) {
@@ -24,6 +43,9 @@ public class AdminAccountInitializer {
         this.properties = properties;
     }
 
+    /**
+     * 在应用启动时检查并按需创建平台管理员账号。
+     */
     @PostConstruct
     public void ensureAdminAccount() {
         String username = StringUtils.hasText(properties.getUsername()) ? properties.getUsername().trim() : "admin";

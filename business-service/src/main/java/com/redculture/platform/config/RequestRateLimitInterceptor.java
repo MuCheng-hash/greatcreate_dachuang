@@ -11,16 +11,39 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 
+/**
+ * 按请求主体和接口类型实施固定分钟窗口限流。
+ */
 @Component
 public class RequestRateLimitInterceptor implements org.springframework.web.servlet.HandlerInterceptor {
 
+    /**
+     * 接口限流配置。
+     */
     private final RateLimitProperties properties;
+    /**
+     * 按请求主体与接口类别维护的分钟窗口计数器。
+     */
     private final Map<String, WindowCounter> counters = new ConcurrentHashMap<>();
 
+    /**
+     * 创建请求频率限制拦截器。
+     *
+     * @param properties 相关配置属性
+     */
     public RequestRateLimitInterceptor(RateLimitProperties properties) {
         this.properties = properties;
     }
 
+    /**
+     * 在控制器执行前完成当前拦截器负责的校验。
+     *
+     * @param request 当前 HTTP 请求
+     * @param response 当前 HTTP 响应
+     * @param handler 即将执行的处理器
+     * @return 校验通过时返回 {@code true}；响应已被拦截时返回 {@code false}
+     * @throws Exception 校验或响应写入失败时抛出
+     */
     @Override
     public boolean preHandle(HttpServletRequest request, HttpServletResponse response, Object handler) throws Exception {
         // Spring MVC 会为 Mono/Flux 结果进行 ASYNC 二次分派；限流只统计初始请求，
@@ -62,8 +85,17 @@ public class RequestRateLimitInterceptor implements org.springframework.web.serv
         return request.getRemoteAddr() == null ? "unknown" : request.getRemoteAddr();
     }
 
+    /**
+     * 记录单个请求主体在一个自然分钟窗口内的访问次数。
+     */
     private static final class WindowCounter {
+        /**
+         * 计数窗口对应的 Unix 分钟编号。
+         */
         private final long minute;
+        /**
+         * 当前窗口内累计的请求次数。
+         */
         private final AtomicInteger requests = new AtomicInteger();
 
         private WindowCounter(long minute) {

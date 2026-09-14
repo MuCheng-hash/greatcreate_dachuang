@@ -11,13 +11,32 @@ import org.springframework.stereotype.Component;
 import org.springframework.util.StringUtils;
 import org.springframework.web.servlet.HandlerInterceptor;
 
+/**
+ * 解析认证信息并把当前用户写入请求上下文。
+ */
 @Component
 public class AuthenticatedUserInterceptor implements HandlerInterceptor {
 
+    /**
+     * 认证服务。
+     */
     private final AuthService authService;
+    /**
+     * JWT 令牌服务。
+     */
     private final JwtTokenService jwtTokenService;
+    /**
+     * 认证 Cookie 管理器。
+     */
     private final AuthCookieManager cookieManager;
 
+    /**
+     * 创建登录用户认证拦截器。
+     *
+     * @param authService 认证服务
+     * @param jwtTokenService JWT 令牌服务
+     * @param cookieManager 认证 Cookie 管理器
+     */
     public AuthenticatedUserInterceptor(AuthService authService,
                                        JwtTokenService jwtTokenService,
                                        AuthCookieManager cookieManager) {
@@ -26,6 +45,15 @@ public class AuthenticatedUserInterceptor implements HandlerInterceptor {
         this.cookieManager = cookieManager;
     }
 
+    /**
+     * 在控制器执行前完成当前拦截器负责的校验。
+     *
+     * @param request 当前 HTTP 请求
+     * @param response 当前 HTTP 响应
+     * @param handler 即将执行的处理器
+     * @return 校验通过时返回 {@code true}；响应已被拦截时返回 {@code false}
+     * @throws Exception 校验或响应写入失败时抛出
+     */
     @Override
     public boolean preHandle(HttpServletRequest request, HttpServletResponse response, Object handler) throws Exception {
         try {

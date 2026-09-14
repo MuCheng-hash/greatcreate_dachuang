@@ -11,9 +11,18 @@ import org.springframework.web.bind.annotation.RestControllerAdvice;
 
 import java.util.Map;
 
+/**
+ * 将 Agent 写动作异常转换为统一 HTTP 响应。
+ */
 @RestControllerAdvice
 public class AgentActionExceptionHandler {
 
+    /**
+     * 处理匹配的异常并转换为统一 HTTP 响应。
+     *
+     * @param exception 捕获到的异常
+     * @return 统一封装的 HTTP 响应
+     */
     @ExceptionHandler(IdempotencyConflictException.class)
     public ResponseEntity<ApiResponse<Map<String, String>>> handleIdempotencyConflict(
             IdempotencyConflictException exception) {
@@ -23,6 +32,12 @@ public class AgentActionExceptionHandler {
         );
     }
 
+    /**
+     * 处理匹配的异常并转换为统一 HTTP 响应。
+     *
+     * @param exception 捕获到的异常
+     * @return 统一封装的 HTTP 响应
+     */
     @ExceptionHandler(AgentBusyException.class)
     public ResponseEntity<ApiResponse<Void>> handleAgentBusy(AgentBusyException exception) {
         return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE).body(
@@ -30,6 +45,12 @@ public class AgentActionExceptionHandler {
         );
     }
 
+    /**
+     * 处理匹配的异常并转换为统一 HTTP 响应。
+     *
+     * @param exception 捕获到的异常
+     * @return 统一封装的 HTTP 响应
+     */
     @ExceptionHandler(AgentUpstreamException.class)
     public ResponseEntity<ApiResponse<Void>> handleAgentUpstream(
             AgentUpstreamException exception) {
