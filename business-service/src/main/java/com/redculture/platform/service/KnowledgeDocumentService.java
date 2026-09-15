@@ -13,12 +13,10 @@ import io.minio.BucketExistsArgs;
 import io.minio.PutObjectArgs;
 import io.minio.RemoveObjectArgs;
 import io.minio.GetObjectArgs;
-import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.io.InputStream;
-import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Locale;
 import java.util.UUID;
@@ -31,14 +29,14 @@ public class KnowledgeDocumentService {
     private final SchoolAccessService schoolAccessService;
     private final MinioClient minio;
     private final KnowledgeStorageProperties storage;
-    private final StringRedisTemplate redis;
+    private final KnowledgeIngestTransactions transactions;
     private final KnowledgeVectorCleanupService vectorCleanup;
 
     public KnowledgeDocumentService(KnowledgeDocumentMapper documents, KnowledgeIngestJobMapper jobs,
                                     SchoolAccessService schoolAccessService, MinioClient minio,
-                                    KnowledgeStorageProperties storage, StringRedisTemplate redis, KnowledgeVectorCleanupService vectorCleanup) {
+                                    KnowledgeStorageProperties storage, KnowledgeIngestTransactions transactions, KnowledgeVectorCleanupService vectorCleanup) {
         this.documents = documents; this.jobs = jobs; this.schoolAccessService = schoolAccessService;
-        this.minio = minio; this.storage = storage; this.redis = redis; this.vectorCleanup = vectorCleanup;
+        this.minio = minio; this.storage = storage; this.transactions = transactions; this.vectorCleanup = vectorCleanup;
     }
 
     public KnowledgeDocument upload(Long schoolId, String title, MultipartFile file, AuthCurrentUserVO user) {
@@ -53,20 +51,47 @@ public class KnowledgeDocumentService {
             minio.putObject(PutObjectArgs.builder().bucket(storage.getBucket()).object(key).stream(input, file.getSize(), -1)
                     .contentType(file.getContentType() == null ? "application/octet-stream" : file.getContentType()).build());
         } catch (Exception exception) { throw new IllegalStateException("failed to save uploaded file", exception); }
-        KnowledgeDocument document = new KnowledgeDocument();
-        document.setSchoolId(schoolId); document.setTitle(title == null || title.isBlank() ? filename : title.trim());
-        document.setOriginalFilename(filename); document.setContentType(file.getContentType()); document.setFileSize(file.getSize());
-        document.setObjectKey(key); document.setStatus("PENDING"); document.setCreatedBy(user.getAccountId()); documents.insert(document);
-        KnowledgeIngestJob job = new KnowledgeIngestJob(); job.setDocumentId(document.getId()); job.setStatus("PENDING"); job.setCurrentNode("VALIDATE"); job.setRetryCount(0); jobs.insert(job);
-        enqueue(job.getId()); return document;
+        try {
+            return transactions.run(() -> {
+                KnowledgeDocument document = new KnowledgeDocument();
+                document.setSchoolId(schoolId); document.setTitle(title == null || title.isBlank() ? filename : title.trim());
+                document.setOriginalFilename(filename); document.setContentType(file.getContentType() == null ? "application/octet-stream" : file.getContentType()); document.setFileSize(file.getSize());
+                document.setObjectKey(key); document.setStatus("PENDING"); document.setCreatedBy(user.getAccountId()); documents.insert(document);
+                KnowledgeIngestJob job = new KnowledgeIngestJob(); job.setDocumentId(document.getId()); job.setStatus("PENDING"); job.setCurrentNode("VALIDATE"); job.setRetryCount(0); jobs.insert(job);
+                transactions.enqueue(job.getId(), document.getId()); return document;
+            });
+        } catch (RuntimeException error) {
+            try { minio.removeObject(RemoveObjectArgs.builder().bucket(storage.getBucket()).object(key).build()); }
+            catch (Exception cleanupError) { error.addSuppressed(cleanupError); }
+            throw error;
+        }
     }
 
     public KnowledgeDocument detail(Long id, AuthCurrentUserVO user) { KnowledgeDocument document = require(id); schoolAccessService.requireSchoolAccess(document.getSchoolId(), user); return document; }
     public List<KnowledgeDocument> list(Long schoolId, AuthCurrentUserVO user) { schoolAccessService.requireSchoolAccess(schoolId, user); return documents.selectList(new LambdaQueryWrapper<KnowledgeDocument>().eq(KnowledgeDocument::getSchoolId, schoolId).orderByDesc(KnowledgeDocument::getId)); }
-    public void retry(Long id, String restartFrom, AuthCurrentUserVO user) { KnowledgeDocument document = detail(id, user); KnowledgeIngestJob job = jobs.selectOne(new LambdaQueryWrapper<KnowledgeIngestJob>().eq(KnowledgeIngestJob::getDocumentId, id)); if (!("FAILED".equals(document.getStatus()) || "DEGRADED".equals(document.getStatus())) || job == null) throw new IllegalStateException("only failed or degraded documents can be retried"); String node = restartFrom == null || restartFrom.isBlank() ? "VALIDATE" : restartFrom.trim().toUpperCase(Locale.ROOT); if (!List.of("VALIDATE", "CONVERT", "IMAGE_VISION", "CHUNK", "METADATA", "INDEX").contains(node)) throw new IllegalArgumentException("unsupported restart node"); document.setStatus("PENDING"); documents.updateById(document); job.setStatus("PENDING"); job.setCurrentNode(node); job.setRestartFrom(node); job.setErrorSummary(null); job.setFinishedAt(null); jobs.updateById(job); enqueue(job.getId()); }
+    public void retry(Long id, String restartFrom, AuthCurrentUserVO user) {
+        detail(id, user);
+        String node = restartFrom == null || restartFrom.isBlank() ? "VALIDATE" : restartFrom.trim().toUpperCase(Locale.ROOT);
+        if (!List.of("VALIDATE", "CONVERT", "IMAGE_VISION", "CHUNK", "METADATA", "INDEX").contains(node)) throw new IllegalArgumentException("unsupported restart node");
+        transactions.locked(id, () -> {
+            KnowledgeDocument document = detail(id, user);
+            KnowledgeIngestJob job = jobs.selectOne(new LambdaQueryWrapper<KnowledgeIngestJob>().eq(KnowledgeIngestJob::getDocumentId, id));
+            if (job == null || !("FAILED".equals(document.getStatus()) || "DEGRADED".equals(document.getStatus()))) throw new IllegalStateException("only failed or degraded documents can be retried");
+            document.setStatus("PENDING"); documents.updateById(document);
+            transactions.reset(job.getId());
+            transactions.enqueue(job.getId(), id);
+            return null;
+        });
+    }
     public String markdown(Long id, AuthCurrentUserVO user) { KnowledgeDocument document = detail(id, user); if (document.getMarkdownObjectKey() == null) throw new IllegalStateException("normalized markdown is not available"); try (InputStream input = minio.getObject(GetObjectArgs.builder().bucket(storage.getBucket()).object(document.getMarkdownObjectKey()).build())) { return new String(input.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8); } catch (Exception exception) { throw new IllegalStateException("failed to read normalized markdown", exception); } }
-    public void delete(Long id, AuthCurrentUserVO user) { KnowledgeDocument document = detail(id, user); vectorCleanup.deleteDocument(id); try { minio.removeObject(RemoveObjectArgs.builder().bucket(storage.getBucket()).object(document.getObjectKey()).build()); if (document.getMarkdownObjectKey() != null) minio.removeObject(RemoveObjectArgs.builder().bucket(storage.getBucket()).object(document.getMarkdownObjectKey()).build()); } catch (Exception ignored) { } documents.deleteById(id); }
+    public void delete(Long id, AuthCurrentUserVO user) {
+        detail(id, user);
+        transactions.locked(id, () -> {
+            KnowledgeDocument document = detail(id, user); vectorCleanup.deleteDocument(id);
+            try { minio.removeObject(RemoveObjectArgs.builder().bucket(storage.getBucket()).object(document.getObjectKey()).build()); if (document.getMarkdownObjectKey() != null) minio.removeObject(RemoveObjectArgs.builder().bucket(storage.getBucket()).object(document.getMarkdownObjectKey()).build()); } catch (Exception ignored) { }
+            documents.deleteById(id); return null;
+        });
+    }
     private KnowledgeDocument require(Long id) { KnowledgeDocument document = documents.selectById(id); if (document == null) throw new IllegalArgumentException("knowledge document not found"); return document; }
-    private void enqueue(Long jobId) { redis.opsForList().rightPush("knowledge:ingest", String.valueOf(jobId)); }
     private void ensureBucket() throws Exception { if (!minio.bucketExists(BucketExistsArgs.builder().bucket(storage.getBucket()).build())) minio.makeBucket(MakeBucketArgs.builder().bucket(storage.getBucket()).build()); }
 }
