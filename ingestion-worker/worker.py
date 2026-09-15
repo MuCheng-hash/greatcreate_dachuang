@@ -1,18 +1,16 @@
-"""Redis-backed, resumable knowledge-document ingestion worker."""
+"""RocketMQ-backed document pipeline; retries replay the full graph."""
 import hashlib
 import io
 import json
 import os
 import re
-import traceback
 import uuid
 import zipfile
 import base64
-from datetime import datetime
 from typing import TypedDict
 
 import pymysql
-import redis
+import ingest_runtime
 import requests
 from docx import Document as DocxDocument
 from langgraph.graph import END, START, StateGraph
@@ -23,12 +21,11 @@ MYSQL = dict(host=os.getenv("MYSQL_HOST", "host.docker.internal"), port=int(os.g
              user=os.getenv("MYSQL_USER", "root"), password=os.getenv("MYSQL_PASSWORD", "root"),
              database=os.getenv("MYSQL_DATABASE", "red_culture_platform"), charset="utf8mb4", autocommit=True,
              cursorclass=pymysql.cursors.DictCursor)
-REDIS = redis.Redis.from_url(os.getenv("REDIS_URL", "redis://redis:6379/0"), decode_responses=True)
 MINIO = Minio(os.getenv("MINIO_ENDPOINT", "minio:9000"), access_key=os.getenv("MINIO_ACCESS_KEY", "minioadmin"),
               secret_key=os.getenv("MINIO_SECRET_KEY", "minioadmin"), secure=os.getenv("MINIO_SECURE", "false").lower() == "true")
-BUCKET, QUEUE = os.getenv("MINIO_KNOWLEDGE_BUCKET", "knowledge"), "knowledge:ingest"
+BUCKET = os.getenv("MINIO_KNOWLEDGE_BUCKET", "knowledge")
 QDRANT = os.getenv("QDRANT_URL", "http://qdrant:6333").rstrip("/")
-COLLECTION = os.getenv("QDRANT_COLLECTION", "knowledge_documents")
+COLLECTION = os.getenv("QDRANT_COLLECTION", "red_culture_content_chunks")
 INDEX_VERSION = os.getenv("RAG_INDEX_VERSION", "v2")
 MINERU_URL = os.getenv("MINERU_URL", "").rstrip("/")
 MAX_CHUNK_CHARS = int(os.getenv("INGEST_CHUNK_CHARS", "1800"))
@@ -45,12 +42,19 @@ VISION_MODEL = os.getenv("VISION_MODEL", "")
 
 class State(TypedDict, total=False):
     job: dict; document: dict; data: bytes; markdown: str; chunks: list; metadata: dict; images: list
+    degradations: list; image_refs: list
 
-def db(): return pymysql.connect(**MYSQL)
+def db(): return pymysql.connect(connect_timeout=10, read_timeout=20, write_timeout=20, **MYSQL)
 def fetch(sql, args=()):
-    with db().cursor() as c: c.execute(sql, args); return c.fetchone()
+    ingest_runtime.guard()
+    connection = ingest_runtime.CONNECTION.get()
+    if connection is None: raise RuntimeError('database operation outside document lock')
+    with connection.cursor() as c: c.execute(sql, args); return c.fetchone()
 def execute(sql, args=()):
-    with db().cursor() as c: c.execute(sql, args)
+    ingest_runtime.guard()
+    connection = ingest_runtime.CONNECTION.get()
+    if connection is None: raise RuntimeError('database operation outside document lock')
+    with connection.cursor() as c: c.execute(sql, args)
 def checkpoint(state, node):
     execute("UPDATE knowledge_ingest_job SET status='RUNNING', current_node=%s, started_at=COALESCE(started_at,NOW()) WHERE id=%s", (node, state['job']['id']))
 
@@ -62,15 +66,13 @@ def degrade(state, node, reason):
 def validate(state):
     checkpoint(state, "VALIDATE")
     document = state['document']
-    data = MINIO.get_object(BUCKET, document['object_key']).read()
+    response = MINIO.get_object(BUCKET, document['object_key'])
+    try: data = response.read()
+    finally:
+        response.close()
+        response.release_conn()
     digest = hashlib.sha256(data).hexdigest()
-    existing = fetch("SELECT id FROM knowledge_document WHERE school_id <=> %s AND sha256=%s AND status='SUCCESS' AND id<>%s LIMIT 1", (document['school_id'], digest, document['id']))
     execute("UPDATE knowledge_document SET sha256=%s WHERE id=%s", (digest, document['id']))
-    if existing:
-        # Same scope and file is already indexed; mark this document ready without duplicate vectors.
-        execute("UPDATE knowledge_document SET status='SUCCESS', indexed_at=NOW() WHERE id=%s", (document['id'],))
-        execute("UPDATE knowledge_ingest_job SET status='SUCCESS', current_node='DONE', finished_at=NOW() WHERE id=%s", (state['job']['id'],))
-        return {**state, 'deduplicated': True}
     return {**state, 'data': data}
 
 def convert(state):
@@ -86,11 +88,12 @@ def convert(state):
             response.raise_for_status(); markdown = response.json().get('markdown', '')
             if not markdown.strip(): raise ValueError('MinerU returned no markdown')
         except Exception as error:
-            degrade(state, 'CONVERT', 'MinerU fallback: ' + str(error))
+            degrade(state, 'CONVERT', 'MinerU fallback: ' + type(error).__name__)
             markdown = '\n\n'.join(page.extract_text() or '' for page in PdfReader(io.BytesIO(state['data'])).pages)
     else: raise ValueError('unsupported document type')
     if not markdown.strip(): raise ValueError('document contains no extractable text')
     key = 'markdown/%s/%s.md' % (state['document']['school_id'] or 'public', state['document']['id'])
+    ingest_runtime.guard()
     MINIO.put_object(BUCKET, key, io.BytesIO(markdown.encode()), len(markdown.encode()), content_type='text/markdown')
     execute("UPDATE knowledge_document SET markdown_object_key=%s WHERE id=%s", (key, state['document']['id']))
     return {**state, 'markdown': markdown, 'images': extract_images(state['data'], name)}
@@ -112,6 +115,7 @@ def understand_images(state):
         cached = fetch('SELECT description, object_key, model FROM knowledge_document_image WHERE sha256=%s AND status=\'SUCCESS\' LIMIT 1', (digest,))
         key = 'images/%s/%s-%s' % (state['document']['id'], digest, name)
         if not cached:
+            ingest_runtime.guard()
             MINIO.put_object(BUCKET, key, io.BytesIO(data), len(data), content_type='application/octet-stream')
             description = ''
             if VISION_URL and VISION_KEY and VISION_MODEL:
@@ -119,8 +123,10 @@ def understand_images(state):
                 response = requests.post(VISION_URL + '/internal/vision/analyze', headers={'X-Model-Gateway-Key': VISION_KEY}, json={'model':VISION_MODEL,'imageBase64':encoded}, timeout=90); response.raise_for_status(); description = response.json().get('description','')
             status = 'SUCCESS' if description else 'SKIPPED'
             if not description: degrade(state, 'IMAGE_VISION', 'vision model is unavailable or returned no description')
-            execute('INSERT INTO knowledge_document_image(document_id,sha256,object_key,description,status,model) VALUES(%s,%s,%s,%s,%s,%s)', (state['document']['id'],digest,key,description,status,VISION_MODEL or None))
-        else: key, description = cached['object_key'], cached['description'] or ''
+            execute('INSERT INTO knowledge_document_image(document_id,sha256,object_key,description,status,model) VALUES(%s,%s,%s,%s,%s,%s) ON DUPLICATE KEY UPDATE object_key=VALUES(object_key),description=VALUES(description),status=VALUES(status),model=VALUES(model)', (state['document']['id'],digest,key,description,status,VISION_MODEL or None))
+        else:
+            key, description = cached['object_key'], cached['description'] or ''
+            execute('INSERT INTO knowledge_document_image(document_id,sha256,object_key,description,status,model) VALUES(%s,%s,%s,%s,%s,%s) ON DUPLICATE KEY UPDATE object_key=VALUES(object_key),description=VALUES(description),status=VALUES(status),model=VALUES(model)', (state['document']['id'],digest,key,description,'SUCCESS',cached['model']))
         images.append({'name': name, 'description': description, 'object_key': key})
     markdown = state['markdown']
     for image in images:
@@ -163,7 +169,7 @@ def metadata(state):
             response = requests.post(MODEL_URL + '/chat/completions', headers={'Authorization': 'Bearer ' + MODEL_KEY}, json={'model': MODEL_NAME, 'messages': [{'role':'user','content':prompt}], 'temperature':0, 'response_format': {'type':'json_object'}}, timeout=45)
             value = json.loads(response.json()['choices'][0]['message']['content'])
         except Exception as error:
-            degrade(state, 'METADATA', 'metadata fallback: ' + str(error))
+            degrade(state, 'METADATA', 'metadata fallback: ' + type(error).__name__)
             value['subject'] = state['document'].get('title') or state['document'].get('original_filename')
             value['tags'] = [state['document'].get('original_filename', '').rsplit('.', 1)[0]][:1]
     return {**state, 'metadata': value}
@@ -183,46 +189,60 @@ def index(state):
     checkpoint(state, "INDEX")
     doc, meta = state['document'], state['metadata']
     if requests.get(QDRANT + '/collections/' + COLLECTION, timeout=10).status_code == 404:
-        requests.put(QDRANT + '/collections/' + COLLECTION, json={'vectors': {'dense': {'size': DIMENSIONS, 'distance':'Cosine'}}, 'sparse_vectors': {'sparse': {}}}, timeout=20)
-    execute('DELETE FROM knowledge_chunk WHERE document_id=%s', (doc['id'],))
+        ingest_runtime.guard()
+        requests.put(QDRANT + '/collections/' + COLLECTION, json={'vectors': {'dense': {'size': DIMENSIONS, 'distance':'Cosine'}}, 'sparse_vectors': {'sparse': {}}}, timeout=20).raise_for_status()
+    rows = []
     points = []
     for i in range(0, len(state['chunks']), 16):
         batch = state['chunks'][i:i+16]; vectors = hybrid_embed([x['content'] for x in batch])
+        if len(vectors) != len(batch): raise RuntimeError('embedding count does not match chunks')
         for offset, (chunk, vector) in enumerate(zip(batch, vectors)):
             point_id = str(uuid.uuid5(uuid.NAMESPACE_URL, 'knowledge:' + str(doc['id']) + ':' + str(i + offset)))
-            execute('INSERT INTO knowledge_chunk(document_id,chunk_order,title_path,content,token_count,subject,subject_type,tags,qdrant_point_id) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s)', (doc['id'],i+offset,chunk['title_path'],chunk['content'],chunk['token_count'],meta.get('subject'),meta.get('subjectType'),json.dumps(meta.get('tags', []), ensure_ascii=False),point_id))
+            rows.append((doc['id'],i+offset,chunk['title_path'],chunk['content'],chunk['token_count'],meta.get('subject'),meta.get('subjectType'),json.dumps(meta.get('tags', []), ensure_ascii=False),point_id))
             points.append({'id':point_id,'vector':{'dense':vector['dense'], 'sparse': vector['sparse']},'payload':{'documentId':doc['id'],'chunk_id':point_id,'entity_key':'knowledge-document:'+str(doc['id']),'schoolId':doc['school_id'],'titlePath':chunk['title_path'],'subject':meta.get('subject'),'subjectType':meta.get('subjectType'),'tags':meta.get('tags', []),'index_version':INDEX_VERSION,'documentTitle':doc['title'],'imageRefs':state.get('image_refs',[])}})
+    ingest_runtime.guard()
+    delete_vectors(doc['id'])
+    ingest_runtime.guard()
     r = requests.put(QDRANT + '/collections/' + COLLECTION + '/points?wait=true', json={'points':points}, timeout=90); r.raise_for_status()
+    ingest_runtime.guard()
+    connection = ingest_runtime.CONNECTION.get()
+    connection.begin()
+    try:
+        execute('DELETE FROM knowledge_chunk WHERE document_id=%s', (doc['id'],))
+        with connection.cursor() as cursor:
+            cursor.executemany('INSERT INTO knowledge_chunk(document_id,chunk_order,title_path,content,token_count,subject,subject_type,tags,qdrant_point_id) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s)', rows)
+        connection.commit()
+    except BaseException:
+        connection.rollback()
+        raise
     return state
 
 def complete(state):
-    checkpoint(state, "DONE"); status = 'DEGRADED' if state.get('degradations') else 'SUCCESS'; metadata = json.dumps({'degradations':state.get('degradations', []),'chunkCount':len(state.get('chunks', []))}, ensure_ascii=False); execute("UPDATE knowledge_document SET status=%s, indexed_at=NOW(), published_at=COALESCE(published_at,NOW()) WHERE id=%s", (status,state['document']['id'])); execute("UPDATE knowledge_ingest_job SET status=%s, current_node='DONE', metadata_json=%s, finished_at=NOW() WHERE id=%s", (status,metadata,state['job']['id'])); return state
+    ingest_runtime.guard()
+    status = 'DEGRADED' if state.get('degradations') else 'SUCCESS'
+    metadata_json = json.dumps({'degradations': state.get('degradations', []), 'chunkCount': len(state.get('chunks', []))}, ensure_ascii=False)
+    connection = ingest_runtime.CONNECTION.get()
+    connection.begin()
+    try:
+        execute("UPDATE knowledge_document SET status=%s, indexed_at=NOW(), published_at=COALESCE(published_at,NOW()) WHERE id=%s", (status,state['document']['id']))
+        execute("UPDATE knowledge_ingest_job SET status=%s, current_node='DONE', metadata_json=%s, error_summary=NULL, finished_at=NOW() WHERE id=%s", (status,metadata_json,state['job']['id']))
+        connection.commit()
+    except BaseException:
+        connection.rollback()
+        raise
+    return state
+
 
 graph = StateGraph(State)
 for name, fn in [('validate',validate),('convert',convert),('image_vision',understand_images),('split',split),('metadata',metadata),('index',index),('complete',complete)]: graph.add_node(name, fn)
-graph.add_edge(START,'validate'); graph.add_conditional_edges('validate', lambda s: END if s.get('deduplicated') else 'convert', {'convert':'convert', END:END})
+graph.add_edge(START,'validate'); graph.add_edge('validate','convert')
 for left, right in [('convert','image_vision'),('image_vision','split'),('split','metadata'),('metadata','index'),('index','complete'),('complete',END)]: graph.add_edge(left,right)
 pipeline = graph.compile()
 
-def process(job_id):
-    row = fetch('SELECT j.*, d.* FROM knowledge_ingest_job j JOIN knowledge_document d ON d.id=j.document_id WHERE j.id=%s', (job_id,))
-    if not row or row['status'] == 'SUCCESS': return
-    job = {k: row[k] for k in ('id','document_id','status','current_node','retry_count')}; document = dict(row)
-    try: pipeline.invoke({'job':job, 'document':document})
-    except Exception as error:
-        message = re.sub(r'(?i)(password|token|key)=?[^\s,]+', r'\1=[redacted]', str(error))[:1000]
-        execute("UPDATE knowledge_document SET status='FAILED' WHERE id=%s", (document['id'],)); execute("UPDATE knowledge_ingest_job SET status='FAILED', retry_count=retry_count+1, error_summary=%s, finished_at=NOW() WHERE id=%s", (message, job_id))
-
 def delete_vectors(document_id):
+    ingest_runtime.guard()
     requests.post(QDRANT + '/collections/' + COLLECTION + '/points/delete?wait=true', json={'filter': {'must': [{'key': 'documentId', 'match': {'value': document_id}}]}}, timeout=30).raise_for_status()
 
 if __name__ == '__main__':
-    if not MINIO.bucket_exists(BUCKET): MINIO.make_bucket(BUCKET)
-    pubsub = REDIS.pubsub(ignore_subscribe_messages=True); pubsub.subscribe('knowledge:delete')
-    while True:
-        event = pubsub.get_message(timeout=0.1)
-        if event:
-            try: delete_vectors(int(event['data']))
-            except Exception: pass
-        item = REDIS.blpop(QUEUE, timeout=5)
-        if item: process(int(item[1]))
+    import sys
+    ingest_runtime.main(sys.modules[__name__])
