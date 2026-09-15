@@ -1,0 +1,5 @@
+{
+  "rocketMQClusterName": "KnowledgeCluster",
+  "namesrvAddr": "rocketmq-namesrv:9876",
+  "grpcServerPort": 18081
+}

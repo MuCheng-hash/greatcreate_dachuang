@@ -119,3 +119,10 @@ app:
     secret-key: ${MINIO_SECRET_KEY:minioadmin}
     bucket: ${MINIO_KNOWLEDGE_BUCKET:knowledge}
     max-file-size-bytes: ${KNOWLEDGE_MAX_FILE_SIZE_BYTES:52428800}
+  knowledge-mq:
+    enabled: ${KNOWLEDGE_MQ_ENABLED:true}
+    endpoints: ${ROCKETMQ_ENDPOINTS:localhost:18081}
+    topic: ${ROCKETMQ_TOPIC:knowledge-ingest}
+    request-timeout-seconds: ${ROCKETMQ_REQUEST_TIMEOUT_SECONDS:10}
+    poll-ms: ${KNOWLEDGE_MQ_POLL_MS:1000}
+    collection: ${KNOWLEDGE_QDRANT_COLLECTION:${RAG_QDRANT_COLLECTION:red_culture_content_chunks}}

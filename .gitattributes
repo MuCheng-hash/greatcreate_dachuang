@@ -1,0 +1,2 @@
+# Scripts mounted into Linux containers must retain Unix line endings on Windows.
+docker/rocketmq/*.sh text eol=lf

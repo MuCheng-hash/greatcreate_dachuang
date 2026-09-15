@@ -24,6 +24,11 @@
 
     <dependencies>
         <dependency>
+            <groupId>org.apache.rocketmq</groupId>
+            <artifactId>rocketmq-client-java</artifactId>
+            <version>5.0.8</version>
+        </dependency>
+        <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-web</artifactId>
         </dependency>
@@ -84,6 +89,19 @@
             <scope>test</scope>
         </dependency>
     </dependencies>
+
+    <profiles>
+        <profile>
+            <id>ingestion-tests</id>
+            <build><plugins><plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <configuration><testIncludes>
+                    <testInclude>**/Knowledge*Test.java</testInclude>
+                </testIncludes></configuration>
+            </plugin></plugins></build>
+        </profile>
+    </profiles>
 
     <build>
         <plugins>
