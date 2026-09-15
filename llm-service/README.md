@@ -105,7 +105,7 @@ config/base.toml -> config/{APP_ENV}.toml -> APP_CONFIG_FILE -> .env -> .env.loc
 
 ## PostgreSQL Schema 与 SQLite 数据迁移
 
-PostgreSQL 是会话、长期记忆、Prompt、工具审计、LLM Trace 和单轮执行 checkpoint 的唯一持久化后端。正式会话历史仍是跨轮次模型上下文的唯一事实源；checkpoint 仅以内部 `turn_id` 保存当前一轮的执行状态，不使用会话 `threadId`。Redis 仅保留知识入库队列职责。`dev` 启动时会依次应用版本化 SQL 和 checkpointer `setup()`；`staging` 和 `prod` 只校验两套 Schema，部署前必须显式执行：
+PostgreSQL 是会话、长期记忆、Prompt、工具审计、LLM Trace 和单轮执行 checkpoint 的唯一持久化后端。正式会话历史仍是跨轮次模型上下文的唯一事实源；checkpoint 仅以内部 `turn_id` 保存当前一轮的执行状态，不使用会话 `threadId`。知识入库队列由 RocketMQ 承担，MySQL Outbox 保证提交后可补发；迁移步骤见 [`../docs/文档入库RocketMQ迁移.md`](../docs/文档入库RocketMQ迁移.md)。`dev` 启动时会依次应用版本化 SQL 和 checkpointer `setup()`；`staging` 和 `prod` 只校验两套 Schema，部署前必须显式执行：
 
 ```powershell
 python -m llm_service.db_cli migrate
