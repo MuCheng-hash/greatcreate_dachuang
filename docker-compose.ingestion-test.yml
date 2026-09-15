@@ -1,0 +1,26 @@
+# Isolated fixtures only. Use with -p knowledge-mq-test and docker-compose.rag.yml.
+services:
+  ingestion-test-mysql:
+    image: mysql:8.4.8
+    environment:
+      MYSQL_ROOT_PASSWORD: integration
+      MYSQL_DATABASE: knowledge_ingest_test
+    ports:
+      - '127.0.0.1:13316:3306'
+    volumes:
+      - ./data/sql/add_knowledge_ingestion_mvp.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+      - ./data/sql/add_knowledge_rocketmq.sql:/docker-entrypoint-initdb.d/02-rocketmq.sql:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-pintegration"]
+      interval: 5s
+      timeout: 3s
+      retries: 40
+  minio:
+    container_name: knowledge-mq-test-minio
+    ports: !override
+      - '127.0.0.1:19000:9000'
+      - '127.0.0.1:19001:9001'
+  qdrant:
+    container_name: knowledge-mq-test-qdrant
+    ports: !override
+      - '127.0.0.1:16333:6333'
