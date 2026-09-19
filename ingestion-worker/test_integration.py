@@ -1,4 +1,4 @@
-"""Explicit opt-in fixtures: localhost:13316/knowledge_ingest_test, never the business DB."""
+"""显式启用的测试夹具：使用 localhost:13316/knowledge_ingest_test，绝不使用业务数据库。"""
 import io
 import json
 import os
@@ -31,7 +31,7 @@ def fixtures(monkeypatch):
     monkeypatch.setattr(worker, 'MINERU_URL', '')
     monkeypatch.setattr(worker, 'MODEL_URL', '')
     monkeypatch.setattr(worker, 'VISION_URL', '')
-    # Model boundary is a deterministic stub; MySQL/MinIO/Qdrant/RocketMQ are real.
+    # 模型边界使用确定性桩；MySQL、MinIO、Qdrant、RocketMQ 使用真实服务。
     monkeypatch.setattr(worker, 'hybrid_embed', lambda texts: [{'dense':[1.,0.,0.,0.], 'sparse':{'indices':[], 'values':[]}} for _ in texts])
     runtime.STOP.clear()
     if not worker.MINIO.bucket_exists(worker.BUCKET): worker.MINIO.make_bucket(worker.BUCKET)
@@ -86,7 +86,7 @@ def test_three_failures_and_manual_generation(monkeypatch):
     assert runtime.process(event,worker)
     assert sql('SELECT status FROM knowledge_ingest_job WHERE id=%s',(event['jobId'],))[0]['status']=='FAILED'
     sql("UPDATE knowledge_ingest_job SET generation=2,status='PENDING',execution_attempts=0 WHERE id=%s",(event['jobId'],))
-    assert runtime.process(event,worker)  # Old delivery must not execute new generation.
+    assert runtime.process(event,worker)  # 旧投递不得执行新一轮生成。
     event['generation']=2
     monkeypatch.setattr(worker,'hybrid_embed',original)
     assert runtime.process(event,worker)
@@ -129,7 +129,7 @@ def receive_recovering(consumer):
     try:
         return consumer.receive(1,10) or []
     except ClientException as error:
-        # Same recovery as runtime.main: a restarted Broker can temporarily lack routes.
+        # 与 runtime.main 使用相同的恢复逻辑：重启后的 Broker 可能暂时缺少路由。
         logging.warning('Transient receive failure during fault test: %s',error)
         time.sleep(.2)
         return []
@@ -142,7 +142,7 @@ def ack_recovering(consumer,message):
         return True
     except BadRequestException as error:
         if error.code != 40013: raise
-        # An expired receipt must be replaced by redelivery; never count it as an ACK.
+        # 过期回执必须通过重新投递替换，不能将其计作确认。
         logging.warning('Expired receipt during fault test: delivery=%s',message.delivery_attempt)
         return False
 
@@ -152,7 +152,7 @@ def receive_event(consumer,event,seconds=50):
     while time.monotonic()<deadline:
         for message in consumer.receive(1,10) or []:
             if json.loads(message.body).get('eventId')==event['eventId']: return message
-            consumer.ack(message)  # Only isolated test topic contains fixtures.
+            consumer.ack(message)  # 只有隔离的测试主题包含测试数据。
     raise AssertionError('message not delivered')
 
 
@@ -169,11 +169,11 @@ def test_real_mq_ack_loss_redelivery_and_renewal(mq):
     message=receive_event(consumer,event)
     consumer.change_invisible_duration(message,10)
     assert runtime.process(event,worker)
-    # Simulate worker death after commit, before ACK: same event must return without re-execution.
+    # 模拟提交后、确认前工作进程退出：同一事件必须直接返回，不能重复执行。
     redelivery=receive_event(consumer,event)
     runtime.handle(consumer,redelivery,worker)
     assert sql('SELECT execution_attempts FROM knowledge_ingest_job WHERE id=%s',(event['jobId'],))[0]['execution_attempts']==1
-    # The DLQ consumer has been started against its actual broker route by the fixture.
+    # 测试夹具已针对真实的 Broker 路由启动死信队列消费者。
 
 
 def test_worker_process_death_releases_lock_and_redelivers(mq, tmp_path):
@@ -243,7 +243,7 @@ def test_image_replay_and_shorter_index_removes_old_vectors(monkeypatch):
     event=create_job(stream.getvalue(),'docx')
     assert runtime.process(event,worker)
     assert sql('SELECT COUNT(*) AS n FROM knowledge_chunk WHERE document_id=%s',(event['documentId'],))[0]['n']>1
-    # Same image record can be written again without violating the document/hash unique key.
+    # 同一图片记录可以再次写入，且不会违反文档与哈希唯一键约束。
     for generation in (2,3):
         sql("UPDATE knowledge_ingest_job SET generation=%s,status='PENDING',execution_attempts=0 WHERE id=%s",(generation,event['jobId']))
         event['generation']=generation
@@ -260,8 +260,8 @@ def test_real_dead_letter_updates_failed_status(mq):
     consumer,producer,dead=mq
     event=create_job()
     send(producer,event)
-    # Continue polling the original subscription: Proxy evaluates exhausted deliveries
-    # while receiving from the retry queue, rather than on a passive timeout alone.
+    # 继续轮询原始订阅：代理在从重试队列接收消息时评估已耗尽的投递，
+    # 而不是仅依赖被动超时。
     deadline=time.monotonic()+90
     message=None
     deliveries=[]
@@ -299,7 +299,7 @@ def test_first_consumer_receives_entire_backlog():
         for number in range(20):
             message=Message(); message.topic=topic; message.body=str(number).encode()
             producer.send(message)
-        # No consumer existed while these messages were published.
+        # 发布这些消息时没有消费者存在。
         consumer.startup()
         received=set()
         deadline=time.monotonic()+90
