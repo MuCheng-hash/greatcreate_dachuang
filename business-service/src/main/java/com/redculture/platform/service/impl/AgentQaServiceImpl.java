@@ -178,7 +178,7 @@ public class AgentQaServiceImpl implements AgentQaService {
                 Schedulers.immediate());
     }
 
-    /** Compatibility constructor for the stateful runtime path. */
+    /** 面向有状态运行时路径的兼容构造方法。 */
     public AgentQaServiceImpl(SchoolMapService schoolMapService,
                               TownMapService townMapService,
                               LocalEduResourceService localEduResourceService,
@@ -194,6 +194,10 @@ public class AgentQaServiceImpl implements AgentQaService {
     }
 
     @Override
+    /**
+     * 非流式问答入口：先验证请求和认证账号，再在阻塞调度器中构建受限上下文。
+     * 是否调用远程 Agent 由运行时配置决定，回退结果仍沿用同一份权限范围与引用规则。
+     */
     public Mono<AgentQaResponse> ask(AgentQaRequest request, AuthCurrentUserVO currentUser) {
         validateRequest(request);
         if (currentUser == null) {
@@ -204,6 +208,10 @@ public class AgentQaServiceImpl implements AgentQaService {
     }
 
     @Override
+    /**
+     * 取消指定会话轮次，并以账号、学校和角色限制取消权限。
+     * 取消请求交给状态存储处理，从而使重复请求不会重新触发已经停止的上游执行。
+     */
     public Mono<AssistantConversationTurnCancellation> cancelTurn(
             String clientTurnId, AuthCurrentUserVO currentUser) {
         if (!StringUtils.hasText(clientTurnId)) {
@@ -224,8 +232,13 @@ public class AgentQaServiceImpl implements AgentQaService {
     }
 
     @Override
+    /**
+     * 读取待确认动作的当前状态。
+     * actionId 必须同时属于认证账号和其学校范围；状态存储未命中与越权均由上游按统一业务错误处理。
+     */
     public Mono<com.redculture.platform.vo.ai.AgentActionVO> getAction(
             String actionId, AuthCurrentUserVO currentUser) {
+        // 先验证身份、学校和运行时可用性，再把同一所有者范围传给状态服务，避免仅凭 actionId 越权查询。
         validateActionRequest(actionId, currentUser);
         return agentRuntimeClient.getAction(
                 actionId,
@@ -236,9 +249,14 @@ public class AgentQaServiceImpl implements AgentQaService {
     }
 
     @Override
+    /**
+     * 确认或拒绝待执行动作，并将身份范围随决策一并传给有状态运行时。
+     * 同一动作的重复决策由运行时状态机幂等处理，本层仅拦截非法决策枚举。
+     */
     public Mono<com.redculture.platform.vo.ai.AgentActionVO> decideAction(
             String actionId, String decision, AuthCurrentUserVO currentUser) {
         validateActionRequest(actionId, currentUser);
+        // 决策值只允许终态确认或拒绝，防止将任意文本透传给可能执行副作用的 Agent 动作。
         if (!"approve".equals(decision) && !"reject".equals(decision)) {
             throw new IllegalArgumentException("decision must be approve or reject");
         }
@@ -252,6 +270,7 @@ public class AgentQaServiceImpl implements AgentQaService {
     }
 
     private void validateActionRequest(String actionId, AuthCurrentUserVO currentUser) {
+        // actionId 为空时不访问运行时，避免把参数错误伪装成上游故障。
         if (!StringUtils.hasText(actionId)) {
             throw new IllegalArgumentException("actionId is required");
         }
@@ -264,9 +283,14 @@ public class AgentQaServiceImpl implements AgentQaService {
     }
 
     @Override
+    /**
+     * 建立带阶段事件的 SSE 问答流。远程运行时不可用时采用本地管线，
+     * 两条路径都先完成认证范围解析和可信知识检索，避免流式接口绕过鉴权。
+     */
     public Flux<ServerSentEvent<Map<String, Object>>> stream(
             AgentQaRequest request, AuthCurrentUserVO currentUser) {
         return Flux.defer(() -> {
+            // 延迟到订阅时校验，确保每次 SSE 重连都重新使用当前认证上下文，而不是复用过期范围。
             validateRequest(request);
             if (currentUser == null) {
                 return Flux.error(new IllegalArgumentException("school account is required"));
@@ -287,6 +311,7 @@ public class AgentQaServiceImpl implements AgentQaService {
             AuthCurrentUserVO currentUser,
             AgentAccessGuard.ScopeResolution scopeResolution) {
         if (scopeResolution.clarificationRequired()) {
+            // 范围不唯一时只返回澄清选项，不发起检索或模型调用，防止在错误对象上生成回答。
             AgentQaResponse clarification = clarificationResponse(
                     AgentIntent.UNKNOWN,
                     scopeResolution.message(),
@@ -299,6 +324,7 @@ public class AgentQaServiceImpl implements AgentQaService {
             );
         }
         if (agentRuntimeClient == null) {
+            // 有状态运行时缺失时保留 SSE 协议形状，由本地管线产生可消费的降级回答。
             return localFallbackStream(request, currentUser);
         }
 
@@ -331,6 +357,7 @@ public class AgentQaServiceImpl implements AgentQaService {
         AtomicBoolean upstreamFinal = new AtomicBoolean(false);
         return agentRuntimeClient.streamStateful(request, currentUser, context)
                 .map(event -> {
+                    // 上游 final 事件包含松散 Map，需要在业务侧补回可信范围、引用校验和统一响应字段。
                     if ("done".equals(event.event())) {
                         upstreamDone.set(true);
                     }
@@ -345,6 +372,7 @@ public class AgentQaServiceImpl implements AgentQaService {
                         ? Flux.empty()
                         : Flux.just(sse("done", Collections.emptyMap()))))
                 .onErrorResume(error -> {
+                    // final 已发出时不覆盖用户已看到的回答，只补发可识别的异常终止事件。
                     if (upstreamFinal.get()) {
                         return errorEvents(
                                 request,
@@ -362,6 +390,7 @@ public class AgentQaServiceImpl implements AgentQaService {
             AuthCurrentUserVO currentUser) {
         String runId = UUID.randomUUID().toString();
         return onBlockingScheduler(() -> {
+            // 复用非流式本地管线以保证引用、权限和降级语义一致，再将完整答案切成协议兼容的 token 事件。
             AgentAnswerContext[] context = new AgentAnswerContext[1];
             AgentQaResponse response = askWithPipeline(
                     request, currentUser, false, value -> context[0] = value
@@ -377,6 +406,7 @@ public class AgentQaServiceImpl implements AgentQaService {
                     ? "" : result.response().getAnswer();
             int chunkCount = (answer.length() + 7) / 8;
             Flux<ServerSentEvent<Map<String, Object>>> tokens = Flux.range(0, chunkCount)
+                    // 降级路径没有真实模型增量，仍以小片段模拟推送，避免前端因协议差异无法展示回答。
                     .delayElements(Duration.ofMillis(1))
                     .map(index -> sse("token", Map.of(
                             "runId", runId,
@@ -428,6 +458,7 @@ public class AgentQaServiceImpl implements AgentQaService {
                                                              AgentQaRequest request,
                                                              AgentAnswerContext context) {
         Map<String, Object> normalized = new LinkedHashMap<>(eventData);
+        // 远程 payload 属于不可信边界：只抽取允许字段，业务端重新注入已解析的意图、范围和验证后的引用。
         Object rawResponse = eventData.get("response");
         Map<?, ?> responseMap = rawResponse instanceof Map<?, ?> map ? map : Collections.emptyMap();
         AgentQaResponse response = new AgentQaResponse();
@@ -595,6 +626,10 @@ public class AgentQaServiceImpl implements AgentQaService {
         return value == null ? null : String.valueOf(value);
     }
 
+    /**
+     * 将用户、问题、识别意图和已解析范围合成为 Agent 上下文。
+     * 这里是从 HTTP 认证信息收紧到学校、班级、任务和资源集合的关键边界，后续检索不得扩大它。
+     */
     private AgentAnswerContext buildAgentContext(AgentQaRequest request,
                                                  AuthCurrentUserVO currentUser,
                                                  String question,
@@ -613,6 +648,7 @@ public class AgentQaServiceImpl implements AgentQaService {
         context.setAccountId(currentUser == null ? null : currentUser.getAccountId());
         context.setResourceId(request.getResourceId());
         context.setTaskId(request.getTaskId());
+        // 业务上下文先补齐学生任务、班级或资源等授权数据，再执行知识检索，避免检索结果反向决定权限。
         loadBusinessContext(context);
         context.setRetrieval(retrieve(context, request.getTopK()));
         return context;
@@ -627,6 +663,7 @@ public class AgentQaServiceImpl implements AgentQaService {
         }
         event.put("phase", "retrieval");
         event.put("label", "知识与业务上下文已准备");
+        // 检索轨迹只在显式调试请求中回传；普通回答不暴露内部召回分数、通道与实体范围。
         if (Boolean.TRUE.equals(request.getDebug()) && context != null && context.getRetrieval() != null
                 && context.getRetrieval().getRetrievalTrace() != null) {
             event.put("retrievalTrace", context.getRetrieval().getRetrievalTrace());
@@ -645,6 +682,7 @@ public class AgentQaServiceImpl implements AgentQaService {
     private Flux<ServerSentEvent<Map<String, Object>>> streamFailure(
             AgentQaRequest request, Throwable error) {
         Throwable unwrapped = Exceptions.unwrap(error);
+        // 先按可恢复性分类，前端据此决定是否复用 clientTurnId 重连，而不是盲目发起新轮次。
         if (unwrapped instanceof AgentBusyException) {
             return errorEvents(
                     request,
@@ -682,6 +720,7 @@ public class AgentQaServiceImpl implements AgentQaService {
             String code,
             String message,
             boolean retryable) {
+        // error 后始终追加 done，确保客户端释放加载状态；该约定也适用于参数错误等不可重试情形。
         Map<String, Object> error = new LinkedHashMap<>();
         error.put("code", code);
         error.put("errorType", code);
@@ -694,6 +733,7 @@ public class AgentQaServiceImpl implements AgentQaService {
     }
 
     private <T> Mono<T> onBlockingScheduler(Callable<T> callable) {
+        // 映射专用调度器拒绝为可识别的繁忙错误，避免 Reactor 线程上的阻塞操作拖慢其他请求。
         return Mono.fromCallable(callable)
                 .subscribeOn(agentBlockingScheduler)
                 .onErrorMap(error -> Exceptions.unwrap(error) instanceof RejectedExecutionException,
@@ -705,6 +745,7 @@ public class AgentQaServiceImpl implements AgentQaService {
         return onBlockingScheduler(() -> prepareAnswer(
                 request, currentUser, true, ignored -> { }
         )).flatMap(prepared -> {
+            // 澄清问题等早期结果不调用模型；其余结果先准备本地回退，再尝试远程有状态 Agent。
             if (prepared.earlyResponse() != null) {
                 return Mono.just(prepared.earlyResponse());
             }
@@ -714,6 +755,7 @@ public class AgentQaServiceImpl implements AgentQaService {
             if (agentRuntimeClient == null) {
                 return local;
             }
+            // 远程空响应回退到本地生成，远程异常则交由调用链保留其可重试错误语义。
             return agentRuntimeClient.generate(request, currentUser, prepared.context())
                     .flatMap(remote -> onBlockingScheduler(() -> completeAnswer(
                             request, prepared, remote
@@ -727,6 +769,7 @@ public class AgentQaServiceImpl implements AgentQaService {
         return askWithPipeline(request, currentUser, false);
     }
 
+    /** 按统一管线完成上下文、检索、生成和引用校验，供同步问答与本地流式降级共用。 */
     private AgentQaResponse askWithPipeline(AgentQaRequest request,
                                              AuthCurrentUserVO currentUser,
                                              boolean allowRemoteAgent) {
@@ -755,6 +798,7 @@ public class AgentQaServiceImpl implements AgentQaService {
         AgentIntent intent = hasImageAttachments(request)
                 ? AgentIntent.RESOURCE_EXPLANATION : intentRecognizer.recognize(question);
 
+        // 本地回退无法处理未知意图时尽早返回澄清，避免在没有可靠检索目标的情况下生成内容。
         if (intent == AgentIntent.UNKNOWN && (agentRuntimeClient == null || !allowRemoteAgent)) {
             return new AnswerPreparation(
                     skippedResponse(
@@ -770,6 +814,7 @@ public class AgentQaServiceImpl implements AgentQaService {
         }
 
         ScopeResolution scopeResolution = resolveScope(request, currentUser, question);
+        // 范围解析失败或不唯一时不构造上下文；模型永远不能参与选择用户实际想问的学校或资源。
         if (scopeResolution.requiresClarification()) {
             return new AnswerPreparation(
                     clarificationResponse(
@@ -802,8 +847,10 @@ public class AgentQaServiceImpl implements AgentQaService {
         GeneratedAnswer generated = remote == null ? null : remote.getAnswer();
         if (generated == null) {
             try {
+                // 远程未提供完整答案时才调用本地生成器，保留远程模型已声明的结果优先级。
                 generated = answerGenerator.generate(context);
             } catch (RuntimeException exception) {
+                // 本地生成失败转换为可展示的降级结果，不让单次模型故障破坏已完成的检索链路。
                 generated = new GeneratedAnswer(
                         "暂时无法生成完整回答，请稍后重试。",
                         List.of(),
@@ -1107,8 +1154,7 @@ public class AgentQaServiceImpl implements AgentQaService {
     }
 
     private Long currentAccountId(AgentAnswerContext context) {
-        // Student ownership is already established by the authenticated scope; the task lookup
-        // is additionally constrained by the account in prepareAnswer.
+        // 学生归属已经由认证范围确定；prepareAnswer 中还会使用账号进一步约束任务查询。
         return context.getAccountId();
     }
 

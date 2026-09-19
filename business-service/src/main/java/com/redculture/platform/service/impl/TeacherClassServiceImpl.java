@@ -93,7 +93,7 @@ public class TeacherClassServiceImpl implements TeacherClassService {
         entity.setStatus(ACTIVE);
         classMapper.insert(entity);
         replaceTeachers(entity.getClassId(), request);
-        // The creator may deliberately have no class-teacher relation after creation.
+        // 创建者在创建后可能有意不建立班主任关系。
         return joinedClassVO(entity);
     }
 

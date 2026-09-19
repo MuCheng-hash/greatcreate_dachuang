@@ -134,8 +134,8 @@ public class AiTeachingPlanServiceImpl implements AiTeachingPlanService {
                 appMapProperties, null, objectMapper, Schedulers.immediate(), null);
     }
 
-    // Compatibility constructor retained for focused streaming/controller tests.
-    // Generation persistence is performed at the authenticated HTTP boundary.
+    // 保留兼容构造方法，供聚焦的流式和控制器测试使用。
+    // 生成结果持久化在经过认证的 HTTP 边界执行。
     public AiTeachingPlanServiceImpl(SchoolMapService schoolMapService,
                                      TeachingActivityPlanService teachingActivityPlanService,
                                      KnowledgeRetriever knowledgeRetriever,
@@ -150,11 +150,19 @@ public class AiTeachingPlanServiceImpl implements AiTeachingPlanService {
     }
 
     @Override
+    /**
+     * 构建受学校范围约束的上下文后调用 Agent，并统一补全引用与检索状态。
+     * 上游没有返回完整结果时使用本地降级方案，保证调用者得到可展示且带有降级语义的响应。
+     */
     public Mono<GeneratedTeachingPlanResponse> generatePlan(TeachingPlanGenerateRequest request) {
         return generatePlan(request, null, null);
     }
 
     @Override
+    /**
+     * 以账号和会话归属执行同步生成；数据库和检索访问切换到专用阻塞调度器，
+     * 避免占用响应式网络线程并让模型调用只接收经过校验的上下文。
+     */
     public Mono<GeneratedTeachingPlanResponse> generatePlan(
             TeachingPlanGenerateRequest request,
             Long accountId,
@@ -171,12 +179,14 @@ public class AiTeachingPlanServiceImpl implements AiTeachingPlanService {
     }
 
     @Override
+    /** 流式生成前先显式发送检索阶段事件，使客户端可区分上下文准备与模型输出。 */
     public Flux<ServerSentEvent<Map<String, Object>>> generatePlanStream(
             TeachingPlanGenerateRequest request) {
         return generatePlanStream(request, null, null);
     }
 
     @Override
+    /** 流式入口将异常转换为规范 SSE 失败事件，避免订阅者因未处理错误而无法结束界面状态。 */
     public Flux<ServerSentEvent<Map<String, Object>>> generatePlanStream(
             TeachingPlanGenerateRequest request,
             Long accountId,
@@ -194,6 +204,10 @@ public class AiTeachingPlanServiceImpl implements AiTeachingPlanService {
         }).onErrorResume(this::streamFailure);
     }
 
+    /**
+     * 对模型结果施加引用和检索元数据约束。
+     * 引用只能来自本轮检索候选；模型未给出有效引用时回填可信候选，防止凭空引用进入可保存方案。
+     */
     private GeneratedTeachingPlanResponse finalizeResponse(GeneratedTeachingPlanResponse llmResponse,
                                                             TeachingPlanContextVO context) {
         GeneratedTeachingPlanResponse response = llmResponse == null
@@ -213,11 +227,16 @@ public class AiTeachingPlanServiceImpl implements AiTeachingPlanService {
     }
 
     @Override
+    /** 兼容未携带认证账号的旧调用；生产路径会使用下方显式账号重载。 */
     public TeachingActivityPlanAdminVO saveDraft(GeneratedTeachingPlanSaveRequest request) {
         return saveDraft(request, request == null ? null : request.getOwnerAccountId());
     }
 
     @Override
+    /**
+     * 将生成结果转为业务草稿，同时验证每个资源都在学校已授权资源集合内。
+     * accountId 由认证层提供并写入方案所有权，客户端不能通过请求体替换它。
+     */
     public TeachingActivityPlanAdminVO saveDraft(GeneratedTeachingPlanSaveRequest request, Long accountId) {
         validateSaveRequest(request);
         SchoolMapDetailVO detail = requireApprovedSchool(request.getSchoolId());
@@ -259,6 +278,10 @@ public class AiTeachingPlanServiceImpl implements AiTeachingPlanService {
         return teachingActivityPlanService.createPlan(createRequest);
     }
 
+    /**
+     * 汇总学校、可访问资源、既有方案和已审核检索证据，形成发送给 Agent 的最小上下文。
+     * 请求指定资源时必须全部属于该学校，避免模型通过任意 resourceId 获得跨校资料。
+     */
     private TeachingPlanContextVO buildContext(TeachingPlanGenerateRequest request,
                                                 Long accountId,
                                                 String sessionId) {
@@ -274,12 +297,14 @@ public class AiTeachingPlanServiceImpl implements AiTeachingPlanService {
         context.setSchool(detail.getSchool());
         List<SchoolResourceItemVO> accessible = detail.getResources() == null ? List.of() : detail.getResources();
         List<Long> requestedResourceIds = request.getResourceIds() == null ? new ArrayList<>() : request.getResourceIds();
+        // 兼容旧调用方只传 resourceId 的请求，同时统一后续多资源授权校验路径。
         if (request.getResourceId() != null && requestedResourceIds.isEmpty()) {
             requestedResourceIds.add(request.getResourceId());
         }
         List<SchoolResourceItemVO> selected = requestedResourceIds.isEmpty()
                 ? accessible
                 : accessible.stream().filter(item -> requestedResourceIds.contains(item.getResourceId())).toList();
+        // 资源数量必须完整匹配，不能因部分资源有权限就静默忽略其余越权资源。
         if (!requestedResourceIds.isEmpty() && selected.size() != requestedResourceIds.stream().distinct().count()) {
             throw new IllegalArgumentException("one or more resources are not accessible for this school");
         }
@@ -310,7 +335,9 @@ public class AiTeachingPlanServiceImpl implements AiTeachingPlanService {
                 .collect(Collectors.toList());
     }
 
+    /** 将教案主题、年级和目标组合为学校范围的检索请求；检索器异常/空结果统一降级为无证据状态。 */
     private KnowledgeRetrieveResult retrieveKnowledge(TeachingPlanGenerateRequest request) {
+        // 检索问题只由教案业务字段拼接，范围固定为学校，绝不接受模型或前端提供的任意范围。
         KnowledgeRetrieveRequest retrieveRequest = new KnowledgeRetrieveRequest();
         retrieveRequest.setQuery(Stream.of(request.getTheme(), request.getGrade(), request.getObjectives(), enumValue(request.getActivityType()))
                 .filter(StringUtils::hasText)
@@ -322,6 +349,7 @@ public class AiTeachingPlanServiceImpl implements AiTeachingPlanService {
         retrieveRequest.setTopK(MAX_CONTENT_CHUNKS);
         retrieveRequest.setResourceIds(request.getResourceIds());
         KnowledgeRetrieveResult result = knowledgeRetriever.retrieve(retrieveRequest);
+        // 检索器未返回结果时显式标记降级，让 Agent 知道不能把空结果当作已验证证据。
         return result == null ? KnowledgeRetrieveResult.degraded() : result;
     }
 
@@ -329,6 +357,7 @@ public class AiTeachingPlanServiceImpl implements AiTeachingPlanService {
         context.setRetrievalStatus(retrieval.getRetrievalStatus() == null
                 ? "empty" : retrieval.getRetrievalStatus().getValue());
         List<KnowledgeChunkVO> chunks = retrieval.getChunks() == null ? List.of() : retrieval.getChunks();
+        // 上下文按固定上限截断，控制模型输入成本，也确保引用候选与最终提示词使用同一批证据。
         context.setContentChunks(chunks.stream().limit(MAX_CONTENT_CHUNKS).map(chunk -> {
             TeachingPlanContextVO.ContentChunkContextVO item = new TeachingPlanContextVO.ContentChunkContextVO();
             item.setChunkId(chunk.getChunkId());
@@ -363,6 +392,10 @@ public class AiTeachingPlanServiceImpl implements AiTeachingPlanService {
                 .toList());
     }
 
+    /**
+     * 转发 Agent 流；未配置远程运行时或远程流在最终事件前失败时，回退到本地可引用方案。
+     * 一旦已发送 final，后续连接错误只报告中断，不再生成第二份最终方案。
+     */
     private Flux<ServerSentEvent<Map<String, Object>>> streamPlan(
             TeachingPlanContextVO context) {
         Flux<ServerSentEvent<Map<String, Object>>> generationStarted = Flux.just(sse(

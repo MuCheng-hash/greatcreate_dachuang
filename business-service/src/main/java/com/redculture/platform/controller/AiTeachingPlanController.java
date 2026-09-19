@@ -39,7 +39,10 @@ import java.util.Map;
 
 @RestController
 @RequestMapping("/api/ai/teaching-plans")
-//AI 教学活动方案：生成教案、流式生成、保存草稿、查看本人已生成的方案。
+/**
+ * AI 教学活动方案入口，负责在认证边界完成学校范围校验并记录教师生成历史。
+ * 生成本身交由 Agent 服务处理，本控制器不信任请求中的账号信息。
+ */
 public class AiTeachingPlanController {
 
     /*
@@ -58,7 +61,10 @@ public class AiTeachingPlanController {
         this.feedbackService = feedbackService;
     }
 
-    //同步生成教学方案。等待 AI 完整生成后，一次性返回结果。
+    /**
+     * 同步生成教学方案，等待 Agent 返回完整方案后再写入本次生成记录。
+     * 非平台管理员只能请求自己学校的数据；上游繁忙和网关失败分别映射为可识别的 HTTP 状态。
+     */
     @PostMapping("/generate")
     public Mono<ResponseEntity<ApiResponse<GeneratedTeachingPlanResponse>>> generate(
             @RequestBody TeachingPlanGenerateRequest request,
@@ -85,7 +91,10 @@ public class AiTeachingPlanController {
                 ));
     }
 
-    //流式生成教学方案。AI 生成一段就推送一段，适用于前端实时展示。
+    /**
+     * 流式生成教学方案，逐段转发 Agent SSE；仅最终事件才持久化生成记录，避免每个增量片段重复入库。
+     * 学校范围校验发生在订阅创建前，防止未授权订阅触发模型调用。
+     */
     @PostMapping(value = "/generate/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public Flux<ServerSentEvent<Map<String, Object>>> generateStream(
             @RequestBody TeachingPlanGenerateRequest request,
@@ -101,7 +110,10 @@ public class AiTeachingPlanController {
         });
     }
 
-    //将 AI 生成的方案保存为草稿，后续可在后台继续编辑或管理。
+    /**
+     * 保存 AI 生成结果为草稿。携带 generationId 时从已记录的生成结果派生草稿，
+     * 否则使用请求内方案；两种路径均通过当前用户和学校范围限制所有权。
+     */
     @PostMapping("/save-draft")
     public ApiResponse<TeachingActivityPlanAdminVO> saveDraft(@RequestBody GeneratedTeachingPlanSaveRequest request,
                                                               HttpServletRequest servletRequest) {
@@ -117,7 +129,7 @@ public class AiTeachingPlanController {
         }
     }
 
-    //查询当前登录用户所在学校的教学活动方案，最多返回前 50 条。
+    /** 查询当前登录账号拥有的教学方案，并在账号所属学校范围内应用筛选和分页。 */
     @GetMapping("/mine")
     public ResponseEntity<?> mine(
             @RequestParam(required = false) String grade,
@@ -141,6 +153,10 @@ public class AiTeachingPlanController {
         }
     }
 
+    /**
+     * 导出当前用户拥有的方案并在导出成功后标记为已采用。
+     * 先读取方案主题用于安全文件名，再导出字节并更新采用状态，任何所有权失败均不返回文件内容。
+     */
     @GetMapping("/mine/{planId}/export")
     public ResponseEntity<?> exportMine(@org.springframework.web.bind.annotation.PathVariable Long planId,
                                         HttpServletRequest servletRequest) {
@@ -161,6 +177,7 @@ public class AiTeachingPlanController {
         }
     }
 
+    /** 查询当前用户的 AI 生成历史及反馈处理状态。 */
     @GetMapping("/generations/mine")
     public ResponseEntity<?> generationHistory(@RequestParam(required = false) String feedbackStatus,
                                                 @RequestParam(required = false) Long pageNum,
@@ -175,6 +192,7 @@ public class AiTeachingPlanController {
         }
     }
 
+    /** 提交当前用户对指定生成结果的反馈，服务层负责校验生成记录归属及状态流转。 */
     @PutMapping("/generations/{generationId}/feedback")
     public ResponseEntity<?> submitGenerationFeedback(@PathVariable Long generationId,
                                                        @RequestBody com.redculture.platform.vo.request.TeachingPlanFeedbackRequest request,
@@ -188,6 +206,10 @@ public class AiTeachingPlanController {
         }
     }
 
+    /**
+     * 为同步生成结果补齐持久化 generationId。
+     * 仅当 Agent 未自行返回标识时记录一次，避免重放或下游已持久化结果造成重复历史。
+     */
     private GeneratedTeachingPlanResponse recordGeneration(TeachingPlanGenerateRequest request,
                                                             GeneratedTeachingPlanResponse response,
                                                             AuthCurrentUserVO user) {
@@ -198,6 +220,7 @@ public class AiTeachingPlanController {
         return response;
     }
 
+    /** 仅拦截最终 SSE 事件入库，增量 patch 不具备可独立保存的完整方案语义。 */
     @SuppressWarnings("unchecked")
     private ServerSentEvent<Map<String, Object>> recordStreamGeneration(
             TeachingPlanGenerateRequest request, AuthCurrentUserVO user,
@@ -247,13 +270,10 @@ public class AiTeachingPlanController {
         }
     }
 
-    //核心权限校验方法
-    /*
-    情况	结果
-未登录，或请求没有学校 ID	抛出 school account is required。
-当前用户是 platform_admin	可操作任意学校的数据。
-当前用户不是平台管理员，但请求的 schoolId 等于自己的学校 ID	允许。
-当前用户不是平台管理员，且请求的是其他学校 ID	拒绝，提示 cannot access another school。
+    /**
+     * 在调用模型或读写方案前固定学校数据边界。
+     * platform_admin 可以跨校运维；其他角色必须携带与认证上下文一致的 schoolId，
+     * 不接受由请求体伪造账号或学校来扩大访问范围。
      */
     private void requireSchoolAccess(Long schoolId, AuthCurrentUserVO user) {
         if (user == null || schoolId == null) {

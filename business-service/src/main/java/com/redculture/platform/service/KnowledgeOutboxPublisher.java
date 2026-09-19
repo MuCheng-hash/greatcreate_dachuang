@@ -26,7 +26,7 @@ public class KnowledgeOutboxPublisher {
 
     @Scheduled(fixedDelayString="${app.knowledge-mq.poll-ms:1000}")
     public void publish() {
-        // Claim one at a time so the lease cannot expire while waiting in a local batch.
+        // 一次只认领一条，避免在本地批处理中等待时租约过期。
         String owner = UUID.randomUUID().toString();
         Map<String,Object> event = transactions.run(() -> {
             var rows = jdbc.queryForList("""

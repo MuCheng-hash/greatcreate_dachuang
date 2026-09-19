@@ -102,7 +102,7 @@ public class CatalogAdminService {
         if (type != request.getEntityType()) throw new IllegalArgumentException("entityType cannot be changed");
         Object entity = require(type, id);
         apply(type, entity, request);
-        // The catalog is maintained exclusively by platform administrators, so edited imports remain published.
+        // 目录仅由平台管理员维护，因此编辑后的导入数据仍保持已发布状态。
         setReviewStatus(entity, ReviewStatus.APPROVED);
         setActive(entity, true);
         update(type, entity);
