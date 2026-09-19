@@ -44,7 +44,7 @@ class LlmModelTarget:
 
 @dataclass(frozen=True, slots=True)
 class ModelConfig:
-    """兼容 stateful Agent runtime 使用的模型配置视图。"""
+    """兼容有状态 Agent 运行时使用的模型配置视图。"""
 
     provider: str
     model: str

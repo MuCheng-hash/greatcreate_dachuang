@@ -92,6 +92,7 @@ EventSink = Callable[[str, dict[str, Any]], Awaitable[None]]
 
 
 class ActionConfirmationRequired(RuntimeError):
+    """模型请求高风险写工具时中断轮次，要求用户先确认动作。"""
     def __init__(self, action: AgentActionRecord):
         self.action = action
         super().__init__("action confirmation is required")
@@ -99,6 +100,7 @@ class ActionConfirmationRequired(RuntimeError):
 
 @dataclass(slots=True)
 class PreparedTurn:
+    """已完成注册、上下文组装与记忆准备，但尚未执行模型的轮次快照。"""
     registration: TurnRegistration
     thread: ThreadRecord
     window: ContextWindow
@@ -108,6 +110,11 @@ class PreparedTurn:
 
 
 class PartialAnswerWriter:
+    """按时间和字符阈值批量持久化流式部分回答。
+
+    该写入器只在当前轮次租约有效时更新；最终完成、失败或中断路径会强制刷新，
+    从而让断线恢复获得尽可能新的内容而不为每个 token 启动数据库事务。
+    """
     def __init__(
         self,
         repository: AgentTurnRepository,
@@ -117,6 +124,7 @@ class PartialAnswerWriter:
         character_threshold: int,
         initial: str = "",
     ):
+        """保存租约身份与刷新阈值，使用已有部分回答作为恢复起点。"""
         self.repository = repository
         self.turn_id = turn_id
         self.lease_owner = lease_owner
@@ -127,6 +135,7 @@ class PartialAnswerWriter:
         self._last_flush = 0.0
 
     async def update(self, value: str, *, force: bool = False) -> None:
+        """在达到刷新条件或强制请求时写入新部分回答。"""
         if len(value) >= len(self.value):
             self.value = value
         now = time.monotonic()
@@ -144,6 +153,7 @@ class PartialAnswerWriter:
         self._last_flush = now
 
     async def reset(self) -> None:
+        """清空内存中的部分回答并强制同步到持久化层。"""
         self.value = ""
         self._flushed_value = ""
         self._last_flush = time.monotonic()
@@ -153,6 +163,12 @@ class PartialAnswerWriter:
 
 
 class AgentRuntime:
+    """编排有状态 Agent 轮次、可信检索、记忆、模型降级与 SSE 交付。
+
+    本类将认证后的请求范围固化到会话、轮次和工具上下文；模型只能使用已准备的
+    消息与证据。执行结果先按租约持久化，再通过同步响应或 SSE 交付，因此传输断开
+    不会改变轮次事实，客户端可凭 ``clientTurnId`` 恢复。
+    """
     def __init__(
         self,
         settings: Settings,
@@ -167,6 +183,7 @@ class AgentRuntime:
         checkpoints: CheckpointManager | None = None,
         action_repository: AgentActionRepository | None = None,
     ):
+        """组装持久化仓库、模型网关和可选依赖，初始化实例级租约所有者。"""
         self.settings = settings
         self.repository = repository
         self.observability = observability
@@ -198,14 +215,15 @@ class AgentRuntime:
             settings.agent_summary_character_limit,
         )
         self.planner = AgentPlanner(settings.agent_max_tool_rounds)
-        # Tests and compatibility callers may inject one agent here. Normal
-        # requests build an agent from each configured model in model_chain().
+        # 测试和兼容调用方可以在此注入一个 Agent。普通请求会根据
+        # model_chain() 中的每个已配置模型创建 Agent。
         self._agent: Any | None = None
         self._agents: dict[tuple[str, int, str], Any] = {}
         self._web_domain_cache: tuple[float, list[str]] = (0.0, [])
         self._active_turn_tasks: dict[str, asyncio.Task[Any]] = {}
 
     async def handle(self, request: AgentMessageRequest) -> AgentMessageResponse:
+        """同步执行一轮 Agent 请求，并返回已持久化的最终响应或既有完成结果。"""
         prepared = await self._prepare_turn(request)
         completed = self._completed_response(prepared.registration.turn)
         if completed is not None:
@@ -253,6 +271,7 @@ class AgentRuntime:
     async def start_stream(
         self, request: AgentMessageRequest
     ) -> AsyncIterator[str]:
+        """启动 SSE 响应流；具体轮次执行由 ``stream_events`` 负责。"""
         prepared = await self._prepare_turn(request)
         return self.stream_events(request, prepared=prepared)
 
@@ -262,9 +281,13 @@ class AgentRuntime:
         *,
         prepared: PreparedTurn | None = None,
     ) -> AsyncIterator[str]:
-        # SSE is a delivery channel, not the lifetime of a durable turn. A
-        # client may reconnect with the same clientTurnId to recover the
-        # persisted response after a transient browser or proxy disconnect.
+        """以 SSE 交付轮次生命周期、工具事件和回答增量。
+
+        SSE 只是传输通道。后台任务在持久化轮次和部分答案后继续完成；连接断开时
+        仅标记消费者不可用，后续同 ``clientTurnId`` 请求会从轮次记录恢复。
+        """
+        # SSE 是传输通道，不代表持久化轮次的生命周期。浏览器或代理短暂断开后，
+        # 客户端可以使用相同的 clientTurnId 重连并恢复已持久化的响应。
         send_stream, _receive_stream = anyio.create_memory_object_stream[
             tuple[str, dict[str, Any]]
         ](1)
@@ -402,6 +425,7 @@ class AgentRuntime:
         *,
         retryable: bool,
     ) -> dict[str, Any]:
+        """构造不含内部异常详情的统一流式错误载荷。"""
         return {
             "code": code,
             "errorType": code,
@@ -413,13 +437,20 @@ class AgentRuntime:
     async def create_thread(
         self, owner_id: str, scope_type: str, scope_id: str | int
     ) -> ThreadRecord:
+        """为已认证账号和范围创建空会话，范围由调用方请求上下文提供。"""
         return await self.repository.create_thread(owner_id, scope_type, scope_id)
 
     async def _prepare_turn(
         self, request: AgentMessageRequest
     ) -> PreparedTurn:
+        """注册或恢复轮次，并在首次执行时准备记忆、历史窗口和工具计划。
+
+        已完成轮次不重复触发记忆提取或模型调用；新轮次的所有上下文均由已认证请求
+        和持久化会话构成，模型参数不能覆盖其中的范围。
+        """
         registration = await self._register_turn(request)
         if registration.turn.status == "cancelled":
+            # 已取消的幂等键不能重新激活，客户端必须生成新的 clientTurnId 再发起提问。
             raise TurnConflictError(
                 "turn_cancelled", "the requested turn was cancelled"
             )
@@ -430,6 +461,7 @@ class AgentRuntime:
             request.scope_id,
         )
         if registration.turn.status == "completed":
+            # 恢复完成轮次不读取新记忆或重算上下文，确保结果与首次提交完全一致。
             return PreparedTurn(
                 registration,
                 thread,
@@ -444,6 +476,7 @@ class AgentRuntime:
         memory_context = await self._memory_context_for(request)
         window = await self._context_window(thread)
         messages = [
+            # 先保留已压缩后的正式历史，再追加本次用户消息以维持提示词内的时间顺序。
             *window.messages,
             {"role": "user", "content": request.message},
         ]
@@ -459,6 +492,7 @@ class AgentRuntime:
     async def _register_turn(
         self, request: AgentMessageRequest
     ) -> TurnRegistration:
+        """将 API 请求映射为具有请求哈希的持久化轮次，并转换存储边界异常。"""
         request_hash, request_summary = self._request_identity(request)
         try:
             return await self.turn_repository.register(
@@ -474,13 +508,20 @@ class AgentRuntime:
                 lease_seconds=self.settings.agent_turn_lease_seconds,
             )
         except LookupError as exc:
+            # 底层轮次仓储不直接依赖会话异常类型，运行时在此统一成 API 层可识别的语义。
             raise ThreadNotFoundError(str(exc)) from exc
         except PermissionError as exc:
             raise ThreadScopeError(str(exc)) from exc
 
     async def _context_window(self, thread: ThreadRecord) -> ContextWindow:
+        """构建模型上下文窗口，必要时以乐观游标提交会话摘要。
+
+        摘要竞争时最多重读三次，避免旧窗口覆盖新摘要；超过次数交由上层将该轮次
+        标记为可恢复失败。
+        """
         current = thread
         for _ in range(3):
+            # 摘要仅能由观察到相同游标的执行者提交，冲突时重读而不是覆盖对方的新摘要。
             stored = await self.repository.list_context_messages(
                 current.thread_id
             )
@@ -508,7 +549,9 @@ class AgentRuntime:
     def _request_identity(
         request: AgentMessageRequest,
     ) -> tuple[str, dict[str, Any]]:
+        """计算去除传输标识后的请求哈希，并保存不含附件原文的恢复摘要。"""
         payload = request.model_dump(by_alias=True, mode="json")
+        # clientTurnId 与 threadId 是传输/路由字段，不能影响“同一请求”的哈希判断。
         payload.pop("clientTurnId", None)
         payload.pop("threadId", None)
         canonical = json.dumps(
@@ -518,6 +561,7 @@ class AgentRuntime:
             separators=(",", ":"),
         )
         attachment_hashes = [
+            # 恢复摘要只存附件摘要，不把可能较大的 Data URL 或二进制原文写入轮次表。
             hashlib.sha256(item.data_url.encode("utf-8")).hexdigest()
             for item in request.attachments
         ]
@@ -538,6 +582,7 @@ class AgentRuntime:
     def _completed_response(
         turn: AgentTurnRecord,
     ) -> AgentMessageResponse | None:
+        """从已完成轮次响应快照重建 API 响应，保证幂等重连返回同一事实。"""
         if turn.status != "completed":
             return None
         if not turn.response:
@@ -548,6 +593,7 @@ class AgentRuntime:
         return response
 
     def _partial_writer(self, turn: AgentTurnRecord) -> PartialAnswerWriter:
+        """为当前持久化轮次创建带租约约束的部分回答写入器。"""
         return PartialAnswerWriter(
             self.turn_repository,
             turn.turn_id,
@@ -558,15 +604,15 @@ class AgentRuntime:
         )
 
     def _start_heartbeat(self, turn: AgentTurnRecord) -> asyncio.Task[None]:
+        """启动独立心跳任务续租，并在取消或租约异常时取消实际执行任务。"""
         execution_task = asyncio.current_task()
         if execution_task is None:
             raise RuntimeError("agent turn requires an asyncio task")
         self._active_turn_tasks[turn.turn_id] = execution_task
 
         async def heartbeat_loop() -> None:
-            # This raw asyncio task must not inherit repeated cancellation from
-            # the surrounding AnyIO response scope. It is stopped explicitly
-            # by ``_stop_heartbeat`` with one ordinary task cancellation.
+            # 这个原生 asyncio 任务不能继承外围 AnyIO 响应作用域的重复取消。
+            # 它由 ``_stop_heartbeat`` 显式执行一次普通任务取消来停止。
             with anyio.CancelScope(shield=True):
                 while True:
                     await asyncio.sleep(self.settings.agent_turn_heartbeat_seconds)
@@ -577,9 +623,11 @@ class AgentRuntime:
                             self.settings.agent_turn_lease_seconds,
                         )
                     except Exception:
+                        # 续租失败意味着执行权已不可靠，主动取消模型调用避免竞争提交最终答案。
                         execution_task.cancel()
                         return
                     if cancellation_requested:
+                        # 取消标记由仓储持久化；心跳负责把该跨进程信号转为本地任务取消。
                         execution_task.cancel()
                         return
 
@@ -588,6 +636,7 @@ class AgentRuntime:
         )
 
     async def _stop_heartbeat(self, task: asyncio.Task[None]) -> None:
+        """停止心跳并清理当前实例登记的执行任务引用。"""
         task.cancel()
         try:
             await task
@@ -604,11 +653,13 @@ class AgentRuntime:
         scope_type: str,
         scope_id: str | int,
     ) -> AgentTurnRecord:
+        """请求取消指定范围内的轮次，并主动中断本实例持有的执行任务。"""
         turn = await self.turn_repository.request_cancel(
             client_turn_id, owner_id, scope_type, scope_id
         )
         active = self._active_turn_tasks.get(turn.turn_id)
         if active is not None and active is not asyncio.current_task():
+            # 仅中断本实例实际持有的任务；其他实例会在下一次心跳中观察到取消标记。
             active.cancel()
         return turn
 
@@ -619,9 +670,11 @@ class AgentRuntime:
         writer: PartialAnswerWriter,
         error_code: str,
     ) -> None:
+        """在取消或连接中断后强制保存部分答案，并以可恢复终态结束轮次。"""
         try:
             await writer.update(writer.value, force=True)
             cancelled = await self.turn_repository.cancel_requested(turn.turn_id)
+            # 客户端显式取消不可重试，传输断开导致的 interrupted 则保留恢复机会。
             await self.turn_repository.finish_incomplete(
                 turn_id=turn.turn_id,
                 lease_owner=self.instance_id,
@@ -653,7 +706,9 @@ class AgentRuntime:
         writer: PartialAnswerWriter,
         exc: Exception,
     ) -> None:
+        """按异常类型区分可重试中断和不可重试失败，并保留已生成的部分内容。"""
         retryable = not isinstance(exc, (AssertionError, TypeError, ValueError))
+        # 参数/断言错误属于确定性失败；传输和下游异常允许用相同 clientTurnId 恢复。
         status = "interrupted" if retryable else "failed"
         try:
             await writer.update(writer.value, force=True)
@@ -685,6 +740,7 @@ class AgentRuntime:
         incomplete: bool,
         turn_status: str,
     ) -> dict[str, Any]:
+        """构造用户消息持久化元数据，使恢复查询能判断它是否属于未完成轮次。"""
         return {
             "intent": request.intent,
             "taskType": request.task_type,
@@ -697,6 +753,7 @@ class AgentRuntime:
     def _incomplete_assistant_metadata(
         request: AgentMessageRequest, turn_status: str
     ) -> dict[str, Any]:
+        """构造未完成助手消息的持久化元数据，禁止其进入正式模型历史。"""
         return {
             "status": "incomplete",
             "taskType": request.task_type,
@@ -706,6 +763,7 @@ class AgentRuntime:
         }
 
     async def _get_or_create_thread(self, request: AgentMessageRequest) -> ThreadRecord:
+        """取得已校验会话或在当前认证范围内创建新会话。"""
         if request.thread_id:
             return await self.repository.require_thread(
                 request.thread_id, request.owner_id, request.scope_type, request.scope_id
@@ -715,9 +773,12 @@ class AgentRuntime:
         )
 
     async def _memory_context_for(self, request: AgentMessageRequest) -> MemoryContext:
+        """按任务类型和开关读取当前范围的记忆，不将资源发现任务的记忆注入模型。"""
         if not self.settings.agent_memory_enabled:
+            # 总开关优先于单范围设置，关闭时既不读取也不写入记忆。
             return MemoryContext.empty()
         if request.task_type == "RESOURCE_DISCOVERY":
+            # 资源发现应只依据当前检索范围，避免用户偏好影响客观资源筛选。
             return MemoryContext.empty()
         query_parts = [request.message, request.grade or "", request.theme or "", request.resource_category or ""]
         if request.task_payload:
@@ -739,6 +800,7 @@ class AgentRuntime:
         thread: ThreadRecord,
         turn_id: str | None = None,
     ) -> MemoryRecord | None:
+        """仅将用户明确“记住”指令写入当前范围，并附带来源会话与轮次审计关联。"""
         if not self.settings.agent_memory_enabled:
             return None
         if request.task_type == "RESOURCE_DISCOVERY":
@@ -747,9 +809,11 @@ class AgentRuntime:
             request.owner_id, request.scope_type, request.scope_id
         )
         if not setting.enabled:
+            # 用户在当前范围关闭记忆后，不从旧记录推断或注入任何偏好。
             return None
         draft = self.explicit_memory_extractor.extract(request.message)
         if draft is None:
+            # 仅识别明确记忆指令，普通聊天内容不得被规则提取器自动固化。
             return None
         return await self.memory_repository.create_memory(
             request.owner_id,
@@ -766,6 +830,7 @@ class AgentRuntime:
         )
 
     def _model_attempts(self, model_id: str | None = None) -> list[tuple[ModelConfig, Any | None]]:
+        """返回请求模型优先的 Agent 尝试链；注入 Agent 仅用于兼容和测试。"""
         if self._agent is not None:
             config = ModelConfig(
                 provider="injected",
@@ -785,6 +850,11 @@ class AgentRuntime:
     async def _create_agent_for(
         self, config: ModelConfig, checkpoint_namespace: str
     ) -> Any:
+        """按模型和检查点命名空间缓存 Agent 图实例。
+
+        检查点命名空间进入缓存键，避免不同轮次恢复到彼此的图状态；写工具启用时由
+        中间件在执行前产生确认中断。
+        """
         if not config.configured():
             raise RuntimeError("model_unavailable")
         key = (config.model, config.fallback_level, checkpoint_namespace)
@@ -848,6 +918,7 @@ class AgentRuntime:
         turn: AgentTurnRecord | None = None,
         checkpoint_namespace: str | None = None,
     ) -> dict[str, Any]:
+        """构造 Agent 调用配置，将轮次和模型身份写入可追踪配置而非提示词。"""
         invoke_config: dict[str, Any] = {
             "recursion_limit": max(3, plan.max_tool_rounds * 2 + 3),
         }
@@ -897,6 +968,7 @@ class AgentRuntime:
         memory_context: MemoryContext,
         registration: TurnRegistration,
     ) -> AgentMessageResponse:
+        """执行非流式聊天 Agent，并在模型级失败时按配置链尝试后备模型。"""
         if request.task_type != "CHAT":
             return await self._run_structured_task(
                 request,
@@ -1033,6 +1105,11 @@ class AgentRuntime:
         registration: TurnRegistration,
         partial_writer: PartialAnswerWriter,
     ) -> AgentMessageResponse:
+        """流式执行聊天 Agent，持续写入部分答案并支持检查点恢复。
+
+        已恢复的轮次若存在图检查点，以 ``Command(resume=...)`` 延续确认后的图状态；
+        对累计内容和增量内容统一去重后才发送 SSE token，避免浏览器重复展示。
+        """
         if request.task_type != "CHAT":
             return await self._stream_structured_task(
                 request,
@@ -1231,13 +1308,14 @@ class AgentRuntime:
         emit: EventSink | None = None,
         turn: AgentTurnRecord | None = None,
     ) -> tuple[list[ToolExecution], list[str]]:
-        """Run deterministic evidence retrieval before model generation.
+        """在模型生成前执行确定性的证据检索。
 
-        The model remains free to call tools itself, but a model that returns a
-        final JSON answer without emitting a tool call must not bypass the
-        authenticated business retrieval boundary.
+        模型仍可自行调用工具，但即使它直接生成最终 JSON 而没有发出工具调用，也不能
+        绕过已认证的业务检索边界。预取结果会合并到 ``trusted_context``，供后续模型
+        调用及引用校验共同使用。
         """
         if not request.context.actor or not request.context.scope:
+            # 缺少认证主体或范围时不执行任何业务工具，避免空范围请求被服务端误解释。
             return [], []
 
         runtime = ToolRuntimeContext(
@@ -1258,6 +1336,7 @@ class AgentRuntime:
         try:
             if "retrieve_knowledge" in plan.recommended_tools:
                 try:
+                    # 工具超时只产生可追踪降级，不让一次预取失败阻断模型对已有上下文的回答。
                     output = await asyncio.wait_for(
                         runtime.run(
                             "retrieve_knowledge",
@@ -1274,6 +1353,7 @@ class AgentRuntime:
                 except (TypeError, ValueError, json.JSONDecodeError):
                     result = {}
                 if isinstance(result, dict):
+                    # 将预取 JSON 写回可信上下文，后续模型调用与工具调用复用同一证据集合。
                     _merge_retrieval(runtime, result)
             if "query_graph_relations" in plan.recommended_tools:
                 try:
@@ -1286,12 +1366,14 @@ class AgentRuntime:
                 except asyncio.TimeoutError:
                     runtime.degraded_reasons.append("query_graph_relations_timeout")
         finally:
+            # ContextVar 必须在 finally 中恢复，避免并发轮次继承本轮的身份和范围。
             reset_tool_runtime(token)
         return list(runtime.executions), list(runtime.degraded_reasons)
 
     async def _retrieve_with_augmentation(
         self, request: AgentMessageRequest, thread: ThreadRecord
     ) -> dict[str, Any]:
+        """先执行业务检索；低召回时在受控改写、HyDE 和域名白名单范围内增强一次。"""
         if self.business_tool_client is None:
             return {"retrievalStatus": "degraded", "degradedReason": "business_tool_unconfigured"}
         rewrite = await self._controlled_query_rewrite(request, thread)
@@ -1299,10 +1381,12 @@ class AgentRuntime:
         try:
             first = await self.business_tool_client.query_knowledge(payload)
         except Exception as exc:
+            # 网络或协议失败必须显式标注降级，不能伪装成正常的空结果。
             return {"retrievalStatus": "degraded", "degradedReason": type(exc).__name__.lower()}
         trace = first.setdefault("retrievalTrace", {}) if isinstance(first, dict) else {}
         trace["queryRewriteStatus"] = rewrite["status"]
         if not isinstance(first, dict) or not trace.get("augmentationRequired"):
+            # 是否需要二次增强由业务服务的检索诊断决定，模型不能单方面扩大联网范围。
             return first
         domains = await self._authoritative_domains()
         hyde_task = self._generate_hyde(rewrite["searchQuery"])
@@ -1312,11 +1396,13 @@ class AgentRuntime:
             trace["augmentationReason"] = f"{trace.get('augmentationReason') or 'low_recall'}:no_augmentation_available"
             return first
         augmented = dict(payload)
+        # 保留首轮经业务服务裁决过的范围和过滤条件，仅添加受限增强证据。
         augmented["hydeQuery"] = hyde or None
         augmented["webEvidence"] = web
         try:
             final = await self.business_tool_client.query_knowledge(augmented)
         except Exception:
+            # 增强失败时返回首轮结果，避免因可选能力故障丢失已经取得的业务证据。
             trace["augmentationReason"] = f"{trace.get('augmentationReason') or 'low_recall'}:augmentation_failed"
             return first
         final_trace = final.setdefault("retrievalTrace", {}) if isinstance(final, dict) else {}
@@ -1326,6 +1412,7 @@ class AgentRuntime:
         return final
 
     def _retrieval_payload(self, request: AgentMessageRequest, rewrite: dict[str, Any]) -> dict[str, Any]:
+        """将认证范围与受控改写结果构造成业务检索载荷，固定本轮 topK 上限。"""
         return {
             "actor": request.context.actor,
             "scope": request.context.scope,
@@ -1337,9 +1424,11 @@ class AgentRuntime:
         }
 
     async def _controlled_query_rewrite(self, request: AgentMessageRequest, thread: ThreadRecord) -> dict[str, Any]:
+        """只在疑似指代时补全检索词；置信度不足时严格保留用户原问题。"""
         original = request.message.strip()
         trigger = bool(re.search(r"(?:这个|那个|这所|那所|这里|那里|它|该)(?:学校|资源|地方|场馆|遗址)?", original))
         if not trigger:
+            # 未发现指代无需经过模型改写，避免无意义调用改变明确查询的检索语义。
             return {"status": "skipped", "searchQuery": original}
         context = {
             "school": request.context.school,
@@ -1363,6 +1452,7 @@ class AgentRuntime:
         query = str(result.get("searchQuery") or "").strip()
         confidence = float(result.get("confidence") or 0.0)
         if not query or len(query) > 600 or confidence < self.settings.retrieval_rewrite_confidence:
+            # 长查询或低置信补全可能注入虚构实体，回退到用户原文比猜测更安全。
             return {"status": "fallback", "searchQuery": original}
         return {
             "status": "applied", "searchQuery": query,
@@ -1372,6 +1462,7 @@ class AgentRuntime:
         }
 
     async def _generate_hyde(self, query: str) -> str | None:
+        """生成长度受限的假设性检索摘要；失败返回空值而不影响首轮检索结果。"""
         prompt = (
             "生成用于向量检索的假设性资料摘要，不是最终答案，不得捏造具体人名、日期或来源。"
             "只输出 JSON：{\"hypothesis\":\"...\"}，限 420 个中文字符。\n问题：" + query
@@ -1383,9 +1474,11 @@ class AgentRuntime:
         return hypothesis[: self.settings.retrieval_hyde_max_characters] or None
 
     async def _authoritative_domains(self) -> list[str]:
+        """读取并短暂缓存业务侧维护的权威域名；缓存失效时宁可跳过联网增强。"""
         now = time.monotonic()
         cached_at, cached = self._web_domain_cache
         if cached and now - cached_at < self.settings.retrieval_web_cache_seconds:
+            # 域名配置不会随单次请求变化，复用缓存避免每轮检索增加一次业务 HTTP 调用。
             return cached
         if self.business_tool_client is None:
             return []
@@ -1397,6 +1490,7 @@ class AgentRuntime:
         return domains
 
     async def _search_authoritative_web(self, query: str, domains: list[str]) -> list[dict[str, Any]]:
+        """在业务白名单域名内搜索网页证据，并过滤协议不安全和提示注入文本。"""
         if not self.settings.tavily_api_key or not domains:
             return []
         body = {"api_key": self.settings.tavily_api_key, "query": query, "search_depth": "basic",
@@ -1414,6 +1508,7 @@ class AgentRuntime:
             url = str(item.get("url") or "").strip()
             host = (urlparse(url).hostname or "").lower()
             if not url.startswith("https://") or not self._allowed_web_host(host, domains):
+                # 结果提供方可能返回重定向或近似域名，必须在本地再次执行严格白名单检查。
                 continue
             excerpt = str(item.get("content") or "").replace("\x00", " ").strip()
             if not excerpt or re.search(
@@ -1422,6 +1517,7 @@ class AgentRuntime:
                 excerpt,
                 re.I,
             ):
+                # 网页摘要携带指令时不能进入模型上下文，即使域名在白名单中也应丢弃。
                 continue
             result.append({"title": str(item.get("title") or host)[:240], "url": url,
                            "domain": host, "excerpt": excerpt[:900], "rank": index + 1,
@@ -1430,6 +1526,7 @@ class AgentRuntime:
 
     @staticmethod
     def _allowed_web_host(host: str, domains: list[str]) -> bool:
+        """允许白名单根域及其子域，不接受仅包含相同字符串的伪造域名。"""
         return any(host == domain or host.endswith("." + domain) for domain in domains)
 
     async def _run_structured_task(
@@ -1653,7 +1750,7 @@ class AgentRuntime:
         memory_context: MemoryContext,
         config: ModelConfig,
     ) -> str | None:
-        """Record a run for the general Agent prompt used by chat turns."""
+        """记录聊天轮次所使用的通用 Agent 提示词运行信息。"""
         if self.prompts is None:
             return None
         try:
@@ -1937,6 +2034,7 @@ class AgentRuntime:
                 turn.turn_id, checkpoint_namespace
             )
         )
+        # 只有确认检查点存在时才允许空输入恢复，避免把新轮次误当作断点续跑。
         resume_action = (
             await self.action_repository.resumable_for_turn(turn.turn_id)
             if durable_resume and turn is not None
@@ -2151,6 +2249,11 @@ class AgentRuntime:
         plan: AgentPlan,
         checkpoint_namespace: str | None,
     ) -> None:
+        """将图中单个高风险写动作持久化为待确认记录，并中断当前轮次。
+
+        多个同时写动作被拒绝，保证一次确认只对应一个稳定 ``action_id``；持久化的
+        参数已脱敏，随后恢复会使用该动作状态决定批准或拒绝。
+        """
         if turn is None or not hasattr(agent, "aget_state"):
             return
         snapshot = await agent.aget_state(
@@ -2212,6 +2315,7 @@ class AgentRuntime:
         executions: list[ToolExecution],
         emit: EventSink | None = None,
     ) -> None:
+        """依据工具审计最终状态回写已批准动作的成功或失败结果，并发送事件。"""
         if action is None or action.status != "executing":
             return
         execution = next(
@@ -2255,6 +2359,11 @@ class AgentRuntime:
         request: AgentMessageRequest | None = None,
         memory_context: MemoryContext | None = None,
     ) -> list[Any]:
+        """将会话历史、可信范围、预取证据和记忆拼装为模型消息。
+
+        系统消息明确证据与权限边界；附件仅附加到最后一个用户消息，避免历史消息被
+        重复携带二进制数据。
+        """
         lc_messages: list[Any] = []
         if summary:
             lc_messages.append(SystemMessage(content=f"较早对话摘要（仅作上下文，不是新事实）：\n{summary}"))
@@ -2300,6 +2409,7 @@ class AgentRuntime:
         return lc_messages
 
     def _prefetched_evidence_message(self, trusted: TrustedContext) -> str:
+        """从业务侧预取证据构造受限提示词，按排序合并片段和图谱事实。"""
         retrieval = trusted.retrieval or {}
         chunks = {
             str(item.get("citationId")): item
@@ -2366,6 +2476,11 @@ class AgentRuntime:
         request: AgentMessageRequest | None = None,
         source_turn_id: str | None = None,
     ) -> AgentMessageResponse:
+        """校验模型 JSON、限制引用来源，并构造可持久化的统一响应。
+
+        模型给出的引用只能取自 ``trusted`` 证据集合；没有合法引用时按预取证据顺序
+        选择候选项。推断记忆候选在此处经过仓库策略处理，失败不会使主回答丢失。
+        """
         parsed = self._parse_model_output(result)
         memory_candidates = (
             await self._persist_inferred_candidates(
@@ -2427,6 +2542,7 @@ class AgentRuntime:
         source: str = "inferred_chat",
         source_turn_id: str | None = None,
     ) -> list[MemoryItem]:
+        """保存模型建议的记忆候选，但不让候选写入失败影响聊天主流程。"""
         if not candidates or not self.settings.agent_memory_enabled:
             return []
         if request.task_type == "RESOURCE_DISCOVERY":
@@ -2491,6 +2607,7 @@ class AgentRuntime:
         )
 
     def _parse_model_output(self, result: dict[str, Any]) -> AgentModelOutput:
+        """从最后一条模型消息取得严格 JSON 输出，拒绝空回答和非对象载荷。"""
         messages = result.get("messages", []) if isinstance(result, dict) else []
         final_content = ""
         for message in reversed(messages):
@@ -2513,6 +2630,7 @@ class AgentRuntime:
         return parsed
 
     def _partial_answer(self, content: str) -> str:
+        """从尚未完成的 JSON 流中提取当前可验证的 ``answer``，无法验证时保持静默。"""
         payload = ModelGateway.parse_json(content)
         if payload is None:
             return ""
@@ -2542,6 +2660,7 @@ class AgentRuntime:
 
 
     def _stream_messages(self, chunk: Any) -> list[Any]:
+        """兼容 LangGraph 多种流事件外形，仅返回可能包含模型文本的消息。"""
         if isinstance(chunk, (AIMessage, AIMessageChunk)):
             return [chunk]
         if isinstance(chunk, tuple) and chunk:
@@ -2563,6 +2682,7 @@ class AgentRuntime:
         return []
 
     def _last_ai_message_text(self, messages: list[Any]) -> str:
+        """从状态快照中取最后一条 AI 消息，用于无增量的恢复场景。"""
         for message in reversed(messages):
             if isinstance(message, (AIMessage, AIMessageChunk)):
                 return message_text(message.content)
@@ -2570,7 +2690,7 @@ class AgentRuntime:
 
     @staticmethod
     def _merge_stream_text(previous: str, incoming: str) -> tuple[str, str]:
-        """Accept both delta chunks and cumulative LangGraph messages."""
+        """同时接受增量分片和累计式 LangGraph 消息。"""
         if not incoming:
             return previous, ""
         if not previous:
@@ -2582,13 +2702,14 @@ class AgentRuntime:
         return previous + incoming, incoming
 
     async def _emit_answer_chunks(self, answer: str, emit: EventSink, size: int = 24) -> None:
+        """将最终或降级回答按固定大小拆分，避免单个 SSE 事件阻塞客户端刷新。"""
         for index in range(0, len(answer), size):
             await emit("token", {"delta": answer[index:index + size]})
-            # Let the SSE consumer flush each queued chunk instead of making
-            # the fallback answer appear as one large response.
+            # 让 SSE 消费者逐个刷新队列中的分片，避免将回退答案作为一个大响应输出。
             await asyncio.sleep(0)
 
     async def _load_prompt(self) -> str:
+        """优先读取已激活的受管提示词，缺失时回退到本地只读提示词文件。"""
         if self.prompts is not None:
             try:
                 return await self.prompts.active_content("agent")
@@ -2599,6 +2720,7 @@ class AgentRuntime:
         return self.settings.prompt_path.read_text(encoding="utf-8")
 
     def invalidate_prompt(self, prompt_key: str) -> None:
+        """失效 Agent 提示词对应的图缓存，使下次创建使用最新受管版本。"""
         if prompt_key.strip() == "agent":
             self._agents.clear()
 
@@ -2606,6 +2728,7 @@ class AgentRuntime:
         self, request: AgentMessageRequest, trusted: TrustedContext, thread_id: str,
         compacted: bool, executions: list[ToolExecution] | None = None, status: str = "degraded",
     ) -> AgentMessageResponse:
+        """在模型链耗尽时，以可信资源和检索状态生成明确标记的降级响应。"""
         names = []
         for item in trusted.resources[:5]:
             resource = item.get("resource") if isinstance(item.get("resource"), dict) else item

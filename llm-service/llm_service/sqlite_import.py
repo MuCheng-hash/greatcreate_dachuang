@@ -497,8 +497,8 @@ class SqliteImporter:
         for column in spec.columns:
             value = row[column]
             if spec.name == "agent_thread" and column == "summary":
-                # Legacy summaries may already contain repeated compression output.
-                # Import raw messages as the source of truth and rebuild summaries.
+# 旧版摘要可能已经包含重复的压缩结果。
+# 以原始消息为事实来源重新导入并构建摘要。
                 value = ""
             if column in spec.json_columns:
                 value = Jsonb(json.loads(value or "{}"))

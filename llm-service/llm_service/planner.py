@@ -11,7 +11,7 @@ class AgentPlan:
 
 
 class AgentPlanner:
-    """Small deterministic policy planner that constrains, but does not replace, LangGraph planning."""
+    """小型确定性策略规划器，用于约束而不是替代 LangGraph 规划。"""
 
     def __init__(self, max_tool_rounds: int):
         self.max_tool_rounds = max(1, max_tool_rounds)

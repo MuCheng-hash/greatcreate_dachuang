@@ -26,7 +26,7 @@ class ApiModel(BaseModel):
 
 
 class StructuredOutputModel(BaseModel):
-    """Model-facing contracts reject unknown fields instead of silently repairing them."""
+    """面向模型的契约拒绝未知字段，而不是静默修复输入。"""
 
     model_config = ConfigDict(populate_by_name=True, extra="forbid")
 

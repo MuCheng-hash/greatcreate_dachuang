@@ -6,7 +6,11 @@ import httpx
 
 
 class BusinessToolError(RuntimeError):
-    """A controlled failure while calling the Java business tool boundary."""
+    """调用 Java 业务工具边界时的受控失败。
+
+    ``reason`` 是供上层决定降级、重试或向用户反馈的稳定机器标识；不透传
+    下游服务的响应正文，避免把内部实现和潜在敏感信息带出可信服务边界。
+    """
 
     def __init__(self, reason: str, message: str | None = None):
         self.reason = reason
@@ -14,7 +18,12 @@ class BusinessToolError(RuntimeError):
 
 
 class BusinessToolClient:
-    """通过一个共享 AsyncClient 调用 Java 的认证工具接口。"""
+    """通过一个共享 ``AsyncClient`` 调用 Java 的认证工具接口。
+
+    该类是 LLM 服务访问业务事实的唯一 HTTP 边界。调用者传入的查询条件仍由
+    业务服务按服务令牌和范围校验；本类只负责传输、统一响应信封校验，以及将
+    可预期的网络和协议失败转换为 ``BusinessToolError``，不在本地伪造结果。
+    """
 
     KNOWLEDGE_RETRIEVE_PATH = "/internal/agent/tools/knowledge-retrieve"
     RELATION_QUERY_PATH = "/internal/agent/tools/relation-query"
@@ -28,6 +37,7 @@ class BusinessToolClient:
         client: httpx.AsyncClient | None = None,
         write_tools_enabled: bool = False,
     ):
+        """保存认证边界配置，并在未注入客户端时取得其关闭责任。"""
         self.base_url = base_url.strip().rstrip("/")
         self.service_token = service_token.strip()
         self.timeout_seconds = max(0.5, float(timeout_seconds))
@@ -39,20 +49,28 @@ class BusinessToolClient:
 
     @property
     def configured(self) -> bool:
+        """返回是否具备发起已认证业务请求所需的地址和服务令牌。"""
         return bool(self.base_url and self.service_token)
 
     async def aclose(self) -> None:
+        """仅关闭由本实例创建的客户端，避免误关闭外部共享连接池。"""
         if self._owns_client:
             await self._client.aclose()
 
     async def query_knowledge(
         self, payload: Mapping[str, Any]
     ) -> dict[str, Any]:
+        """向受认证的知识检索端点请求事实和引用候选。
+
+        ``payload`` 中的范围、检索词和过滤条件直接交给业务服务裁决；服务不可用
+        时抛出受控错误，由工具层决定是否从当前轮次的可信上下文降级。
+        """
         return await self._post_retrieval(self.KNOWLEDGE_RETRIEVE_PATH, payload)
 
     async def query_graph_relations(
         self, payload: Mapping[str, Any]
     ) -> dict[str, Any]:
+        """向受认证的图谱端点请求关系事实，失败语义与知识检索保持一致。"""
         return await self._post_retrieval(self.RELATION_QUERY_PATH, payload)
 
     async def execute_write(
@@ -63,7 +81,12 @@ class BusinessToolClient:
         action_id: str,
         turn_id: str,
     ) -> dict[str, Any]:
-        """未来写工具的唯一 HTTP 出口；默认关闭且强制端到端幂等键。"""
+        """执行已确认写操作的唯一 HTTP 出口。
+
+        写工具默认关闭，且只接受 ``/internal/agent/actions/`` 范围的路径；
+        ``action_id`` 和 ``turn_id`` 分别作为跨重试幂等键和审计关联键传给业务
+        服务，防止模型或网络重放造成重复写入。
+        """
         if not self.write_tools_enabled:
             raise BusinessToolError("write_tools_disabled")
         if not action_id.strip() or not turn_id.strip():
@@ -110,6 +133,11 @@ class BusinessToolClient:
         return dict(data) if isinstance(data, dict) else {}
 
     async def web_source_domains(self) -> list[str]:
+        """读取业务服务维护的权威网页域名白名单。
+
+        白名单是业务侧可信配置而非模型输出；配置缺失、超时或响应失效均显式失败，
+        由上层选择跳过联网增强而不是扩大检索范围。
+        """
         if not self.configured:
             raise BusinessToolError("business_tool_unconfigured")
         try:
@@ -132,6 +160,7 @@ class BusinessToolClient:
             raise BusinessToolError("business_tool_transport_error") from exc
 
     async def health(self, path: str) -> None:
+        """检查指定业务健康端点，并将非成功信封归一为受控错误。"""
         if not self.base_url:
             raise BusinessToolError("business_tool_unconfigured")
         try:
@@ -150,6 +179,11 @@ class BusinessToolClient:
     async def _post_retrieval(
         self, path: str, payload: Mapping[str, Any]
     ) -> dict[str, Any]:
+        """提交只读检索请求并校验业务服务的 ``code=200`` 响应信封。
+
+        返回值会写入 ``source`` 以保留证据来源；任何非 200、非 JSON 或空数据都
+        不被当作空检索结果，从而让调用方可以区分“无命中”和“不可用”。
+        """
         if not self.configured:
             raise BusinessToolError("business_tool_unconfigured")
         try:
@@ -184,6 +218,7 @@ class BusinessToolClient:
         return result
 
     def _headers(self, *, accept_json: bool = False) -> dict[str, str]:
+        """构造内部服务认证头；令牌不进入工具审计参数或模型上下文。"""
         headers = {"X-Agent-Service-Token": self.service_token}
         if accept_json:
             headers["Accept"] = "application/json"
