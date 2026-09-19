@@ -1983,7 +1983,7 @@ async function renderRegionBoundaries(boundaries) {
                 polygons.push(polygon);
             });
         } catch (error) {
-            // skip broken geometry
+            // 跳过损坏的几何数据。
         }
     }
 
