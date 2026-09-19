@@ -372,7 +372,7 @@ def require_runtime() -> ToolRuntimeContext:
 
 @tool
 async def get_scope_context() -> str:
-    """Return the authenticated school, region, or resource context for this conversation."""
+    """返回当前对话已认证的学校、区域或资源上下文。"""
     runtime = require_runtime()
     return await runtime.run(
         "get_scope_context",
@@ -387,7 +387,7 @@ async def get_scope_context() -> str:
 
 @tool
 async def search_approved_resources(query: str = "", limit: int = 5) -> str:
-    """Search only the approved resources supplied by the authenticated business service."""
+    """仅搜索已认证业务服务提供的已审核资源。"""
     runtime = require_runtime()
     safe_limit = max(1, min(limit, 8))
     return await runtime.run(
@@ -403,7 +403,7 @@ async def search_approved_resources(query: str = "", limit: int = 5) -> str:
 
 @tool
 async def retrieve_knowledge(query: str = "", limit: int = 5) -> str:
-    """Retrieve trusted RAG chunks and citation candidates through the business service."""
+    """通过业务服务检索可信 RAG 片段和引用候选。"""
     runtime = require_runtime()
     safe_limit = max(1, min(limit, 8))
 
@@ -428,7 +428,7 @@ async def retrieve_knowledge(query: str = "", limit: int = 5) -> str:
 
 @tool
 async def query_graph_relations(query: str = "", limit: int = 5) -> str:
-    """Retrieve graph facts through the authenticated business service."""
+    """通过已认证的业务服务检索图谱事实。"""
     runtime = require_runtime()
     safe_limit = max(1, min(limit, 8))
 
