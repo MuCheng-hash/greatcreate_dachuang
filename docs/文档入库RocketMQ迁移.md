@@ -34,8 +34,8 @@ Worker 每次领取一条消息，持有 `knowledge-document:<id>` MySQL 连接�
 ## 部署与切换
 
 1. 暂停上传/重试入口并停止旧、新 Worker，备份数据库。
-2. 在目标 MySQL 手工执行 `data/sql/add_knowledge_rocketmq.sql`，仅执行一次。
-   它新增任务列和独立 Outbox 表，不删除现有数据；不在应用启动时自动执行。
+2. 在 IDEA 选择目标 MySQL 数据库后，完整执行 `data/sql/database_setup_existing.sql`；空库则执行 `data/sql/database_setup.sql`。
+   统一入口包含任务观测列、generation、execution_attempts 和独立 Outbox 表，也核对其他业务结构；不删除现有数据，不在应用启动时自动执行。失败后修正冲突并重跑完整脚本。详见 [SQL 使用说明](../data/sql/README.md)。
 3. 配置现有 Compose 所需 PostgreSQL 环境变量，执行：
 
    ```powershell
