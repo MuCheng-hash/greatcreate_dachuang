@@ -1,41 +1,33 @@
-# SQL 脚本目录说明
+# MySQL 初始化、升级与演示数据
 
-## 推荐执行入口
+在 IDEA Database 中连接 MySQL 8.0.16+，选择目标 schema，使用没有未提交事务的独立控制台。脚本不会创建或切换数据库；先用 `SELECT DATABASE();` 确认目标。
 
-新建开发数据库使用 `database_setup.sql`。该入口按依赖顺序执行基础结构、用户管理、班级任务、知识库和其他业务扩展，最后写入测试数据。
+| 场景 | 执行入口 |
+| --- | --- |
+| 全新空数据库 | 完整执行 `data/sql/database_setup.sql` |
+| 已有数据库 | 先备份，再完整执行 `data/sql/database_setup_existing.sql` |
+| 本地演示数据 | 初始化或升级成功后，单独完整执行 `data/sql/demo_data.sql` |
 
-已有数据库升级时，不要重新执行会删除表的初始化脚本，只执行 `database_setup_existing.sql` 中列出的增量迁移。
+执行时包含文件中的 `DELIMITER` 和存储过程定义，不要只执行光标所在的一条语句；无需 `SOURCE` 或命令行。初始化遇到非空库会停止，升级缺少基础结构会停止。升级保留已有业务记录、密码和额外历史字段，遇到字段/约束冲突需先处理报错后重跑，不会自动删除冲突数据。
 
-## 脚本分类
+演示账号为 `test_teacher`、`test_student`，初始密码均为 `123456`。演示数据只适用于本地演示；同名旧账号、孤立档案或业务标识冲突会拒绝导入，不会自动认领档案或重置密码。再次导入保留已修改密码。
 
-### 初始化脚本
+MySQL DDL 会隐式提交，不能依靠一个事务回滚整个升级。停止相关应用写入后再操作；发生失败时已完成的结构变更可能保留，修正原因后重新执行完整升级脚本。全文索引会保守重建为 `ngram`，大表应安排维护窗口。详见 [验收与覆盖清单](../../docs/SQL脚本合并验收.md)。
 
-- `mysql_red_culture_all_in_one.sql`：完整基础数据和学校资源模块初始化，包含 `DROP TABLE`，仅用于可重建的开发库。
+## 执行保障与限制
 
-### 核心增量迁移
+- 需要目标库的建表、改表、索引、存储过程执行和必要数据读写权限；建议只给操作账号授予目标库权限。
+- 三个脚本均不硬编码库名，不删除业务表或清空数据。数据库不存在时请先在 IDEA 创建空 schema，再选择它。
+- 使用脚本保留的 `gc_sql_*`、`gc_demo_*` 辅助过程名称；不要并发执行两个脚本，也不要把这些名称用于业务存储过程。异常后客户端若停止执行，可能留下辅助过程，完整重跑会重新创建。
+- 已有字段类型、长度、可空性、默认值或自动生成行为不兼容时拒绝升级，报告表与字段；不自动截断或猜测转换规则。已知枚举仅追加必要值，保留自定义旧值。
+- 新建唯一索引和外键由 MySQL 检查重复和孤立数据；发生冲突时停止，不删除冲突行。已有索引、外键定义不符也会报错。
+- `INFORMATION_SCHEMA.STATISTICS` 不提供全文解析器。为了在纯 SQL 内保证中文分词，升级对已有全文索引执行一次原子重建，确保列集合和 `ngram`；重复升级仍有重建开销，不等同于零 DDL。依据：[MySQL 索引元数据](https://dev.mysql.com/doc/mysql-infoschema-excerpt/8.0/en/information-schema-statistics-table.html)。
+- 升级不修复孤立师生档案，也不删除旧注册表、别名字段或批量调整学校审核状态。演示坐标仅写入新演示学校。
+- 全文词条、向量索引和外部模型可用性不同。演示文本块初始向量状态为 pending，SQL 导入不代表 Qdrant 向量化或远程模型调用已经完成。
+- PostgreSQL Agent 迁移继续使用 llm-service/migrations，本次仅合并 MySQL。
 
-- `add_user_management_module.sql`：账号扩展字段、统一档案和角色权限。
-- `add_teacher_class_management.sql`：班级、任务和学生提交。
-- `add_student_home_browse_history.sql`：学生资源浏览足迹。
-- `add_teaching_plan_feedback.sql` + `add_teaching_plan_feedback_reasons.sql`：教学方案反馈及原因标签。
-- `add_knowledge_ingestion_mvp.sql` + `add_knowledge_ingestion_observability.sql`：知识库导入及可观测字段。
-- 其他 `add_*.sql`：独立业务能力迁移，按入口脚本顺序执行。
+## 隔离集成测试
 
-### 数据脚本
+`docker-compose.ingestion-test.yml` 使用同一初始化入口创建完整业务结构，不加载演示账号。挂载只在新 MySQL 数据目录初始化时执行，已有测试库不会自动升级；不要为触发初始化删除未知数据卷。
 
-- `seed_teacher_student_profiles.sql`：批量示例教师、学生、班级和任务数据。
-- `seed_test_user.sql`：测试教师账号。
-- `seed_test_student.sql`：测试学生账号。
-
-### 兼容/历史脚本
-
-- 学校模块设计稿、样例数据和独立认证 schema 已删除；对应结构与样例数据已并入 `mysql_red_culture_all_in_one.sql`。
-- `remove_ai_resource_discovery.sql`：清理已废弃资源发现表，仅按需执行。
-- `simplify_school_table_region_hierarchy.sql`：地址层级兼容迁移，仅按需执行。
-
-## 重要约定
-
-- 同一学校允许多个账号；`school_user_account.school_id` 只能建立普通索引，不能建立唯一索引。
-- 用户名、学生账号、班级邀请码等业务唯一约束仍然保留。
-- 所有增量脚本应保持可重复执行；非幂等的 `ALTER TABLE ... ADD COLUMN` 只用于明确的一次性迁移。
-- 不要把初始化脚本和增量脚本混在同一个已有生产库执行。
+IDEA 执行建议：将 SQL 方言设置为 MySQL，选择正确数据源和 schema，执行整个文件，确认最后返回 Schema ready 或 Demo ready，遇到任意错误即检查原因，不把客户端执行结束当作成功。

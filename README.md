@@ -61,49 +61,19 @@ python --version
 
 ### 1. 初始化 MySQL
 
-确认 MySQL 已启动，然后从仓库根目录进入 MySQL 客户端：
+在 IDEA Database 中连接 MySQL 8.0.16+，选择目标 schema，使用没有未提交事务的独立控制台。脚本不会创建或切换数据库；先用 `SELECT DATABASE();` 确认目标。
 
-```powershell
-mysql --default-character-set=utf8mb4 -u root -p
-```
+| 场景 | 执行入口 |
+| --- | --- |
+| 全新空数据库 | 完整执行 `data/sql/database_setup.sql` |
+| 已有数据库 | 先备份，再完整执行 `data/sql/database_setup_existing.sql` |
+| 本地演示数据 | 初始化或升级成功后，单独完整执行 `data/sql/demo_data.sql` |
 
-数据库脚本分为旧基础库和当前版本扩展。对于全新、本地且允许清空数据的演示库，在 MySQL 客户端中按以下顺序导入：
+执行时包含文件中的 `DELIMITER` 和存储过程定义，不要只执行光标所在的一条语句；无需 `SOURCE` 或命令行。初始化遇到非空库会停止，升级缺少基础结构会停止。升级保留已有业务记录、密码和额外历史字段，遇到字段/约束冲突需先处理报错后重跑，不会自动删除冲突数据。
 
-```sql
-SOURCE data/sql/mysql_red_culture_all_in_one.sql;
-USE red_culture_platform;
-SOURCE data/sql/simplify_school_table_region_hierarchy.sql;
-SOURCE data/sql/red_culture_platform_database.sql;
-SOURCE data/sql/add_user_management_module.sql;
-```
+演示账号为 `test_teacher`、`test_student`，初始密码均为 `123456`。演示数据只适用于本地演示；同名旧账号、孤立档案或业务标识冲突会拒绝导入，不会自动认领档案或重置密码。再次导入保留已修改密码。
 
-`mysql_red_culture_all_in_one.sql` 创建旧基础表和基础演示数据；后续三个脚本将学校切换到地址定位模型，并补齐当前的角色权限、师生档案、班级、RAG 运维和 Agent 调试相关表与字段。不要把第一份全量脚本误认为已经包含当前全部 Schema。
-
-如需演示教师和学生管理功能，可在上述迁移完成后额外导入样例账号数据：
-
-```sql
-SOURCE data/sql/seed_teacher_student_profiles.sql;
-```
-
-该样例脚本会创建固定密码为 `123456` 的教师和学生账号，只能用于可丢弃的本地演示库，不能作为生产或默认启动步骤。
-
-已有数据库升级时，先完成可恢复备份，**不要**重新执行 `mysql_red_culture_all_in_one.sql`。数据库若尚未具备 AI 周边资源发现表，先执行专项迁移，再执行当前 Schema 迁移：
-
-```sql
-USE red_culture_platform;
-SOURCE data/sql/mysql_ai_poi_resource_discovery.sql;
-SOURCE data/sql/simplify_school_table_region_hierarchy.sql;
-SOURCE data/sql/red_culture_platform_database.sql;
-SOURCE data/sql/add_user_management_module.sql;
-```
-
-如果数据库已具备 AI 周边资源发现功能，可以跳过第一份专项迁移，但其余三个当前 Schema 脚本仍需按顺序执行。`simplify_school_table_region_hierarchy.sql` 会删除旧学校字段；`add_user_management_module.sql` 会移除旧版“一校一账号”唯一约束。两者均可能影响已有数据和约束，只应在备份完成并确认升级窗口后执行。
-
-如果 `SOURCE` 无法识别相对路径，请改用仓库的绝对路径，并统一使用正斜杠，例如：
-
-```sql
-SOURCE D:/path/to/greatcreate_dachuang/data/sql/mysql_red_culture_all_in_one.sql;
-```
+MySQL DDL 会隐式提交，不能依靠一个事务回滚整个升级。停止相关应用写入后再操作；发生失败时已完成的结构变更可能保留，修正原因后重新执行完整升级脚本。全文索引会保守重建为 `ngram`，大表应安排维护窗口。详见 [SQL 使用说明](data/sql/README.md)。
 
 ### 2. 配置业务服务
 
@@ -272,7 +242,7 @@ $env:RAG_EMBEDDING_DIMENSIONS = "1024"
 ### 业务服务提示数据库连接失败
 
 - 确认 MySQL 服务已启动且监听 `3306`。
-- 确认已按数据库类型完成基础库和当前 Schema 迁移，而非仅导入 `mysql_red_culture_all_in_one.sql`。
+- 确认已按数据库状态完成初始化或升级入口，演示数据需要另行导入。
 - 核对 `application.yml` 中的数据库地址、用户名和密码。
 - 确认当前账号有访问 `red_culture_platform` 的权限。
 

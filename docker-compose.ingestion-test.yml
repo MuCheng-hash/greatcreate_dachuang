@@ -8,8 +8,8 @@ services:
     ports:
       - '127.0.0.1:13316:3306'
     volumes:
-      - ./data/sql/add_knowledge_ingestion_mvp.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
-      - ./data/sql/add_knowledge_rocketmq.sql:/docker-entrypoint-initdb.d/02-rocketmq.sql:ro
+      # Official MySQL entrypoint selects MYSQL_DATABASE before executing this self-contained script.
+      - ./data/sql/database_setup.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-pintegration"]
       interval: 5s
