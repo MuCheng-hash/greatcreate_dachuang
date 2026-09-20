@@ -56,7 +56,9 @@ const adminState = {
     agentDebugAbortController: null,
     ragStatus: null,
     ragLastReindexReport: null,
-    ragRetrieveResult: null
+    ragRetrieveResult: null,
+    knowledgeDocuments: [],
+    knowledgeDocumentRefreshTimer: null
 };
 
 const adminElements = {
@@ -807,6 +809,7 @@ function bindAdminEvents() {
     initializeUserManagementPanel();
     initializeAgentDebugPanel();
     initializeRagKnowledgePanel();
+    initializeKnowledgeDocumentPanel();
 
       adminElements.refreshDashboardButton?.addEventListener("click", () => {
           void bootstrapAdmin();
@@ -1466,6 +1469,233 @@ function setActiveTab(tabName) {
         syncRagSchoolOptions();
         void loadRagStatus();
     }
+    if (tabName === "knowledge-documents") {
+        syncKnowledgeDocumentSchoolOptions();
+        void loadKnowledgeDocuments();
+    } else {
+        stopKnowledgeDocumentRefresh();
+    }
+}
+
+function initializeKnowledgeDocumentPanel() {
+    const tabStrip = document.querySelector("#adminModuleNav");
+    if (tabStrip && !tabStrip.querySelector('.tab-chip[data-tab="knowledge-documents"]')) {
+        const button = document.createElement("button");
+        button.className = "tab-chip";
+        button.dataset.tab = "knowledge-documents";
+        button.type = "button";
+        button.textContent = "文档入库";
+        tabStrip.insertBefore(button, tabStrip.querySelector('[data-tab="rag-knowledge"]') || null);
+    }
+
+    const workspaceStack = document.querySelector(".workspace-stack");
+    if (!workspaceStack || document.querySelector('.workspace-panel[data-panel="knowledge-documents"]')) return;
+    const panel = document.createElement("section");
+    panel.className = "workspace-panel knowledge-document-panel";
+    panel.dataset.panel = "knowledge-documents";
+    panel.innerHTML = `
+        <div class="panel-heading">
+            <div>
+                <p class="eyebrow">Module 05</p>
+                <h2>文档入库管理</h2>
+                <p class="panel-description">上传 PDF、DOCX 或 Markdown 文件，查看异步解析和索引状态。</p>
+            </div>
+            <div class="panel-tools"><button class="ghost-button" id="knowledgeDocumentRefreshButton" type="button">刷新列表</button></div>
+        </div>
+        <div class="knowledge-document-layout">
+            <form id="knowledgeDocumentUploadForm" class="form-card data-form knowledge-document-upload-form">
+                <div class="card-topline"><h3>上传知识文档</h3><span class="mini-stat">最大 50 MB</span></div>
+                <label><span>文档范围</span><select id="knowledgeDocumentUploadScope" class="line-select"><option value="public">公共知识库</option><option value="school">指定学校</option></select></label>
+                <label id="knowledgeDocumentUploadSchoolField" hidden><span>所属学校</span><select id="knowledgeDocumentUploadSchool" class="line-select"><option value="">请选择学校</option></select></label>
+                <label><span>显示标题</span><input id="knowledgeDocumentTitle" class="line-input" type="text" maxlength="255" placeholder="留空时使用文件名"></label>
+                <label><span>选择文件</span><input id="knowledgeDocumentFile" class="line-input" type="file" accept=".pdf,.docx,.md,.markdown,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/markdown" required></label>
+                <p class="knowledge-document-upload-hint">支持 PDF、DOCX、Markdown；上传后将在后台异步解析、切块并写入索引。</p>
+                <div class="form-actions"><button class="accent-button" id="knowledgeDocumentUploadButton" type="submit">上传并入库</button></div>
+                <p id="knowledgeDocumentUploadResult" class="status-box" hidden></p>
+            </form>
+            <article class="table-card knowledge-document-list-card">
+                <div class="card-topline">
+                    <h3>入库任务</h3>
+                    <div class="knowledge-document-filter"><select id="knowledgeDocumentListScope" class="line-select"><option value="all">全部范围</option><option value="public">公共知识库</option><option value="school">指定学校</option></select><select id="knowledgeDocumentListSchool" class="line-select" disabled><option value="">请选择学校</option></select></div>
+                </div>
+                <div class="table-shell"><table><thead><tr><th>文档</th><th>归属</th><th>状态</th><th>处理节点</th><th>错误摘要</th><th>完成时间</th><th>操作</th></tr></thead><tbody id="knowledgeDocumentTableBody"><tr><td colspan="7" class="empty-cell">正在加载文档任务。</td></tr></tbody></table></div>
+            </article>
+        </div>`;
+    workspaceStack.insertBefore(panel, document.querySelector('.workspace-panel[data-panel="rag-knowledge"]') || null);
+    adminElements.tabButtons = Array.from(document.querySelectorAll("#adminModuleNav .tab-chip[data-tab]"));
+    adminElements.panels = Array.from(document.querySelectorAll(".workspace-panel"));
+
+    const uploadScope = panel.querySelector("#knowledgeDocumentUploadScope");
+    const uploadSchoolField = panel.querySelector("#knowledgeDocumentUploadSchoolField");
+    const listScope = panel.querySelector("#knowledgeDocumentListScope");
+    const listSchool = panel.querySelector("#knowledgeDocumentListSchool");
+    uploadScope.addEventListener("change", () => {
+        uploadSchoolField.hidden = uploadScope.value !== "school";
+    });
+    listScope.addEventListener("change", () => {
+        listSchool.disabled = listScope.value !== "school";
+        void loadKnowledgeDocuments();
+    });
+    listSchool.addEventListener("change", () => void loadKnowledgeDocuments());
+    panel.querySelector("#knowledgeDocumentRefreshButton").addEventListener("click", () => void loadKnowledgeDocuments());
+    panel.querySelector("#knowledgeDocumentUploadForm").addEventListener("submit", event => {
+        event.preventDefault();
+        void uploadKnowledgeDocument();
+    });
+    panel.querySelector("#knowledgeDocumentTableBody").addEventListener("click", event => {
+        const button = event.target.closest("button[data-knowledge-document-action]");
+        if (!button) return;
+        const documentId = Number(button.dataset.documentId);
+        if (!Number.isInteger(documentId) || documentId <= 0) return;
+        if (button.dataset.knowledgeDocumentAction === "retry") void retryKnowledgeDocument(documentId);
+        if (button.dataset.knowledgeDocumentAction === "delete") void deleteKnowledgeDocument(documentId);
+    });
+    syncKnowledgeDocumentSchoolOptions();
+}
+
+function knowledgeDocumentPanel() {
+    return document.querySelector('.workspace-panel[data-panel="knowledge-documents"]');
+}
+
+function syncKnowledgeDocumentSchoolOptions() {
+    const panel = knowledgeDocumentPanel();
+    if (!panel) return;
+    const selects = [panel.querySelector("#knowledgeDocumentUploadSchool"), panel.querySelector("#knowledgeDocumentListSchool")];
+    selects.forEach(select => {
+        if (!select) return;
+        const current = select.value;
+        select.innerHTML = '<option value="">请选择学校</option>' + adminState.schools.map(school =>
+            `<option value="${escapeHtml(String(school.schoolId))}">${escapeHtml(school.schoolName || `学校 ${school.schoolId}`)}</option>`
+        ).join("");
+        if (current && adminState.schools.some(school => String(school.schoolId) === current)) select.value = current;
+    });
+}
+
+async function loadKnowledgeDocuments() {
+    const panel = knowledgeDocumentPanel();
+    if (!panel) return;
+    const scope = panel.querySelector("#knowledgeDocumentListScope").value;
+    const schoolId = parseNullableNumber(panel.querySelector("#knowledgeDocumentListSchool").value);
+    const body = panel.querySelector("#knowledgeDocumentTableBody");
+    if (scope === "school" && !schoolId) {
+        stopKnowledgeDocumentRefresh();
+        body.innerHTML = '<tr><td colspan="7" class="empty-cell">请选择学校后查看对应文档。</td></tr>';
+        return;
+    }
+    body.innerHTML = '<tr><td colspan="7" class="empty-cell">正在加载文档任务。</td></tr>';
+    const query = new URLSearchParams({ scope });
+    if (schoolId) query.set("schoolId", String(schoolId));
+    try {
+        adminState.knowledgeDocuments = await requestJson(`/api/admin/knowledge-documents?${query.toString()}`) || [];
+        renderKnowledgeDocuments();
+        updateKnowledgeDocumentRefresh();
+    } catch (error) {
+        stopKnowledgeDocumentRefresh();
+        body.innerHTML = `<tr><td colspan="7" class="empty-cell">${escapeHtml(error.message || "文档任务加载失败")}</td></tr>`;
+    }
+}
+
+function renderKnowledgeDocuments() {
+    const panel = knowledgeDocumentPanel();
+    const body = panel?.querySelector("#knowledgeDocumentTableBody");
+    if (!body) return;
+    const rows = adminState.knowledgeDocuments || [];
+    if (!rows.length) {
+        body.innerHTML = '<tr><td colspan="7" class="empty-cell">暂无符合条件的文档。</td></tr>';
+        return;
+    }
+    body.innerHTML = rows.map(document => {
+        const retryable = ["FAILED", "DEGRADED"].includes(document.documentStatus);
+        const scope = document.schoolId ? `学校 #${document.schoolId}` : "公共";
+        const completion = document.finishedAt || document.indexedAt || "-";
+        const actions = `${retryable ? `<button class="ghost-button" type="button" data-knowledge-document-action="retry" data-document-id="${document.documentId}">重试</button>` : ""}<button class="danger-button" type="button" data-knowledge-document-action="delete" data-document-id="${document.documentId}">删除</button>`;
+        return `<tr><td><strong>${escapeHtml(document.title || document.originalFilename || "未命名文档")}</strong><small>${escapeHtml(document.originalFilename || "-")} · ${escapeHtml(formatFileSize(Number(document.fileSize || 0)))}</small></td><td>${escapeHtml(scope)}</td><td>${renderKnowledgeDocumentStatus(document.documentStatus)}</td><td>${escapeHtml(document.currentNode || "-")}<small>${document.retryCount ? `已重试 ${escapeHtml(document.retryCount)} 次` : ""}</small></td><td>${escapeHtml(document.errorSummary || "-")}</td><td>${escapeHtml(formatKnowledgeDocumentDate(completion))}</td><td><div class="knowledge-document-actions">${actions}</div></td></tr>`;
+    }).join("");
+}
+
+async function uploadKnowledgeDocument() {
+    const panel = knowledgeDocumentPanel();
+    const fileInput = panel?.querySelector("#knowledgeDocumentFile");
+    const scope = panel?.querySelector("#knowledgeDocumentUploadScope").value;
+    const schoolId = parseNullableNumber(panel?.querySelector("#knowledgeDocumentUploadSchool").value);
+    const title = optionalText(panel?.querySelector("#knowledgeDocumentTitle").value);
+    const button = panel?.querySelector("#knowledgeDocumentUploadButton");
+    const file = fileInput?.files?.[0];
+    if (!file) return showKnowledgeDocumentUploadResult("请选择要上传的文件。", true);
+    if (scope === "school" && !schoolId) return showKnowledgeDocumentUploadResult("请选择文档所属学校。", true);
+    button.disabled = true;
+    button.textContent = "上传中...";
+    showKnowledgeDocumentUploadResult(`正在上传 ${file.name}。`);
+    try {
+        const body = new FormData();
+        body.append("file", file);
+        if (title) body.append("title", title);
+        if (scope === "school") body.append("schoolId", String(schoolId));
+        const document = await requestJson("/api/admin/knowledge-documents", { method: "POST", body });
+        panel.querySelector("#knowledgeDocumentUploadForm").reset();
+        panel.querySelector("#knowledgeDocumentUploadSchoolField").hidden = true;
+        showKnowledgeDocumentUploadResult(`已创建“${document.title || file.name}”入库任务。`);
+        await loadKnowledgeDocuments();
+    } catch (error) {
+        showKnowledgeDocumentUploadResult(error.message || "文件上传失败。", true);
+    } finally {
+        button.disabled = false;
+        button.textContent = "上传并入库";
+    }
+}
+
+function showKnowledgeDocumentUploadResult(message, failed = false) {
+    const result = knowledgeDocumentPanel()?.querySelector("#knowledgeDocumentUploadResult");
+    if (!result) return;
+    result.hidden = false;
+    result.classList.toggle("status-box--error", failed);
+    result.textContent = message;
+}
+
+async function retryKnowledgeDocument(documentId) {
+    try {
+        await requestJson(`/api/admin/knowledge-documents/${documentId}/retry`, { method: "POST", body: {} });
+        setGlobalStatus("已重新入队", "文档将从校验阶段重新执行入库流程。");
+        await loadKnowledgeDocuments();
+    } catch (error) {
+        setGlobalStatus("重试失败", error.message || "无法重新创建文档入库任务。");
+    }
+}
+
+async function deleteKnowledgeDocument(documentId) {
+    if (!window.confirm("删除后会移除原始文件、解析结果和已写入的向量，是否继续？")) return;
+    try {
+        await requestJson(`/api/admin/knowledge-documents/${documentId}`, { method: "DELETE" });
+        setGlobalStatus("文档已删除", "对应入库任务和索引数据已清理。");
+        await loadKnowledgeDocuments();
+    } catch (error) {
+        setGlobalStatus("删除失败", error.message || "文档正在处理或服务暂不可用。");
+    }
+}
+
+function updateKnowledgeDocumentRefresh() {
+    const hasActiveDocument = adminState.knowledgeDocuments.some(document => ["PENDING", "RUNNING"].includes(document.documentStatus));
+    if (!hasActiveDocument || adminState.activeTab !== "knowledge-documents") return stopKnowledgeDocumentRefresh();
+    if (adminState.knowledgeDocumentRefreshTimer) return;
+    adminState.knowledgeDocumentRefreshTimer = window.setInterval(() => void loadKnowledgeDocuments(), 5000);
+}
+
+function stopKnowledgeDocumentRefresh() {
+    if (!adminState.knowledgeDocumentRefreshTimer) return;
+    window.clearInterval(adminState.knowledgeDocumentRefreshTimer);
+    adminState.knowledgeDocumentRefreshTimer = null;
+}
+
+function renderKnowledgeDocumentStatus(value) {
+    const labels = { PENDING: "待处理", RUNNING: "处理中", SUCCESS: "已完成", DEGRADED: "降级完成", FAILED: "失败" };
+    const key = String(value || "PENDING").toUpperCase();
+    return `<span class="status-pill status-${escapeHtml(key.toLowerCase())}">${escapeHtml(labels[key] || key)}</span>`;
+}
+
+function formatKnowledgeDocumentDate(value) {
+    if (!value) return "-";
+    const date = new Date(value);
+    return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString("zh-CN", { hour12: false });
 }
 
 async function loadAgentDebugModels() {
@@ -1907,7 +2137,7 @@ async function requestJson(url, options = {}, state = { refreshAttempted: false,
     const method = String(config.method || "GET").toUpperCase();
     const headers = new Headers(config.headers || {});
     headers.set("Accept", headers.get("Accept") || "application/json");
-    if (config.body !== undefined) {
+    if (config.body !== undefined && !(config.body instanceof FormData)) {
         headers.set("Content-Type", headers.get("Content-Type") || "application/json");
         if (typeof config.body !== "string") config.body = JSON.stringify(config.body);
     }
@@ -1969,6 +2199,7 @@ async function loadSchools() {
     syncSelectOptions();
     syncAgentDebugSchoolOptions();
     syncRagSchoolOptions();
+    syncKnowledgeDocumentSchoolOptions();
     if (adminState.activeTab === "school-map" && adminState.selectedSchoolIdForMap) {
         void loadSchoolMapDetail(adminState.selectedSchoolIdForMap, { renderMap: true });
     }
