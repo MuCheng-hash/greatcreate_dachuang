@@ -1,7 +1,19 @@
 package com.redculture.platform.service.impl;
 
 import com.redculture.platform.entity.LocalEduResource;
+import com.redculture.platform.entity.ClassLearningTask;
+import com.redculture.platform.entity.ClassMember;
+import com.redculture.platform.entity.SchoolResourceRel;
+import com.redculture.platform.entity.StudentProfile;
+import com.redculture.platform.entity.StudentTaskProgress;
+import com.redculture.platform.entity.TaskResourceRel;
 import com.redculture.platform.enums.ReviewStatus;
+import com.redculture.platform.mapper.ClassLearningTaskMapper;
+import com.redculture.platform.mapper.ClassMemberMapper;
+import com.redculture.platform.mapper.SchoolResourceRelMapper;
+import com.redculture.platform.mapper.StudentProfileMapper;
+import com.redculture.platform.mapper.StudentTaskProgressMapper;
+import com.redculture.platform.mapper.TaskResourceRelMapper;
 import com.redculture.platform.service.AgentToolService;
 import com.redculture.platform.service.KnowledgeRetriever;
 import com.redculture.platform.service.LocalEduResourceService;
@@ -15,10 +27,12 @@ import com.redculture.platform.vo.ai.KnowledgeRetrieveResult;
 import com.redculture.platform.vo.ai.KnowledgeRetrievalStatus;
 import com.redculture.platform.vo.ai.KnowledgeScopeType;
 import org.springframework.stereotype.Service;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.util.StringUtils;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 @Service
@@ -31,6 +45,13 @@ public class AgentToolServiceImpl implements AgentToolService {
     private final SchoolMapService schoolMapService;
     private final LocalEduResourceService localEduResourceService;
     private final KnowledgeRetriever knowledgeRetriever;
+
+    @Autowired private StudentProfileMapper studentProfileMapper;
+    @Autowired private StudentTaskProgressMapper studentTaskProgressMapper;
+    @Autowired private ClassLearningTaskMapper classLearningTaskMapper;
+    @Autowired private ClassMemberMapper classMemberMapper;
+    @Autowired private TaskResourceRelMapper taskResourceRelMapper;
+    @Autowired private SchoolResourceRelMapper schoolResourceRelMapper;
 
     public AgentToolServiceImpl(AgentAccessGuard accessGuard,
                                 SchoolMapService schoolMapService,
@@ -117,6 +138,10 @@ public class AgentToolServiceImpl implements AgentToolService {
         retrieveRequest.setTheme(request.getTheme());
         retrieveRequest.setResourceCategory(request.getResourceCategory());
         retrieveRequest.setMaxDistanceMeters(request.getMaxDistanceMeters());
+        List<Long> studentResourceIds = resolveStudentResourceIds(request);
+        if (studentResourceIds != null) {
+            retrieveRequest.setResourceIds(studentResourceIds);
+        }
         retrieveRequest.setTopK(normalizeTopK(request.getTopK()));
         retrieveRequest.setHydeQuery(request.getHydeQuery());
         retrieveRequest.setWebEvidence(request.getWebEvidence());
@@ -133,6 +158,68 @@ public class AgentToolServiceImpl implements AgentToolService {
             throw new IllegalArgumentException("scopeType 不能为空");
         }
         return scopeType;
+    }
+
+    /**
+     * 学生约束必须在 Java 内部工具层重新计算，不能相信 FastAPI 转发的资源列表。
+     * 返回 null 代表普通本校问答无需资源级收窄；空集合绝不被解释为无约束。
+     */
+    private List<Long> resolveStudentResourceIds(AgentToolRequest request) {
+        if (!"student".equals(request.getActor().getRoleCode())) {
+            return null;
+        }
+        if (scopeType(request) != KnowledgeScopeType.SCHOOL) {
+            throw new IllegalArgumentException("学生账号只能查询本校数据");
+        }
+        Long schoolId = request.getScope().getScopeId();
+        if (request.getResourceId() != null) {
+            Long resourceId = request.getResourceId();
+            LocalEduResource resource = localEduResourceService.getById(resourceId);
+            boolean accessible = resource != null && Boolean.TRUE.equals(resource.getActive())
+                    && resource.getReviewStatus() == ReviewStatus.APPROVED
+                    && schoolResourceRelMapper.exists(new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<SchoolResourceRel>()
+                    .eq(SchoolResourceRel::getSchoolId, schoolId)
+                    .eq(SchoolResourceRel::getResourceId, resourceId));
+            if (!accessible) {
+                throw new IllegalArgumentException("该资源不对当前学生开放");
+            }
+            return List.of(resourceId);
+        }
+        if (request.getTaskId() == null) {
+            return null;
+        }
+        StudentProfile student = studentProfileMapper.selectOne(new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<StudentProfile>()
+                .eq(StudentProfile::getAccountId, request.getActor().getAccountId())
+                .eq(StudentProfile::getStatus, "active").last("LIMIT 1"));
+        ClassLearningTask task = classLearningTaskMapper.selectById(request.getTaskId());
+        boolean assigned = student != null && task != null && "published".equalsIgnoreCase(task.getStatus())
+                && classMemberMapper.exists(new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<ClassMember>()
+                .eq(ClassMember::getStudentId, student.getStudentId())
+                .eq(ClassMember::getClassId, task.getClassId()).eq(ClassMember::getStatus, "active"))
+                && studentTaskProgressMapper.exists(new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<StudentTaskProgress>()
+                .eq(StudentTaskProgress::getStudentId, student.getStudentId())
+                .eq(StudentTaskProgress::getTaskId, task.getTaskId()));
+        if (!assigned) {
+            throw new IllegalArgumentException("该任务不对当前学生开放");
+        }
+        List<Long> resourceIds = taskResourceRelMapper.selectList(new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<TaskResourceRel>()
+                .eq(TaskResourceRel::getTaskId, task.getTaskId()).orderByAsc(TaskResourceRel::getSortOrder))
+                .stream().map(TaskResourceRel::getResourceId).filter(java.util.Objects::nonNull).toList();
+        if (resourceIds.isEmpty()) {
+            throw new IllegalArgumentException("该任务未配置可检索资源");
+        }
+        for (Long resourceId : resourceIds) {
+            LocalEduResource resource = localEduResourceService.getById(resourceId);
+            boolean accessible = resource != null && Boolean.TRUE.equals(resource.getActive())
+                    && resource.getReviewStatus() == ReviewStatus.APPROVED
+                    && schoolResourceRelMapper.exists(new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<SchoolResourceRel>()
+                    .eq(SchoolResourceRel::getSchoolId, schoolId)
+                    .eq(SchoolResourceRel::getResourceId, resourceId));
+            if (!accessible) {
+                throw new IllegalArgumentException("任务包含当前学校不可访问的资源");
+            }
+        }
+        return resourceIds;
     }
 
     private KnowledgeRetrieveResult normalize(KnowledgeRetrieveResult result) {

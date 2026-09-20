@@ -32,6 +32,35 @@ class AgentAccessGuardTest {
     }
 
     @Test
+    void allowsTeacherAndStudentOnlyInTheirAuthenticatedSchool() {
+        AgentAccessGuard guard = new AgentAccessGuard(mock(SchoolMapService.class));
+        for (String roleCode : List.of("teacher", "student")) {
+            AuthCurrentUserVO user = new AuthCurrentUserVO();
+            user.setAccountId(1L);
+            user.setRoleCode(roleCode);
+            user.setSchoolId(1L);
+
+            AgentAccessGuard.ScopeResolution resolved = guard.resolveScope("SCHOOL", 1L, user, "查询资源");
+            assertEquals(1L, resolved.id());
+            assertThrows(IllegalArgumentException.class,
+                    () -> guard.resolveScope("SCHOOL", 2L, user, "查询资源"));
+        }
+    }
+
+    @Test
+    void allowsPlatformAdminToUseResolvedRegionScope() {
+        AgentAccessGuard guard = new AgentAccessGuard(mock(SchoolMapService.class));
+        AuthCurrentUserVO user = new AuthCurrentUserVO();
+        user.setAccountId(1L);
+        user.setRoleCode("platform_admin");
+
+        AgentAccessGuard.ScopeResolution resolution = guard.resolveScope("REGION", 5L, user, "查询区域资源");
+
+        assertEquals(KnowledgeScopeType.REGION, resolution.type());
+        assertEquals(5L, resolution.id());
+    }
+
+    @Test
     void returnsClarificationForTwoSchools() {
         SchoolMapService schoolMapService = mock(SchoolMapService.class);
         when(schoolMapService.listSchools(null, null, null, 100)).thenReturn(List.of(

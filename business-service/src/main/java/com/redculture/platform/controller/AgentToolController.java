@@ -4,10 +4,14 @@ import com.redculture.platform.common.ApiResponse;
 import com.redculture.platform.config.AgentProperties;
 import com.redculture.platform.entity.LocalEduResource;
 import com.redculture.platform.service.AgentToolService;
+import com.redculture.platform.service.agent.AgentToolContextAuthorization;
 import com.redculture.platform.service.admin.RagWebSourceService;
+import com.redculture.platform.vo.ai.AgentActorVO;
+import com.redculture.platform.vo.ai.AgentScopeVO;
 import com.redculture.platform.vo.ai.AgentToolRequest;
 import com.redculture.platform.vo.ai.KnowledgeRetrieveResult;
 import org.springframework.util.StringUtils;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -25,16 +29,28 @@ import java.util.Map;
 public class AgentToolController {
 
     private static final String SERVICE_TOKEN_HEADER = "X-Agent-Service-Token";
+    private static final String TOOL_CONTEXT_HEADER = "X-Agent-Tool-Context";
+    private static final String CLIENT_TURN_HEADER = "X-Agent-Client-Turn-Id";
 
     private final AgentProperties agentProperties;
     private final AgentToolService agentToolService;
     private final RagWebSourceService ragWebSourceService;
+    private final AgentToolContextAuthorization toolContextAuthorization;
 
     public AgentToolController(AgentProperties agentProperties, AgentToolService agentToolService,
                                RagWebSourceService ragWebSourceService) {
+        this(agentProperties, agentToolService, ragWebSourceService,
+                new AgentToolContextAuthorization(agentProperties));
+    }
+
+    @Autowired
+    public AgentToolController(AgentProperties agentProperties, AgentToolService agentToolService,
+                               RagWebSourceService ragWebSourceService,
+                               AgentToolContextAuthorization toolContextAuthorization) {
         this.agentProperties = agentProperties;
         this.agentToolService = agentToolService;
         this.ragWebSourceService = ragWebSourceService;
+        this.toolContextAuthorization = toolContextAuthorization;
     }
 
     //内部健康检查。FastAPI Agent 可在启动或就绪检查时确认 Java 业务服务是否可用。成功时返回服务状态 up。
@@ -90,11 +106,14 @@ public class AgentToolController {
     @PostMapping("/knowledge-retrieve")
     public ApiResponse<KnowledgeRetrieveResult> knowledgeRetrieve(
             @RequestHeader(value = SERVICE_TOKEN_HEADER, required = false) String token,
+            @RequestHeader(value = TOOL_CONTEXT_HEADER, required = false) String toolContext,
+            @RequestHeader(value = CLIENT_TURN_HEADER, required = false) String clientTurnId,
             @RequestBody AgentToolRequest request) {
         if (!authorized(token)) {
             return ApiResponse.fail(403, "Agent 服务令牌无效");
         }
         try {
+            applyVerifiedToolContext(request, toolContext, clientTurnId, "retrieve_knowledge");
             return ApiResponse.success(agentToolService.knowledgeRetrieve(request));
         } catch (IllegalArgumentException exception) {
             return ApiResponse.fail(403, exception.getMessage());
@@ -105,11 +124,14 @@ public class AgentToolController {
     @PostMapping("/relation-query")
     public ApiResponse<KnowledgeRetrieveResult> relationQuery(
             @RequestHeader(value = SERVICE_TOKEN_HEADER, required = false) String token,
+            @RequestHeader(value = TOOL_CONTEXT_HEADER, required = false) String toolContext,
+            @RequestHeader(value = CLIENT_TURN_HEADER, required = false) String clientTurnId,
             @RequestBody AgentToolRequest request) {
         if (!authorized(token)) {
             return ApiResponse.fail(403, "Agent 服务令牌无效");
         }
         try {
+            applyVerifiedToolContext(request, toolContext, clientTurnId, "query_graph_relations");
             return ApiResponse.success(agentToolService.relationQuery(request));
         } catch (IllegalArgumentException exception) {
             return ApiResponse.fail(403, exception.getMessage());
@@ -132,5 +154,27 @@ public class AgentToolController {
                 expectedToken.getBytes(StandardCharsets.UTF_8),
                 actualToken.getBytes(StandardCharsets.UTF_8)
         );
+    }
+
+    private void applyVerifiedToolContext(AgentToolRequest request, String token,
+                                          String clientTurnId, String expectedTool) {
+        if (!toolContextAuthorization.configured()) {
+            throw new IllegalArgumentException("Agent 工具授权签名密钥未配置");
+        }
+        AgentToolContextAuthorization.VerifiedContext context = toolContextAuthorization.verify(token, expectedTool);
+        if (!StringUtils.hasText(clientTurnId) || !clientTurnId.equals(context.clientTurnId())) {
+            throw new IllegalArgumentException("Agent 工具授权轮次不匹配");
+        }
+        AgentActorVO actor = new AgentActorVO();
+        actor.setAccountId(context.accountId());
+        actor.setRoleCode(context.roleCode());
+        actor.setSchoolId(context.schoolId());
+        AgentScopeVO scope = new AgentScopeVO();
+        scope.setScopeType(context.scopeType().name());
+        scope.setScopeId(context.scopeId());
+        request.setActor(actor);
+        request.setScope(scope);
+        request.setTaskId(context.taskId());
+        request.setResourceId(context.resourceId());
     }
 }

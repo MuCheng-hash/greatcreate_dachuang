@@ -37,6 +37,9 @@ public class AgentAccessGuard {
         boolean admin = "platform_admin".equals(currentUser.getRoleCode());
 
         if (!admin) {
+            if (!List.of("school_admin", "teacher", "student").contains(currentUser.getRoleCode())) {
+                throw new IllegalArgumentException("当前角色无权使用 Agent 查询");
+            }
             if (currentUser.getSchoolId() == null) {
                 throw new IllegalArgumentException("需要学校账号");
             }
@@ -61,6 +64,9 @@ public class AgentAccessGuard {
             return ScopeResolution.resolved(KnowledgeScopeType.SCHOOL, currentUser.getSchoolId());
         }
 
+        if (scopeId != null && scopeId <= 0) {
+            throw new IllegalArgumentException("scopeId 必须为正数");
+        }
         if (scopeId != null && requestedType == null) {
             requestedType = KnowledgeScopeType.SCHOOL;
         }
@@ -100,7 +106,7 @@ public class AgentAccessGuard {
         if ("platform_admin".equals(request.getActor().getRoleCode())) {
             return;
         }
-        if (!"school_admin".equals(request.getActor().getRoleCode())
+        if (!List.of("school_admin", "teacher", "student").contains(request.getActor().getRoleCode())
                 || scopeType != KnowledgeScopeType.SCHOOL
                 || request.getActor().getSchoolId() == null
                 || !request.getActor().getSchoolId().equals(request.getScope().getScopeId())) {
