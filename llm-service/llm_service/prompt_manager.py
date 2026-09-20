@@ -75,7 +75,7 @@ class PromptManager:
         self, prompt_key: str, version: str, path: Path
     ) -> None:
         if not path.is_file():
-            raise RuntimeError(f"prompt seed file not found: {path}")
+            raise RuntimeError(f"提示词种子文件不存在：{path}")
         content = path.read_text(encoding="utf-8").strip()
         async with self.database.transaction() as connection:
             await connection.execute(
@@ -121,9 +121,9 @@ class PromptManager:
         version = version.strip()
         content = content.strip()
         if not prompt_key or not version or not content:
-            raise ValueError("promptKey, version and content are required")
+            raise ValueError("promptKey、version 和 content 不能为空")
         if prompt_key != "agent" and "{{context_json}}" not in content:
-            raise ValueError("prompt content must contain {{context_json}}")
+            raise ValueError("提示词内容必须包含 {{context_json}}")
         try:
             async with self.database.transaction() as connection:
                 await connection.execute(
@@ -143,7 +143,7 @@ class PromptManager:
                     ),
                 )
         except UniqueViolation as exc:
-            raise PromptVersionExistsError("prompt version already exists") from exc
+            raise PromptVersionExistsError("提示词版本已存在") from exc
         return await self.get_version(prompt_key, version)
 
     async def activate_version(
@@ -165,7 +165,7 @@ class PromptManager:
                 )
             ).fetchone()
             if exists is None:
-                raise LookupError("prompt version not found")
+                raise LookupError("提示词版本不存在")
             await connection.execute(
                 "UPDATE prompt_version SET active = FALSE WHERE prompt_key = %s",
                 (prompt_key,),
@@ -207,7 +207,7 @@ class PromptManager:
                 )
             ).fetchone()
         if row is None:
-            raise LookupError("prompt version not found")
+            raise LookupError("提示词版本不存在")
         return _serialized_row(dict(row))
 
     async def active_content(self, prompt_key: str) -> str:
@@ -223,7 +223,7 @@ class PromptManager:
                 )
             ).fetchone()
         if row is None:
-            raise LookupError("active prompt version not found")
+            raise LookupError("当前启用的提示词版本不存在")
         return str(row["content"])
 
     async def configure_experiment(
@@ -234,7 +234,7 @@ class PromptManager:
         active: bool,
     ) -> dict[str, Any]:
         if not experiment_key.strip():
-            raise ValueError("experimentKey is required")
+            raise ValueError("experimentKey 不能为空")
         normalized: list[dict[str, Any]] = []
         total_weight = 0
         for item in variants:
@@ -242,12 +242,12 @@ class PromptManager:
             weight = int(item.get("weight") or 0)
             if not version or weight <= 0:
                 raise ValueError(
-                    "each experiment variant requires a version and positive weight"
+                    "每个实验变体都需要版本号和正权重"
                 )
             normalized.append({"version": version, "weight": weight})
             total_weight += weight
         if len(normalized) < 2 or total_weight <= 0:
-            raise ValueError("an experiment requires at least two weighted variants")
+            raise ValueError("实验至少需要两个带权重的变体")
         async with self.database.transaction() as connection:
             rows = await (
                 await connection.execute(
@@ -260,7 +260,7 @@ class PromptManager:
             ).fetchall()
             existing = {str(row["version"]) for row in rows}
             if existing != {item["version"] for item in normalized}:
-                raise LookupError("prompt version not found")
+                raise LookupError("提示词版本不存在")
             await connection.execute(
                 """
                 INSERT INTO prompt_experiment(
@@ -336,7 +336,7 @@ class PromptManager:
                     )
                 ).fetchone()
             if row is None:
-                raise LookupError("active prompt version not found")
+                raise LookupError("当前启用的提示词版本不存在")
             version = str(row["version"])
         record = await self.get_version(prompt_key, version)
         rendered = str(record["content"]).replace(
@@ -406,7 +406,7 @@ class PromptManager:
         self, run_id: str, quality_score: float, feedback: str = ""
     ) -> dict[str, Any]:
         if quality_score < 0 or quality_score > 5:
-            raise ValueError("qualityScore must be between 0 and 5")
+            raise ValueError("qualityScore 必须在 0 到 5 之间")
         async with self.database.transaction() as connection:
             row = await (
                 await connection.execute(
@@ -418,7 +418,7 @@ class PromptManager:
                 )
             ).fetchone()
             if row is None:
-                raise LookupError("prompt run not found")
+                raise LookupError("提示词运行记录不存在")
         return await self.get_run(run_id)
 
     async def get_run(self, run_id: str) -> dict[str, Any]:
@@ -429,7 +429,7 @@ class PromptManager:
                 )
             ).fetchone()
         if row is None:
-            raise LookupError("prompt run not found")
+            raise LookupError("提示词运行记录不存在")
         return _serialized_row(dict(row))
 
     async def metrics(self, prompt_key: str) -> list[dict[str, Any]]:

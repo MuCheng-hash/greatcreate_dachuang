@@ -154,7 +154,7 @@ def _raise_memory_http_error(exc: Exception) -> None:
             },
         ) from exc
     if isinstance(exc, MemoryNotFoundError):
-        raise HTTPException(status_code=404, detail="memory not found") from exc
+        raise HTTPException(status_code=404, detail="记忆不存在") from exc
     if isinstance(exc, MemoryStateError):
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     if isinstance(exc, MemoryValidationError):
@@ -178,7 +178,7 @@ def create_app(
         container = build_container(settings, observability, alerts)
     elif settings is not None and settings is not container.settings:
         # 同一进程中的令牌、模型链和数据库配置必须一致，不能混用测试容器与外部设置。
-        raise ValueError("settings and container.settings must reference the same object")
+        raise ValueError("settings 与 container.settings 必须引用同一对象")
     settings = container.settings
     repository = container.repository
     observability = container.observability
@@ -366,9 +366,9 @@ def create_app(
         """校验 Java 等内部调用方携带的服务令牌，拒绝未配置或不匹配请求。"""
         expected = settings.internal_service_token.strip()
         if not expected:
-            raise HTTPException(status_code=503, detail="AGENT_INTERNAL_SERVICE_TOKEN is not configured")
+            raise HTTPException(status_code=503, detail="AGENT_INTERNAL_SERVICE_TOKEN 未配置")
         if not secrets.compare_digest(token or "", expected):
-            raise HTTPException(status_code=401, detail="agent service token is invalid")
+            raise HTTPException(status_code=401, detail="Agent 服务令牌无效")
 
     async def require_model_gateway_key(
         token: str | None = Header(default=None, alias="X-Model-Gateway-Key"),
@@ -376,7 +376,7 @@ def create_app(
         """保护模型和嵌入内部网关，使用恒定时间比较避免令牌时序泄露。"""
         expected = settings.internal_service_token.strip()
         if not expected or not secrets.compare_digest(token or "", expected):
-            raise HTTPException(status_code=401, detail="model gateway key is invalid")
+            raise HTTPException(status_code=401, detail="模型网关密钥无效")
 
     @app.post("/internal/vision/analyze", dependencies=[Depends(require_model_gateway_key)])
     async def analyze_image(payload: dict[str, Any]) -> dict[str, Any]:
@@ -384,10 +384,10 @@ def create_app(
         model_name = str(payload.get("model") or settings.vision_model).strip()
         image = str(payload.get("imageBase64") or "")
         if not model_name or not image:
-            raise HTTPException(status_code=422, detail="model and imageBase64 are required")
+            raise HTTPException(status_code=422, detail="model 和 imageBase64 不能为空")
         vision = next((item for target, item in model.chat_models if target.model == model_name), None)
         if vision is None:
-            raise HTTPException(status_code=422, detail="vision model is not configured")
+            raise HTTPException(status_code=422, detail="视觉模型未配置")
         result = await vision.ainvoke([{"role": "user", "content": [
             {"type": "text", "text": "请用中文客观描述图片中的场景、文字、人物、地点和结构信息，返回一段可用于知识库检索的描述。"},
             {"type": "image_url", "image_url": {"url": "data:image/png;base64," + image}},
@@ -399,7 +399,7 @@ def create_app(
         """调用内部嵌入网关，并在本地构造稀疏词频向量用于混合检索。"""
         texts = payload.get("texts")
         if not isinstance(texts, list) or not settings.embedding_api_url:
-            raise HTTPException(status_code=503, detail="embedding gateway is not configured")
+            raise HTTPException(status_code=503, detail="嵌入模型网关未配置")
         async with httpx.AsyncClient(timeout=90) as client:
             response = await client.post(settings.embedding_api_url.rstrip("/") + "/embeddings", headers={"Authorization": "Bearer " + settings.embedding_api_key}, json={"model": payload.get("model") or settings.embedding_model, "input": texts, "dimensions": settings.embedding_dimensions})
         response.raise_for_status()
@@ -414,25 +414,25 @@ def create_app(
     async def require_prompt_admin(x_prompt_admin_token: str = Header(default="")) -> None:
         """校验提示词管理令牌；未启用管理令牌时拒绝所有变更入口。"""
         if not settings.prompt_admin_token:
-            raise HTTPException(status_code=503, detail="PROMPT_ADMIN_TOKEN is not configured")
+            raise HTTPException(status_code=503, detail="PROMPT_ADMIN_TOKEN 未配置")
         if not hmac.compare_digest(x_prompt_admin_token, settings.prompt_admin_token):
-            raise HTTPException(status_code=401, detail="invalid prompt admin token")
+            raise HTTPException(status_code=401, detail="提示词管理员令牌无效")
 
     async def require_observability_admin(
         x_observability_admin_token: str = Header(default=""),
     ) -> None:
         """校验观测查询令牌，避免工具审计和追踪信息暴露给普通调用方。"""
         if not settings.observability_token:
-            raise HTTPException(status_code=503, detail="OBSERVABILITY_ADMIN_TOKEN is not configured")
+            raise HTTPException(status_code=503, detail="OBSERVABILITY_ADMIN_TOKEN 未配置")
         if not hmac.compare_digest(x_observability_admin_token, settings.observability_token):
-            raise HTTPException(status_code=401, detail="invalid observability admin token")
+            raise HTTPException(status_code=401, detail="可观测性管理员令牌无效")
 
     def validate_model_selection(request: AgentMessageRequest) -> None:
         """在创建轮次前验证 modelId，避免无效选择被写入幂等请求摘要。"""
         try:
             model.model_configs_for(request.model_id)
         except ValueError as exc:
-            raise HTTPException(status_code=422, detail="unknown modelId") from exc
+            raise HTTPException(status_code=422, detail="未知的 modelId") from exc
 
     def raise_turn_conflict(exc: TurnConflictError) -> None:
         """将轮次并发与幂等冲突统一映射为包含机器码的 409 响应。"""
@@ -895,9 +895,9 @@ def create_app(
                 action_id, owner_id, scope_type, scope_id
             )
         except PermissionError as exc:
-            raise HTTPException(status_code=404, detail="action not found") from exc
+            raise HTTPException(status_code=404, detail="动作不存在") from exc
         if action is None:
-            raise HTTPException(status_code=404, detail="action not found")
+            raise HTTPException(status_code=404, detail="动作不存在")
         return action_response(action)
 
     @app.post(
@@ -918,7 +918,7 @@ def create_app(
                 scope_id=request.scope_id,
             )
         except (LookupError, PermissionError) as exc:
-            raise HTTPException(status_code=404, detail="action not found") from exc
+            raise HTTPException(status_code=404, detail="动作不存在") from exc
         except ActionConflictError as exc:
             raise HTTPException(
                 status_code=409,
@@ -960,7 +960,7 @@ def create_app(
                 client_turn_id, owner_id, scope_type, scope_id
             )
         except (LookupError, PermissionError) as exc:
-            raise HTTPException(status_code=404, detail="turn not found") from exc
+            raise HTTPException(status_code=404, detail="轮次不存在") from exc
         return TurnCancelResponse(
             clientTurnId=client_turn_id,
             threadId=turn.thread_id,
@@ -987,7 +987,7 @@ def create_app(
                 thread_id, owner_id, scope_type, scope_id
             )
         except (ThreadNotFoundError, ThreadScopeError) as exc:
-            raise HTTPException(status_code=404, detail="thread not found") from exc
+            raise HTTPException(status_code=404, detail="会话不存在") from exc
         return await _thread_response(runtime, record)
 
     @app.post(
@@ -999,7 +999,7 @@ def create_app(
         validate_model_selection(request)
         if request.thread_id and request.thread_id != thread_id:
             # 以 URL 会话为唯一权威来源，避免客户端把身份和范围校验通过的请求写到另一会话。
-            raise HTTPException(status_code=400, detail="threadId does not match URL")
+            raise HTTPException(status_code=400, detail="threadId 与 URL 不匹配")
         request.thread_id = thread_id
         try:
             return await runtime.handle(request)
@@ -1021,7 +1021,7 @@ def create_app(
                 detail={"code": "turn_in_progress", "message": str(exc)},
             ) from exc
         except (ThreadNotFoundError, ThreadScopeError) as exc:
-            raise HTTPException(status_code=404, detail="thread not found") from exc
+            raise HTTPException(status_code=404, detail="会话不存在") from exc
         except MemoryValidationError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -1052,7 +1052,7 @@ def create_app(
                 detail={"code": "turn_in_progress", "message": str(exc)},
             ) from exc
         except (ThreadNotFoundError, ThreadScopeError) as exc:
-            raise HTTPException(status_code=404, detail="thread not found") from exc
+            raise HTTPException(status_code=404, detail="会话不存在") from exc
         except MemoryValidationError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -1070,13 +1070,13 @@ def create_app(
                     request.thread_id, request.owner_id, request.scope_type, request.scope_id
                 )
             except (ThreadNotFoundError, ThreadScopeError) as exc:
-                raise HTTPException(status_code=404, detail="thread not found") from exc
+                raise HTTPException(status_code=404, detail="会话不存在") from exc
         try:
             event_stream = await runtime.start_stream(request)
         except TurnConflictError as exc:
             raise_turn_conflict(exc)
         except (ThreadNotFoundError, ThreadScopeError) as exc:
-            raise HTTPException(status_code=404, detail="thread not found") from exc
+            raise HTTPException(status_code=404, detail="会话不存在") from exc
         return DisconnectAwareStreamingResponse(
             event_stream,
             media_type="text/event-stream",
@@ -1104,9 +1104,9 @@ def create_app(
             )
             record = await repository.get_thread(thread_id, owner_id)
         except ThreadScopeError:
-            raise HTTPException(status_code=404, detail="thread not found")
+            raise HTTPException(status_code=404, detail="会话不存在")
         except ThreadNotFoundError as exc:
-            raise HTTPException(status_code=404, detail="thread not found") from exc
+            raise HTTPException(status_code=404, detail="会话不存在") from exc
         return await _thread_response(runtime, record)
 
     @app.post(
@@ -1127,7 +1127,7 @@ def create_app(
                 thread_id, owner_id, scope_type, scope_id
             )
         except (ThreadNotFoundError, ThreadScopeError) as exc:
-            raise HTTPException(status_code=404, detail="thread not found") from exc
+            raise HTTPException(status_code=404, detail="会话不存在") from exc
         return await _thread_response(runtime, record)
 
     @app.get("/admin/prompts/{prompt_key}/versions")
@@ -1160,7 +1160,7 @@ def create_app(
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except PromptVersionExistsError as exc:
-            raise HTTPException(status_code=409, detail="prompt version already exists") from exc
+            raise HTTPException(status_code=409, detail="提示词版本已存在") from exc
 
     @app.post("/admin/prompts/{prompt_key}/versions/{version}/activate")
     async def activate_prompt_version(

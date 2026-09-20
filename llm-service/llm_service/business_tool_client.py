@@ -88,12 +88,12 @@ class BusinessToolClient:
         服务，防止模型或网络重放造成重复写入。
         """
         if not self.write_tools_enabled:
-            raise BusinessToolError("write_tools_disabled")
+            raise BusinessToolError("写入工具已禁用")
         if not action_id.strip() or not turn_id.strip():
-            raise BusinessToolError("write_tool_idempotency_required")
+            raise BusinessToolError("写入工具需要幂等键")
         normalized_path = path.strip()
         if not normalized_path.startswith("/internal/agent/actions/"):
-            raise BusinessToolError("write_tool_path_rejected")
+            raise BusinessToolError("写入工具路径被拒绝")
         try:
             response = await self._client.post(
                 f"{self.base_url}{normalized_path}",

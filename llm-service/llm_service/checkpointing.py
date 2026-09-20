@@ -71,7 +71,7 @@ class NamespaceCheckpointSaver(BaseCheckpointSaver):
 
     def __init__(self, delegate: AsyncPostgresSaver, namespace: str):
         if not namespace.strip():
-            raise ValueError("checkpoint namespace cannot be empty")
+            raise ValueError("检查点命名空间不能为空")
         super().__init__(serde=delegate.serde)
         self.delegate = delegate
         self.namespace = namespace.strip()
@@ -249,7 +249,7 @@ class CheckpointManager:
                 )
             ).fetchone()
             if not row or any(row.get(key) is None for key in row):
-                raise CheckpointSchemaError("checkpointer schema is not initialized")
+                raise CheckpointSchemaError("检查点存储结构尚未初始化")
             version = await (
                 await connection.execute(
                     """
@@ -269,7 +269,7 @@ class CheckpointManager:
         ):
             # 只比较最大版本不足会放过中间缺失迁移，因此同时校验最小值、最大值和数量。
             raise CheckpointSchemaError(
-                f"checkpointer schema version is not current (expected {self.latest_version})"
+                f"检查点存储结构版本不是当前版本（期望值：{self.latest_version})"
             )
         return self.latest_version
 

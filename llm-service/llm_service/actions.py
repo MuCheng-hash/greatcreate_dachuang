@@ -77,7 +77,7 @@ class AgentActionRepository:
         requires_confirmation: bool = True,
     ) -> AgentActionRecord:
         if risk_level not in {"LOW", "HIGH"}:
-            raise ValueError("invalid action risk level")
+            raise ValueError("无效的动作风险等级")
         digest = self.arguments_hash(tool_name, arguments)
         now = utc_now()
         async with self.database.transaction() as connection:
@@ -99,7 +99,7 @@ class AgentActionRepository:
                     or str(existing["arguments_hash"]) != digest
                 ):
                     raise ActionConflictError(
-                        "action_conflict", "logical action payload does not match"
+                        "action_conflict", "逻辑动作载荷不匹配"
                     )
                 return self._from_row(existing)
             action_id = str(uuid.uuid4())
@@ -205,7 +205,7 @@ class AgentActionRepository:
         scope_id: str | int,
     ) -> AgentActionRecord:
         if decision not in {"approve", "reject"}:
-            raise ValueError("decision must be approve or reject")
+            raise ValueError("decision 必须为 approve 或 reject")
         now = utc_now()
         async with self.database.transaction() as connection:
             row = await (
@@ -227,7 +227,7 @@ class AgentActionRepository:
             if status != "pending_confirmation":
                 raise ActionConflictError(
                     "action_expired" if status == "expired" else "action_conflict",
-                    f"action cannot be decided from status {status}",
+                    f"当前状态不允许对动作作出决策：{status}",
                 )
             updated = await (
                 await connection.execute(
@@ -298,7 +298,7 @@ class AgentActionRepository:
                 )
             ).fetchone()
         if row is None:
-            raise ActionConflictError("action_conflict", "action is not executing")
+            raise ActionConflictError("action_conflict", "动作未处于执行中状态")
         return await self._joined(action_id)
 
     async def mark_failed(self, action_id: str, error_code: str) -> AgentActionRecord:
@@ -317,7 +317,7 @@ class AgentActionRepository:
                 )
             ).fetchone()
         if row is None:
-            raise ActionConflictError("action_conflict", "action is not executing")
+            raise ActionConflictError("action_conflict", "动作未处于执行中状态")
         return await self._joined(action_id)
 
     async def expire_pending(
@@ -411,7 +411,7 @@ class AgentActionRepository:
                 )
             ).fetchone()
         if row is None:
-            raise ActionConflictError("action_conflict", "invalid action transition")
+            raise ActionConflictError("action_conflict", "无效的动作状态转换")
         return await self._joined(action_id)
 
     async def _joined(self, action_id: str) -> AgentActionRecord:
@@ -456,7 +456,7 @@ class AgentActionRepository:
             or str(row["scope_type"]) != scope_type
             or str(row["scope_id"]) != scope_id
         ):
-            raise PermissionError("action scope does not match")
+            raise PermissionError("动作范围不匹配")
 
     @staticmethod
     def _select_sql(predicate: str, *, for_update: bool = False) -> str:

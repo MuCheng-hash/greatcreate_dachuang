@@ -169,9 +169,9 @@ class ToolRuntimeContext:
         """写工具的唯一运行入口：风险注册、确认动作和下游幂等键缺一不可。"""
         policy = TOOL_POLICIES.get(name)
         if policy is None or policy.effect != "WRITE":
-            raise BusinessToolError("write_tool_policy_required")
+            raise BusinessToolError("写入工具必须配置策略")
         if not self.action_id or not self.turn_id:
-            raise BusinessToolError("write_tool_confirmation_required")
+            raise BusinessToolError("写入工具需要用户确认")
         if self.business_tool_client is None:
             raise BusinessToolError("business_tool_unconfigured")
         return await self.run(
@@ -240,7 +240,7 @@ def validate_tool_policies() -> None:
     missing = registered - TOOL_POLICIES.keys()
     if missing:
         raise RuntimeError(
-            "tools without an explicit server-side policy: " + ", ".join(sorted(missing))
+            "以下工具未配置显式服务端策略：" + ", ".join(sorted(missing))
         )
     unsafe = [
         name
@@ -250,7 +250,7 @@ def validate_tool_policies() -> None:
         and not policy.requires_confirmation
     ]
     if unsafe:
-        raise RuntimeError("high-risk write tools must require confirmation")
+        raise RuntimeError("高风险写入工具必须要求确认")
 
 
 def _sanitize(arguments: dict[str, Any]) -> dict[str, Any]:
@@ -408,7 +408,7 @@ def require_runtime() -> ToolRuntimeContext:
     """取得当前轮次上下文；在脱离 Agent 执行链调用工具时快速失败。"""
     runtime = _runtime.get()
     if runtime is None:
-        raise RuntimeError("tool runtime is not bound")
+        raise RuntimeError("工具运行时未绑定")
     return runtime
 
 

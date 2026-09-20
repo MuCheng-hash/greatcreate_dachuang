@@ -117,7 +117,7 @@ class AgentTurnRepository:
                 if status == "awaiting_confirmation":
                     raise TurnConflictError(
                         "action_confirmation_required",
-                        "the requested turn is waiting for action confirmation",
+                        "请求的轮次正在等待动作确认",
                     )
                 if (
                     status == "running"
@@ -132,16 +132,16 @@ class AgentTurnRepository:
                     )
                 if status == "cancelled" or existing.get("cancel_requested_at"):
                     raise TurnConflictError(
-                        "turn_cancelled", "the requested turn was cancelled"
+                        "turn_cancelled", "请求的轮次已取消"
                     )
                 if status == "running" and self._lease_valid(existing, now):
                     # 有效租约说明另一个执行者仍在写入，当前请求只能等待或重连。
                     raise TurnConflictError(
-                        "turn_in_progress", "the requested turn is already running"
+                        "turn_in_progress", "请求的轮次正在执行"
                     )
                 if status == "failed" and not bool(existing.get("retryable")):
                     raise TurnConflictError(
-                        "client_turn_conflict", "the requested turn cannot be retried"
+                        "client_turn_conflict", "请求的轮次不可重试"
                     )
                 thread_id = str(existing["thread_id"])
                 await self._lock_thread(connection, thread_id)
@@ -165,7 +165,7 @@ class AgentTurnRepository:
                 ).fetchone()
                 if competing is not None:
                     raise TurnConflictError(
-                        "thread_busy", "another unfinished turn owns this thread"
+                        "thread_busy", "该会话正由另一个未完成轮次占用"
                     )
                 row = await (
                     await connection.execute(
@@ -214,7 +214,7 @@ class AgentTurnRepository:
                     thread, owner_id, scope_type, scope_value
                 )
                 if str(thread["status"]) != "active":
-                    raise PermissionError("thread is archived")
+                    raise PermissionError("会话已归档")
                 thread_id = requested_thread_id
             else:
                 # 新会话和首个轮次在同一事务中创建，避免出现没有执行记录的孤立会话。
@@ -249,7 +249,7 @@ class AgentTurnRepository:
             if competing is not None:
                 # 一个会话只允许一个未完成轮次，确保后续消息顺序和摘要游标可推导。
                 raise TurnConflictError(
-                    "thread_busy", "another unfinished turn owns this thread"
+                    "thread_busy", "该会话正由另一个未完成轮次占用"
                 )
 
             turn_id = str(uuid.uuid4())
@@ -506,7 +506,7 @@ class AgentTurnRepository:
                 raise TurnLeaseLostError(turn_id)
             if turn.get("cancel_requested_at") is not None:
                 # 取消请求在最终提交前再次检查，优先级高于已经生成好的模型结果。
-                raise TurnConflictError("turn_cancelled", "turn cancellation requested")
+                raise TurnConflictError("turn_cancelled", "已请求取消轮次")
             await self._upsert_message(
                 # 用户和助手消息与轮次终态在一个事务中提交，恢复时不会看到半套正式历史。
                 connection,
@@ -571,7 +571,7 @@ class AgentTurnRepository:
         最终状态固定为 ``cancelled``，并禁止后续重试。
         """
         if status not in {"interrupted", "failed", "cancelled"}:
-            raise ValueError("invalid incomplete turn status")
+            raise ValueError("无效的未完成轮次状态")
         now = utc_now()
         async with self.database.transaction() as connection:
             turn = await (
@@ -842,14 +842,14 @@ class AgentTurnRepository:
         )
         if requested_thread_id and str(row["thread_id"]) != requested_thread_id:
             raise TurnConflictError(
-                "client_turn_conflict", "clientTurnId belongs to another thread"
+                "client_turn_conflict", "clientTurnId 属于其他会话"
             )
         if (
             str(row["task_type"]) != task_type
             or str(row["request_hash"]) != request_hash
         ):
             raise TurnConflictError(
-                "client_turn_conflict", "clientTurnId payload does not match"
+                "client_turn_conflict", "clientTurnId 对应的载荷不匹配"
             )
 
     @staticmethod
@@ -862,7 +862,7 @@ class AgentTurnRepository:
             or str(row["scope_type"]) != scope_type
             or str(row["scope_id"]) != scope_id
         ):
-            raise PermissionError("thread scope does not match")
+            raise PermissionError("会话范围不匹配")
 
     @staticmethod
     def _lease_valid(row: dict[str, Any], now: datetime) -> bool:

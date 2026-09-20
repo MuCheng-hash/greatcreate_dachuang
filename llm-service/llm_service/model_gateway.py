@@ -126,7 +126,7 @@ class ModelGateway:
             None,
         )
         if selected_index is None:
-            raise ValueError("unknown modelId")
+            raise ValueError("未知的 modelId")
         return (configs[selected_index],) + tuple(
             config for index, config in enumerate(configs) if index != selected_index
         )
@@ -357,7 +357,7 @@ class ModelGateway:
             None,
         )
         if selected_index is None:
-            raise ValueError("unknown modelId")
+            raise ValueError("未知的 modelId")
         selected = self.chat_models[selected_index]
         # 用户选择只调整首选项，不删除其余后备模型，保持故障时仍可完成请求。
         return [selected, *(item for index, item in enumerate(self.chat_models) if index != selected_index)]

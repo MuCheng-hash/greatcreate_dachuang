@@ -155,7 +155,7 @@ class SchemaMigrator:
         for path in sorted(self.migration_root.glob("*.sql")):
             prefix, separator, name = path.stem.partition("_")
             if not separator or not prefix.isdigit():
-                raise SchemaMigrationError(f"invalid migration filename: {path.name}")
+                raise SchemaMigrationError(f"无效的迁移文件名：{path.name}")
             content = path.read_bytes()
             values.append(
                 MigrationFile(
@@ -166,10 +166,10 @@ class SchemaMigrator:
                 )
             )
         if not values:
-            raise SchemaMigrationError("no schema migrations found")
+            raise SchemaMigrationError("未找到数据库迁移文件")
         versions = [item.version for item in values]
         if versions != list(range(1, len(values) + 1)):
-            raise SchemaMigrationError("schema migration versions must be contiguous")
+            raise SchemaMigrationError("数据库迁移版本必须连续")
         return tuple(values)
 
     @property
@@ -207,7 +207,7 @@ class SchemaMigrator:
                     if previous is not None:
                         if previous[1] != migration.checksum:
                             raise SchemaMigrationError(
-                                f"checksum mismatch for migration {migration.version}"
+                                f"迁移文件校验和不匹配：{migration.version}"
                             )
                         continue
                     await connection.execute(
@@ -232,12 +232,12 @@ class SchemaMigrator:
                 )
             ).fetchone()
             if not exists or exists["relation"] is None:
-                raise SchemaOutOfDateError("database schema is not initialized")
+                raise SchemaOutOfDateError("数据库结构尚未初始化")
             applied = await self._applied(connection)
         expected = {item.version: (item.name, item.checksum) for item in self.migrations}
         if applied != expected:
             raise SchemaOutOfDateError(
-                f"database schema version is not current (expected {self.latest_version})"
+                f"数据库结构版本不是当前版本（期望值：{self.latest_version})"
             )
         return self.latest_version
 

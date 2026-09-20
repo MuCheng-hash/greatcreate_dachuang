@@ -495,7 +495,7 @@ class MemoryRepository:
                 self._normalize_id(memory_id),
             )
         if row is None:
-            raise MemoryNotFoundError("memory not found")
+            raise MemoryNotFoundError("记忆不存在")
         return self._memory_from_row(row)
 
     async def confirmation_preview(
@@ -611,7 +611,7 @@ class MemoryRepository:
             current = self._memory_from_row(row)
             if current.status == "deleted":
                 # 已删除记录只能走恢复状态机，编辑接口不能绕过回收站审计。
-                raise MemoryStateError("deleted memory cannot be edited")
+                raise MemoryStateError("已删除的记忆不能编辑")
             next_type = (
                 self._normalize_memory_type(memory_type)
                 if memory_type is not None
@@ -803,7 +803,7 @@ class MemoryRepository:
             if current.status != "deleted":
                 # 物理删除只允许回收状态，强制使用软删除保留纠错窗口。
                 raise MemoryStateError(
-                    "only deleted memory can be permanently deleted"
+                    "只有已删除的记忆可以永久删除"
                 )
             await self._write_audit(
                 connection,
@@ -971,7 +971,7 @@ class MemoryRepository:
             if current.status != expected:
                 # 确认和恢复是不同状态机边，禁止通过 API 跳过待确认或回收站语义。
                 raise MemoryStateError(
-                    f"memory must be {expected} before it can be {event_type}"
+                    f"记忆必须处于 {expected} 后才能执行 {event_type}"
                 )
             purge_at = self._parse_iso(current.purge_after)
             if require_deleted and purge_at is not None and purge_at <= now_dt:
@@ -989,7 +989,7 @@ class MemoryRepository:
                 await connection.execute(
                     "DELETE FROM agent_memory WHERE id = %s", (current.id,)
                 )
-                raise MemoryNotFoundError("memory not found")
+                raise MemoryNotFoundError("记忆不存在")
             expires_at, _, _ = self._lifecycle(
                 current.memory_type, "active", now_dt
             )
@@ -1265,7 +1265,7 @@ class MemoryRepository:
             for_update=for_update,
         )
         if row is None:
-            raise MemoryNotFoundError("memory not found")
+            raise MemoryNotFoundError("记忆不存在")
         return row
 
     @staticmethod
@@ -1287,7 +1287,7 @@ class MemoryRepository:
         }
         if forbidden_keys:
             # 即便调用者误传正文，也在事务提交前拒绝，避免后续无法彻底清理的副本。
-            raise ValueError("audit metadata cannot contain memory content")
+            raise ValueError("审计元数据不能包含记忆内容")
         await connection.execute(
             """
             INSERT INTO agent_memory_audit(
@@ -1369,7 +1369,7 @@ class MemoryRepository:
     def _normalize_memory_type(value: str) -> str:
         normalized = str(value or "").strip().upper()
         if normalized not in MEMORY_TYPES:
-            raise MemoryValidationError("memoryType 必须是 PROFILE 或 TASK")
+            raise MemoryValidationError("memoryType 必须为 PROFILE 或 TASK")
         return normalized
 
     @staticmethod
@@ -1401,14 +1401,14 @@ class MemoryRepository:
     def _normalize_status(value: str) -> str:
         normalized = str(value or "").strip().lower()
         if normalized not in MEMORY_STATUSES:
-            raise MemoryValidationError("status 必须是 pending、active 或 deleted")
+            raise MemoryValidationError("status 必须为 pending、active 或 deleted")
         return normalized
 
     @staticmethod
     def _normalize_source(value: str) -> str:
         normalized = str(value or "").strip().lower()
         if normalized not in MEMORY_SOURCES:
-            raise MemoryValidationError("memory source 不受支持")
+            raise MemoryValidationError("不支持的记忆来源")
         return normalized
 
     @staticmethod
@@ -1467,7 +1467,7 @@ class MemoryRepository:
     def _normalize_id(value: str) -> str:
         normalized = str(value or "").strip()
         if not normalized or len(normalized) > 128:
-            raise MemoryNotFoundError("memory not found")
+            raise MemoryNotFoundError("记忆不存在")
         return normalized
 
     @classmethod

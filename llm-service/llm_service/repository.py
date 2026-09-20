@@ -113,7 +113,7 @@ class ConversationRepository:
         """读取会话并强制校验调用者身份与范围；不匹配时不泄露会话是否存在。"""
         record = await self.get_thread(thread_id, owner_id, scope_type, scope_id)
         if record.status != "active":
-            raise ThreadScopeError("thread is archived")
+            raise ThreadScopeError("会话已归档")
         return record
 
     async def get_thread(
@@ -137,9 +137,9 @@ class ConversationRepository:
         record = self._thread_from_row(row)
         if scope_type is not None and record.scope_type != scope_type:
             # 账号相同也不能跨学校、区域或资源范围复用会话。
-            raise ThreadScopeError("thread scope does not match")
+            raise ThreadScopeError("会话范围不匹配")
         if scope_id is not None and record.scope_id != str(scope_id):
-            raise ThreadScopeError("thread scope does not match")
+            raise ThreadScopeError("会话范围不匹配")
         return record
 
     async def list_threads(
@@ -585,7 +585,7 @@ class ConversationRepository:
                 # 恢复接口对活动会话幂等，重复调用不会改变更新时间或消息内容。
                 return
             if record.status != "archived":
-                raise ThreadScopeError("thread status does not match")
+                raise ThreadScopeError("会话状态不匹配")
             await connection.execute(
                 "UPDATE agent_thread SET status = 'active', updated_at = %s WHERE thread_id = %s",
                 (utc_now(), thread_id),
@@ -617,7 +617,7 @@ class ConversationRepository:
             record = self._thread_from_row(row)
             self._validate_scope(record, scope_type, scope_id)
             if record.status != expected_status:
-                raise ThreadScopeError("thread status does not match")
+                raise ThreadScopeError("会话状态不匹配")
             await connection.execute(
                 "UPDATE agent_thread SET status = %s, updated_at = %s WHERE thread_id = %s",
                 (next_status, utc_now(), thread_id),
@@ -646,9 +646,9 @@ class ConversationRepository:
         scope_id: str | int | None,
     ) -> None:
         if scope_type is not None and record.scope_type != scope_type:
-            raise ThreadScopeError("thread scope does not match")
+            raise ThreadScopeError("会话范围不匹配")
         if scope_id is not None and record.scope_id != str(scope_id):
-            raise ThreadScopeError("thread scope does not match")
+            raise ThreadScopeError("会话范围不匹配")
 
     @staticmethod
     def _preview(value: str | None, limit: int) -> str:
@@ -659,5 +659,5 @@ class ConversationRepository:
     def _normalize_thread_status(status: str) -> str:
         normalized = str(status or "").strip().lower()
         if normalized not in {"active", "archived"}:
-            raise ValueError("thread status must be active or archived")
+            raise ValueError("会话状态必须为 active 或 archived")
         return normalized

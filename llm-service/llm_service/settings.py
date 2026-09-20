@@ -249,7 +249,7 @@ class Settings(BaseSettings):
         normalized = value.strip().lower()
         if normalized not in VALID_ENVIRONMENTS:
             allowed = ", ".join(sorted(VALID_ENVIRONMENTS))
-            raise ValueError(f"APP_ENV must be one of: {allowed}")
+            raise ValueError(f"APP_ENV 必须为以下值之一：{allowed}")
         return normalized
 
     @field_validator("internal_business_base_url")
@@ -264,7 +264,7 @@ class Settings(BaseSettings):
             return None
         raw = value.get_secret_value().strip()
         if not raw.startswith(("postgresql://", "postgres://")):
-            raise ValueError("database URL must use postgresql:// or postgres://")
+            raise ValueError("数据库 URL 必须使用 postgresql:// 或 postgres://")
         return SecretStr(raw)
 
     @field_validator("business_health_path")
@@ -272,23 +272,23 @@ class Settings(BaseSettings):
     def normalize_health_path(cls, value: str) -> str:
         normalized = value.strip()
         if not normalized:
-            raise ValueError("BUSINESS_HEALTH_PATH cannot be empty")
+            raise ValueError("BUSINESS_HEALTH_PATH 不能为空")
         return normalized if normalized.startswith("/") else f"/{normalized}"
 
     @model_validator(mode="after")
     def validate_deployment_profile(self) -> "Settings":
         if self.database_pool_min_size > self.database_pool_max_size:
-            raise ValueError("DATABASE_POOL_MIN_SIZE cannot exceed DATABASE_POOL_MAX_SIZE")
+            raise ValueError("DATABASE_POOL_MIN_SIZE 不能超过 DATABASE_POOL_MAX_SIZE")
         if self.agent_turn_heartbeat_seconds >= self.agent_turn_lease_seconds:
-            raise ValueError("AGENT_TURN_HEARTBEAT_SECONDS must be less than AGENT_TURN_LEASE_SECONDS")
+            raise ValueError("AGENT_TURN_HEARTBEAT_SECONDS 必须小于 AGENT_TURN_LEASE_SECONDS")
         if self.app_env != "prod":
             return self
         if "*" in self.allowed_origins:
-            raise ValueError("wildcard CORS is not allowed when APP_ENV=prod")
+            raise ValueError("当 APP_ENV=prod 时不允许使用通配符 CORS")
         if not self.prompt_admin_token or not self.observability_admin_token:
-            raise ValueError("admin tokens are required when APP_ENV=prod")
+            raise ValueError("当 APP_ENV=prod 时必须配置管理员令牌")
         if self.require_llm_model and not self.model_configured:
-            raise ValueError("at least one LLM model must be configured when REQUIRE_LLM_MODEL=true")
+            raise ValueError("当 REQUIRE_LLM_MODEL=true 时，至少需要配置一个 LLM 模型")
         return self
 
     @property
@@ -456,7 +456,7 @@ class Settings(BaseSettings):
 def load_settings() -> Settings:
     override_path = os.getenv("APP_CONFIG_FILE", "").strip()
     if override_path and not Path(override_path).is_file():
-        raise ValueError(f"APP_CONFIG_FILE does not exist: {override_path}")
+        raise ValueError(f"APP_CONFIG_FILE 不存在：{override_path}")
     return Settings()
 
 

@@ -53,13 +53,13 @@ class AgentAttachment(ApiModel):
     def validate_data_url(self) -> "AgentAttachment":
         prefix = f"data:{self.media_type};base64,"
         if not self.data_url.startswith(prefix):
-            raise ValueError("attachment dataUrl does not match mediaType")
+            raise ValueError("附件 dataUrl 与 mediaType 不匹配")
         try:
             decoded = base64.b64decode(self.data_url[len(prefix):], validate=True)
         except (ValueError, binascii.Error) as exc:
-            raise ValueError("attachment dataUrl is not valid base64") from exc
+            raise ValueError("附件 dataUrl 不是有效的 Base64 数据") from exc
         if len(decoded) > 5 * 1024 * 1024:
-            raise ValueError("attachment exceeds 5MB")
+            raise ValueError("附件超过 5MB")
         return self
 
 
@@ -86,7 +86,7 @@ class AgentMessageRequest(ApiModel):
     def clean_message(cls, value: str) -> str:
         value = value.strip()
         if not value:
-            raise ValueError("message must not be blank")
+            raise ValueError("消息不能为空")
         return value
 
     @field_validator("scope_type")
@@ -94,7 +94,7 @@ class AgentMessageRequest(ApiModel):
     def normalize_scope(cls, value: str) -> str:
         value = value.strip().upper()
         if value not in {"SCHOOL", "REGION", "RESOURCE"}:
-            raise ValueError("scopeType must be SCHOOL, REGION, or RESOURCE")
+            raise ValueError("scopeType 必须为 SCHOOL、REGION 或 RESOURCE")
         return value
 
 
@@ -108,7 +108,7 @@ class ThreadCreateRequest(ApiModel):
     def normalize_scope(cls, value: str) -> str:
         value = value.strip().upper()
         if value not in {"SCHOOL", "REGION", "RESOURCE"}:
-            raise ValueError("scopeType must be SCHOOL, REGION, or RESOURCE")
+            raise ValueError("scopeType 必须为 SCHOOL、REGION 或 RESOURCE")
         return value
 
 
@@ -123,7 +123,7 @@ class MemorySettingUpdateRequest(ApiModel):
     def normalize_scope(cls, value: str) -> str:
         value = value.strip().upper()
         if value not in {"SCHOOL", "REGION", "RESOURCE"}:
-            raise ValueError("scopeType must be SCHOOL, REGION, or RESOURCE")
+            raise ValueError("scopeType 必须为 SCHOOL、REGION 或 RESOURCE")
         return value
 
 
@@ -155,7 +155,7 @@ class MemoryCreateRequest(ApiModel):
     def normalize_scope(cls, value: str) -> str:
         value = value.strip().upper()
         if value not in {"SCHOOL", "REGION", "RESOURCE"}:
-            raise ValueError("scopeType must be SCHOOL, REGION, or RESOURCE")
+            raise ValueError("scopeType 必须为 SCHOOL、REGION 或 RESOURCE")
         return value
 
 
@@ -168,7 +168,7 @@ class MemoryUpdateRequest(ApiModel):
     @model_validator(mode="after")
     def require_update(self) -> "MemoryUpdateRequest":
         if not ({"memory_type", "field_key", "content"} & self.model_fields_set):
-            raise ValueError("at least one memory field is required")
+            raise ValueError("至少需要填写一个记忆字段")
         return self
 
 

@@ -452,7 +452,7 @@ class AgentRuntime:
         if registration.turn.status == "cancelled":
             # 已取消的幂等键不能重新激活，客户端必须生成新的 clientTurnId 再发起提问。
             raise TurnConflictError(
-                "turn_cancelled", "the requested turn was cancelled"
+                "turn_cancelled", "请求的轮次已取消"
             )
         thread = await self.repository.get_thread(
             registration.turn.thread_id,
@@ -586,7 +586,7 @@ class AgentRuntime:
         if turn.status != "completed":
             return None
         if not turn.response:
-            raise RuntimeError("completed_turn_response_missing")
+            raise RuntimeError("已完成轮次缺少响应内容")
         response = AgentMessageResponse.model_validate(turn.response)
         response.thread_id = turn.thread_id
         response.client_turn_id = turn.client_turn_id
@@ -607,7 +607,7 @@ class AgentRuntime:
         """启动独立心跳任务续租，并在取消或租约异常时取消实际执行任务。"""
         execution_task = asyncio.current_task()
         if execution_task is None:
-            raise RuntimeError("agent turn requires an asyncio task")
+            raise RuntimeError("Agent 轮次需要 asyncio 任务")
         self._active_turn_tasks[turn.turn_id] = execution_task
 
         async def heartbeat_loop() -> None:
@@ -1721,7 +1721,7 @@ class AgentRuntime:
             return "teaching-plan", teaching_plan_valid
         if request.task_type == "RESOURCE_DISCOVERY":
             return "resource-discovery", resource_discovery_valid
-        raise ValueError(f"unsupported taskType: {request.task_type}")
+        raise ValueError(f"不支持的 taskType：{request.task_type}")
 
     async def _start_structured_prompt(
         self,
@@ -1731,7 +1731,7 @@ class AgentRuntime:
         memory_context: MemoryContext,
     ):
         if self.prompts is None:
-            raise RuntimeError("prompt_manager_unavailable")
+            raise RuntimeError("提示词管理器不可用")
         subject_key = f"{request.scope_type}:{request.scope_id}"
         selection = await self.prompts.resolve(
             prompt_key,
@@ -1879,7 +1879,7 @@ class AgentRuntime:
         metadata["turnStatus"] = "completed"
         if turn is not None:
             if request is None:
-                raise ValueError("request is required when completing an agent turn")
+                raise ValueError("完成 Agent 轮次时请求不能为空")
             await self.turn_repository.complete(
                 turn_id=turn.turn_id,
                 lease_owner=self.instance_id,
@@ -2281,12 +2281,12 @@ class AgentRuntime:
         if not pending:
             return
         if len(pending) != 1:
-            raise RuntimeError("multiple write actions in one model step are not allowed")
+            raise RuntimeError("一次模型步骤中不允许包含多个写入动作")
         interrupt_id, action_request = pending[0]
         tool_name = str(action_request.get("name") or "").strip()
         arguments = action_request.get("args")
         if not tool_name or not isinstance(arguments, dict):
-            raise RuntimeError("invalid write action interrupt")
+            raise RuntimeError("无效的写入动作中断")
         logical_call_id = interrupt_id or hashlib.sha256(
             json.dumps(action_request, sort_keys=True, default=str).encode("utf-8")
         ).hexdigest()
@@ -2716,7 +2716,7 @@ class AgentRuntime:
             except LookupError:
                 pass
         if not self.settings.prompt_path.is_file():
-            raise FileNotFoundError(f"Agent prompt not found: {self.settings.prompt_path}")
+            raise FileNotFoundError(f"Agent 提示词不存在：{self.settings.prompt_path}")
         return self.settings.prompt_path.read_text(encoding="utf-8")
 
     def invalidate_prompt(self, prompt_key: str) -> None:
