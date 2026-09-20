@@ -58,20 +58,28 @@ class BusinessToolClient:
             await self._client.aclose()
 
     async def query_knowledge(
-        self, payload: Mapping[str, Any]
+        self, payload: Mapping[str, Any], *, tool_authorization: str,
+        client_turn_id: str
     ) -> dict[str, Any]:
         """向受认证的知识检索端点请求事实和引用候选。
 
         ``payload`` 中的范围、检索词和过滤条件直接交给业务服务裁决；服务不可用
         时抛出受控错误，由工具层决定是否从当前轮次的可信上下文降级。
         """
-        return await self._post_retrieval(self.KNOWLEDGE_RETRIEVE_PATH, payload)
+        return await self._post_retrieval(
+            self.KNOWLEDGE_RETRIEVE_PATH, payload, tool_authorization=tool_authorization,
+            client_turn_id=client_turn_id
+        )
 
     async def query_graph_relations(
-        self, payload: Mapping[str, Any]
+        self, payload: Mapping[str, Any], *, tool_authorization: str,
+        client_turn_id: str
     ) -> dict[str, Any]:
         """向受认证的图谱端点请求关系事实，失败语义与知识检索保持一致。"""
-        return await self._post_retrieval(self.RELATION_QUERY_PATH, payload)
+        return await self._post_retrieval(
+            self.RELATION_QUERY_PATH, payload, tool_authorization=tool_authorization,
+            client_turn_id=client_turn_id
+        )
 
     async def execute_write(
         self,
@@ -177,7 +185,8 @@ class BusinessToolClient:
             raise BusinessToolError("business_tool_rejected")
 
     async def _post_retrieval(
-        self, path: str, payload: Mapping[str, Any]
+        self, path: str, payload: Mapping[str, Any], *, tool_authorization: str,
+        client_turn_id: str
     ) -> dict[str, Any]:
         """提交只读检索请求并校验业务服务的 ``code=200`` 响应信封。
 
@@ -186,10 +195,18 @@ class BusinessToolClient:
         """
         if not self.configured:
             raise BusinessToolError("business_tool_unconfigured")
+        if not tool_authorization.strip():
+            raise BusinessToolError("tool_context_authorization_missing")
+        if not client_turn_id.strip():
+            raise BusinessToolError("tool_context_turn_missing")
         try:
             response = await self._client.post(
                 f"{self.base_url}{path}",
-                headers=self._headers(),
+                headers={
+                    **self._headers(),
+                    "X-Agent-Tool-Context": tool_authorization,
+                    "X-Agent-Client-Turn-Id": client_turn_id,
+                },
                 json=dict(payload),
             )
         except httpx.TimeoutException as exc:

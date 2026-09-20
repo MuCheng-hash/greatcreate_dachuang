@@ -16,6 +16,15 @@ public class AgentProperties {
      */
     private String internalServiceToken = "";
 
+    /**
+     * Java 签发并验证动态工具上下文的 HMAC 密钥。
+     * 缺失时仍允许初始 RAG，但所有动态工具调用必须降级拒绝。
+     */
+    private String toolContextSigningSecret = "";
+
+    /** 动态工具授权凭据的有效期，单位秒。 */
+    private int toolContextAuthorizationTtlSeconds = 120;
+
     /** FastAPI Prompt 管理令牌，仅由 Java 服务端代理使用。 */
     private String promptAdminToken;
 

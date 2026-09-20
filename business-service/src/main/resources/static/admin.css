@@ -1378,6 +1378,28 @@ body.account-modal-open::before {
 }
 
 /* ============================================================
+   文档入库
+   ============================================================ */
+.knowledge-document-layout { display: grid; grid-template-columns: minmax(280px, .72fr) minmax(0, 1.28fr); gap: 16px; align-items: start; }
+.knowledge-document-upload-form { padding: 0 18px 18px; }
+.knowledge-document-upload-form .card-topline { margin: 0 -18px 14px; padding: 16px 18px 13px; border-bottom: 1px solid var(--line); }
+.knowledge-document-upload-form label { display: grid; gap: 7px; margin-top: 13px; color: #455149; font-size: 13px; font-weight: 600; }
+.knowledge-document-upload-form label[hidden] { display: none; }
+.knowledge-document-upload-form input[type="file"] { padding: 8px; background: #fff; }
+.knowledge-document-upload-hint { margin: 14px 0 0; color: var(--muted); font-size: 12px; line-height: 1.6; }
+.knowledge-document-upload-form .form-actions { margin-top: 16px; }
+.knowledge-document-upload-form .status-box { margin: 14px 0 0; }
+.knowledge-document-filter { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+.knowledge-document-filter .line-select { min-width: 132px; }
+.knowledge-document-list-card td { vertical-align: top; }
+.knowledge-document-list-card table { min-width: 780px; }
+.knowledge-document-list-card td strong, .knowledge-document-list-card td small { display: block; }
+.knowledge-document-list-card td small { margin-top: 4px; color: var(--muted); font-size: 12px; line-height: 1.45; }
+.knowledge-document-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.knowledge-document-actions .ghost-button, .knowledge-document-actions .danger-button { min-height: 30px; padding: 0 10px; font-size: 12px; }
+.status-box--error { border-color: #efc4c1; background: #fff6f5; color: #9b312c; }
+
+/* ============================================================
    Agent 调试
    ============================================================ */
 .agent-debug-layout { display: grid; grid-template-columns: 340px minmax(0,1fr); gap: 16px; align-items: start; }
@@ -1531,7 +1553,7 @@ body.account-modal-open::before {
 }
 
 @media (max-width: 720px) {
-  .workspace-grid, .school-map-shell, .agent-debug-layout, .rag-test-layout,
+  .workspace-grid, .school-map-shell, .agent-debug-layout, .rag-test-layout, .knowledge-document-layout,
   .agent-debug-grid, .agent-ops-grid, .rag-grid { grid-template-columns: 1fr; }
   .rag-metric-card { min-height: 116px; }
   .rag-test-form { border-right: 0; border-bottom: 1px solid var(--line); }

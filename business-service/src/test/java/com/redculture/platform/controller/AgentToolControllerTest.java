@@ -7,6 +7,7 @@ import com.redculture.platform.service.admin.RagWebSourceService;
 import com.redculture.platform.vo.ai.AgentToolRequest;
 import com.redculture.platform.vo.ai.KnowledgeRetrieveResult;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.Mockito.mock;
@@ -23,7 +24,7 @@ class AgentToolControllerTest {
         AgentToolService service = mock(AgentToolService.class);
         AgentToolController controller = new AgentToolController(properties, service, mock(RagWebSourceService.class));
 
-        ApiResponse<?> response = controller.knowledgeRetrieve("wrong", new AgentToolRequest());
+        ApiResponse<?> response = controller.knowledgeRetrieve("wrong", null, null, new AgentToolRequest());
 
         assertEquals(403, response.getCode());
         verifyNoInteractions(service);
@@ -33,17 +34,59 @@ class AgentToolControllerTest {
     void acceptsValidServiceTokenAndDelegates() {
         AgentProperties properties = new AgentProperties();
         properties.setInternalServiceToken("secret");
+        properties.setToolContextSigningSecret("unit-test-secret");
         AgentToolService service = mock(AgentToolService.class);
         when(service.knowledgeRetrieve(org.mockito.ArgumentMatchers.any()))
                 .thenReturn(KnowledgeRetrieveResult.empty());
         AgentToolController controller = new AgentToolController(properties, service, mock(RagWebSourceService.class));
 
+        com.redculture.platform.vo.AuthCurrentUserVO user = new com.redculture.platform.vo.AuthCurrentUserVO();
+        user.setAccountId(1L);
+        user.setRoleCode("school_admin");
+        user.setSchoolId(1L);
+        String toolContext = new com.redculture.platform.service.agent.AgentToolContextAuthorization(properties)
+                .issue(new com.redculture.platform.service.agent.AgentToolContextAuthorization.Context(
+                        user, com.redculture.platform.vo.ai.KnowledgeScopeType.SCHOOL, 1L,
+                        "turn-1", java.util.List.of("retrieve_knowledge"), 8L, 9L));
+        AgentToolRequest forgedRequest = new AgentToolRequest();
+        com.redculture.platform.vo.ai.AgentActorVO forgedActor = new com.redculture.platform.vo.ai.AgentActorVO();
+        forgedActor.setAccountId(99L);
+        forgedActor.setRoleCode("platform_admin");
+        forgedRequest.setActor(forgedActor);
+        forgedRequest.setResourceId(999L);
         ApiResponse<KnowledgeRetrieveResult> response = controller.knowledgeRetrieve(
-                "secret", new AgentToolRequest()
-        );
+                "secret", toolContext, "turn-1", forgedRequest);
 
         assertEquals(200, response.getCode());
-        verify(service).knowledgeRetrieve(org.mockito.ArgumentMatchers.any());
+        ArgumentCaptor<AgentToolRequest> captured = ArgumentCaptor.forClass(AgentToolRequest.class);
+        verify(service).knowledgeRetrieve(captured.capture());
+        assertEquals(1L, captured.getValue().getActor().getAccountId());
+        assertEquals("school_admin", captured.getValue().getActor().getRoleCode());
+        assertEquals(1L, captured.getValue().getScope().getScopeId());
+        assertEquals(8L, captured.getValue().getTaskId());
+        assertEquals(9L, captured.getValue().getResourceId());
+    }
+
+    @Test
+    void rejectsTamperedOrDifferentTurnToolContext() {
+        AgentProperties properties = new AgentProperties();
+        properties.setInternalServiceToken("secret");
+        properties.setToolContextSigningSecret("unit-test-secret");
+        AgentToolService service = mock(AgentToolService.class);
+        AgentToolController controller = new AgentToolController(properties, service, mock(RagWebSourceService.class));
+
+        com.redculture.platform.vo.AuthCurrentUserVO user = new com.redculture.platform.vo.AuthCurrentUserVO();
+        user.setAccountId(1L);
+        user.setRoleCode("student");
+        user.setSchoolId(1L);
+        String context = new com.redculture.platform.service.agent.AgentToolContextAuthorization(properties)
+                .issue(new com.redculture.platform.service.agent.AgentToolContextAuthorization.Context(
+                        user, com.redculture.platform.vo.ai.KnowledgeScopeType.SCHOOL, 1L,
+                        "turn-1", java.util.List.of("retrieve_knowledge"), 8L, 9L));
+
+        assertEquals(403, controller.knowledgeRetrieve("secret", context + "x", "turn-1", new AgentToolRequest()).getCode());
+        assertEquals(403, controller.knowledgeRetrieve("secret", context, "turn-2", new AgentToolRequest()).getCode());
+        verifyNoInteractions(service);
     }
 
     @Test

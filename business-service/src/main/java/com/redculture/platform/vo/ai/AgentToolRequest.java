@@ -36,6 +36,9 @@ public class AgentToolRequest {
     /** 资源标识。 */
     private Long resourceId;
 
+    /** 学生任务标识，仅可由已验证的工具授权凭据注入。 */
+    private Long taskId;
+
     /** 意图。 */
     private String intent;
 

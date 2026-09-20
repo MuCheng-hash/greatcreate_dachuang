@@ -1008,6 +1008,7 @@ class AgentRuntime:
                 theme=request.theme,
                 resource_category=request.resource_category,
                 max_distance_meters=request.max_distance_meters,
+                client_turn_id=request.client_turn_id,
                 executions=list(prefetched_executions),
                 degraded_reasons=list(prefetched_reasons),
             )
@@ -1198,6 +1199,7 @@ class AgentRuntime:
                 theme=request.theme,
                 resource_category=request.resource_category,
                 max_distance_meters=request.max_distance_meters,
+                client_turn_id=request.client_turn_id,
                 event_sink=emit,
                 executions=list(prefetched_executions),
                 degraded_reasons=list(prefetched_reasons),
@@ -1330,6 +1332,7 @@ class AgentRuntime:
             theme=request.theme,
             resource_category=request.resource_category,
             max_distance_meters=request.max_distance_meters,
+            client_turn_id=request.client_turn_id,
             event_sink=emit,
         )
         token = bind_tool_runtime(runtime)
@@ -1376,10 +1379,16 @@ class AgentRuntime:
         """先执行业务检索；低召回时在受控改写、HyDE 和域名白名单范围内增强一次。"""
         if self.business_tool_client is None:
             return {"retrievalStatus": "degraded", "degradedReason": "business_tool_unconfigured"}
+        tool_authorization = request.context.tool_authorization
+        if not tool_authorization:
+            return {"retrievalStatus": "degraded", "degradedReason": "tool_context_authorization_missing"}
         rewrite = await self._controlled_query_rewrite(request, thread)
         payload = self._retrieval_payload(request, rewrite)
         try:
-            first = await self.business_tool_client.query_knowledge(payload)
+            first = await self.business_tool_client.query_knowledge(
+                payload, tool_authorization=tool_authorization,
+                client_turn_id=request.client_turn_id,
+            )
         except Exception as exc:
             # 网络或协议失败必须显式标注降级，不能伪装成正常的空结果。
             return {"retrievalStatus": "degraded", "degradedReason": type(exc).__name__.lower()}
@@ -1400,7 +1409,10 @@ class AgentRuntime:
         augmented["hydeQuery"] = hyde or None
         augmented["webEvidence"] = web
         try:
-            final = await self.business_tool_client.query_knowledge(augmented)
+            final = await self.business_tool_client.query_knowledge(
+                augmented, tool_authorization=tool_authorization,
+                client_turn_id=request.client_turn_id,
+            )
         except Exception:
             # 增强失败时返回首轮结果，避免因可选能力故障丢失已经取得的业务证据。
             trace["augmentationReason"] = f"{trace.get('augmentationReason') or 'low_recall'}:augmentation_failed"
@@ -2021,6 +2033,7 @@ class AgentRuntime:
             theme=request.theme,
             resource_category=request.resource_category,
             max_distance_meters=request.max_distance_meters,
+            client_turn_id=request.client_turn_id,
         )
         target_agent = agent or self._agent
         if target_agent is None:

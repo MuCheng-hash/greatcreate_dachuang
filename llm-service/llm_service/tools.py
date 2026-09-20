@@ -53,6 +53,7 @@ class ToolRuntimeContext:
     theme: str | None = None
     resource_category: str | None = None
     max_distance_meters: int | None = None
+    client_turn_id: str | None = None
     degraded_reasons: list[str] = field(default_factory=list)
     _call_counts: dict[str, int] = field(default_factory=dict)
 
@@ -464,11 +465,17 @@ async def retrieve_knowledge(query: str = "", limit: int = 5) -> str:
     async def retrieve() -> dict[str, Any]:
         """将业务知识检索和范围受限降级封装为同一工具回调。"""
         try:
-            if runtime.business_tool_client is None:
+            if (runtime.business_tool_client is None
+                    or not runtime.business_tool_client.configured):
                 # 客户端未配置与“没有知识命中”不同，必须触发带原因的本地降级。
                 raise BusinessToolError("business_tool_unconfigured")
+            authorization = runtime.trusted_context.tool_authorization
+            if not authorization:
+                raise BusinessToolError("tool_context_authorization_missing")
             result = await runtime.business_tool_client.query_knowledge(
-                _tool_payload(runtime, query, safe_limit)
+                _tool_payload(runtime, query, safe_limit),
+                tool_authorization=authorization,
+                client_turn_id=runtime.client_turn_id or "",
             )
             _merge_retrieval(runtime, result)
             return result
@@ -491,10 +498,16 @@ async def query_graph_relations(query: str = "", limit: int = 5) -> str:
     async def retrieve() -> dict[str, Any]:
         """将业务图谱检索和范围受限降级封装为同一工具回调。"""
         try:
-            if runtime.business_tool_client is None:
+            if (runtime.business_tool_client is None
+                    or not runtime.business_tool_client.configured):
                 raise BusinessToolError("business_tool_unconfigured")
+            authorization = runtime.trusted_context.tool_authorization
+            if not authorization:
+                raise BusinessToolError("tool_context_authorization_missing")
             result = await runtime.business_tool_client.query_graph_relations(
-                _tool_payload(runtime, query, safe_limit)
+                _tool_payload(runtime, query, safe_limit),
+                tool_authorization=authorization,
+                client_turn_id=runtime.client_turn_id or "",
             )
             _merge_retrieval(runtime, result)
             return result

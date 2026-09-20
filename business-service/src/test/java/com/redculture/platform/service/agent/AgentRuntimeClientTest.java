@@ -1,10 +1,13 @@
 package com.redculture.platform.service.agent;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.redculture.platform.config.AgentProperties;
 import com.redculture.platform.config.AppMapProperties;
 import com.redculture.platform.vo.AgentIntent;
 import com.redculture.platform.vo.AuthCurrentUserVO;
+import com.redculture.platform.vo.SchoolMapDetailVO;
+import com.redculture.platform.vo.SchoolSummaryVO;
 import com.redculture.platform.vo.ai.KnowledgeScopeType;
 import com.redculture.platform.vo.ai.StatefulAgentRequest;
 import com.redculture.platform.vo.request.AgentQaRequest;
@@ -19,13 +22,80 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class AgentRuntimeClientTest {
+
+    @Test
+    void chatRequestInjectsAuthenticatedActorAndResolvedScope() {
+        AgentProperties properties = new AgentProperties();
+        properties.setToolContextSigningSecret("unit-test-secret");
+        AgentRuntimeClient client = new AgentRuntimeClient(
+                new AppMapProperties(), properties, new ObjectMapper()
+        );
+        AgentQaRequest request = new AgentQaRequest();
+        request.setQuestion("附近有哪些资源？");
+        AuthCurrentUserVO user = new AuthCurrentUserVO();
+        user.setAccountId(1L);
+        user.setRoleCode("school_admin");
+        user.setSchoolId(1L);
+
+        SchoolSummaryVO school = new SchoolSummaryVO();
+        school.setSchoolId(1L);
+        school.setSchoolName("里庄小学");
+        SchoolMapDetailVO schoolDetail = new SchoolMapDetailVO();
+        schoolDetail.setSchool(school);
+
+        AgentAnswerContext context = new AgentAnswerContext();
+        context.setQuestion(request.getQuestion());
+        context.setScopeType(KnowledgeScopeType.SCHOOL);
+        context.setScopeId(1L);
+        context.setSchoolDetail(schoolDetail);
+
+        StatefulAgentRequest result = client.chatRequest(request, user, context);
+
+        assertTrue(result.getContext().get("actor") instanceof Map);
+        Map<?, ?> actor = (Map<?, ?>) result.getContext().get("actor");
+        assertEquals(1L, actor.get("accountId"));
+        assertEquals("school_admin", actor.get("roleCode"));
+        assertEquals(1L, actor.get("schoolId"));
+
+        assertTrue(result.getContext().get("scope") instanceof Map);
+        Map<?, ?> scope = (Map<?, ?>) result.getContext().get("scope");
+        assertEquals("SCHOOL", scope.get("scopeType"));
+        assertEquals(1L, scope.get("scopeId"));
+        assertEquals("里庄小学", scope.get("name"));
+        assertTrue(result.getContext().get("toolAuthorization") instanceof String);
+    }
+
+    @Test
+    void chatRequestKeepsInitialRagContextButOmitsDynamicAuthorizationWithoutSecret() {
+        AgentRuntimeClient client = new AgentRuntimeClient(
+                new AppMapProperties(), new AgentProperties(), new ObjectMapper()
+        );
+        AgentQaRequest request = new AgentQaRequest();
+        request.setQuestion("附近有哪些资源？");
+        AuthCurrentUserVO user = new AuthCurrentUserVO();
+        user.setAccountId(1L);
+        user.setRoleCode("student");
+        user.setSchoolId(1L);
+        AgentAnswerContext context = new AgentAnswerContext();
+        context.setQuestion(request.getQuestion());
+        context.setScopeType(KnowledgeScopeType.SCHOOL);
+        context.setScopeId(1L);
+
+        StatefulAgentRequest result = client.chatRequest(request, user, context);
+
+        assertTrue(result.getContext().containsKey("actor"));
+        assertTrue(result.getContext().containsKey("scope"));
+        assertFalse(result.getContext().containsKey("toolAuthorization"));
+    }
 
     @Test
     void parsesOrderedSseEventsFromFastApi() throws IOException {
@@ -154,6 +224,8 @@ class AgentRuntimeClientTest {
             request.setModelId("deepseek");
             AuthCurrentUserVO user = new AuthCurrentUserVO();
             user.setAccountId(1L);
+            user.setRoleCode("school_admin");
+            user.setSchoolId(1L);
             AgentAnswerContext context = new AgentAnswerContext();
             context.setQuestion(request.getQuestion());
             context.setIntent(AgentIntent.NEARBY_RESOURCE);
@@ -183,6 +255,17 @@ class AgentRuntimeClientTest {
             assertTrue(requestBodies.stream().allMatch(body -> body.contains("\"threadId\":\"thread-1\"")));
             assertTrue(requestBodies.stream().allMatch(body -> body.contains("\"clientTurnId\":\"turn-client-1\"")));
             assertTrue(requestBodies.stream().allMatch(body -> body.contains("\"modelId\":\"deepseek\"")));
+            ObjectMapper requestMapper = new ObjectMapper();
+            for (String requestBody : requestBodies) {
+                JsonNode contextNode = requestMapper.readTree(requestBody).path("context");
+                JsonNode actorNode = contextNode.path("actor");
+                assertEquals(1L, actorNode.path("accountId").asLong());
+                assertEquals("school_admin", actorNode.path("roleCode").asText());
+                assertEquals(1L, actorNode.path("schoolId").asLong());
+                JsonNode scopeNode = contextNode.path("scope");
+                assertEquals("SCHOOL", scopeNode.path("scopeType").asText());
+                assertEquals(1L, scopeNode.path("scopeId").asLong());
+            }
         } finally {
             server.stop(0);
         }
