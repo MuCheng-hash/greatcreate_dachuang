@@ -46,26 +46,26 @@ public class AuthTokenService {
     @Transactional
     public IssuedTokens rotate(String rawRefreshToken, HttpServletRequest request) {
         if (!StringUtils.hasText(rawRefreshToken)) {
-            throw new AuthTokenException("refresh token is missing");
+            throw new AuthTokenException("刷新令牌缺失");
         }
         AuthRefreshToken current = findByHash(rawRefreshToken);
         if (current == null) {
-            throw new AuthTokenException("refresh token is invalid");
+            throw new AuthTokenException("刷新令牌无效");
         }
         if (current.getRevokedAt() != null) {
             revokeFamily(current.getTokenFamilyId(), "refresh_token_reuse");
-            throw new AuthTokenException("refresh token has already been used");
+            throw new AuthTokenException("刷新令牌已被使用");
         }
         LocalDateTime now = LocalDateTime.now();
         if (current.getExpiresAt() == null || !current.getExpiresAt().isAfter(now)) {
             revoke(current, "refresh_token_expired");
-            throw new AuthTokenException("refresh token is expired");
+            throw new AuthTokenException("刷新令牌已过期");
         }
 
         SchoolUserAccount account = accountMapper.selectById(current.getAccountId());
         if (account == null || account.getStatus() != AccountStatus.ACTIVE) {
             revokeFamily(current.getTokenFamilyId(), "account_inactive");
-            throw new AuthTokenException("account is not active");
+            throw new AuthTokenException("账号未处于启用状态");
         }
 
         LocalDateTime rotatedAt = LocalDateTime.now();
@@ -77,7 +77,7 @@ public class AuthTokenService {
                 .set("revoke_reason", "rotated"));
         if (claimed != 1) {
             revokeFamily(current.getTokenFamilyId(), "refresh_token_reuse");
-            throw new AuthTokenException("refresh token has already been used");
+            throw new AuthTokenException("刷新令牌已被使用");
         }
         return issue(userFactory.build(account), request, current.getTokenFamilyId());
     }

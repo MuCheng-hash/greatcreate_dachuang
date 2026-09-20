@@ -42,7 +42,7 @@ public class ResourceAdminController {
     public ApiResponse<ResourceAdminVO> detail(@PathVariable Long resourceId) {
         ResourceAdminVO data = localEduResourceService.getResourceAdminDetail(resourceId);
         if (data == null) {
-            return ApiResponse.fail("resource not found");
+            return ApiResponse.fail("资源不存在");
         }
         return ApiResponse.success(data);
     }

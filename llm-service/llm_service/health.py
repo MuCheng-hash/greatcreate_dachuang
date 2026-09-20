@@ -90,7 +90,7 @@ class HealthService:
         try:
             info = await self.database.ping()
             server_version = int(info.get("server_version_num") or 0) // 10000
-            detail = "PostgreSQL connection pool available"
+            detail = "PostgreSQL 连接池可用"
             if server_version:
                 detail += f" (server {server_version})"
             return self._result("up", True, started, detail)

@@ -94,7 +94,7 @@ public class CatalogProjectionService {
 
     public void removeRelation(CatalogRelationVO relation) {
         if (relation == null || relation.getRelationId() == null) {
-            throw new IllegalArgumentException("catalog relation not found");
+            throw new IllegalArgumentException("目录关系不存在");
         }
         String sourceLabel = label(entityType(relation.getSourceType()));
         String targetLabel = label(entityType(relation.getTargetType()));
@@ -107,20 +107,20 @@ public class CatalogProjectionService {
 
     public CatalogProjectionTask retry(Long taskId) {
         CatalogProjectionTask task = taskMapper.selectById(taskId);
-        if (task == null) throw new IllegalArgumentException("projection task not found");
+        if (task == null) throw new IllegalArgumentException("投影任务不存在");
         task.setStatus("RETRIED"); task.setLastError(null); task.setAttemptCount((task.getAttemptCount() == null ? 0 : task.getAttemptCount()) + 1);
         taskMapper.updateById(task);
         if ("ENTITY".equals(task.getTaskType())) {
             CatalogEntityVO entity = catalogService.detail(entityType(task.getEntityType()), task.getEntityId());
-            if (entity == null) throw new IllegalArgumentException("projection entity no longer exists");
+            if (entity == null) throw new IllegalArgumentException("投影实体已不存在");
             return projectEntity(entity);
         }
         if ("RELATION".equals(task.getTaskType())) {
             CatalogRelationVO relation = catalogService.relation(task.getEntityType(), task.getEntityId());
-            if (relation == null) throw new IllegalArgumentException("projection relation no longer exists");
+            if (relation == null) throw new IllegalArgumentException("投影关系已不存在");
             return projectRelation(relation);
         }
-        throw new IllegalArgumentException("unsupported projection task type");
+        throw new IllegalArgumentException("不支持的投影任务类型");
     }
 
     public java.util.List<CatalogProjectionTask> tasks() {
@@ -134,11 +134,11 @@ public class CatalogProjectionService {
     private void complete(CatalogProjectionTask task, String status, String error) { task.setStatus(status); task.setLastError(error == null ? null : error.substring(0, Math.min(error.length(), 500))); taskMapper.updateById(task); }
     private void upsertChunk(EntityType type, CatalogEntityVO entity) { ContentChunk current=chunkMapper.selectOne(new LambdaQueryWrapper<ContentChunk>().eq(ContentChunk::getEntityType,type).eq(ContentChunk::getEntityId,entity.getEntityId()).eq(ContentChunk::getChunkIndex,1).last("LIMIT 1")); if(current==null){current=new ContentChunk();current.setEntityType(type);current.setEntityId(entity.getEntityId());current.setChunkIndex(1);} current.setChunkTitle(entity.getName());current.setChunkText(String.join("\n", text(entity.getSummary()), text(entity.getDetail()), text(entity.getTargetGrade())));current.setTokenCount(current.getChunkText().length());current.setEmbeddingStatus(EmbeddingStatus.PENDING);if(current.getChunkId()==null)chunkMapper.insert(current);else chunkMapper.updateById(current); }
     private void deleteChunk(EntityType type, Long id) { chunkMapper.delete(new LambdaQueryWrapper<ContentChunk>().eq(ContentChunk::getEntityType,type).eq(ContentChunk::getEntityId,id)); }
-    private EntityType entityType(String value) { for(EntityType type:EntityType.values())if(type.getValue().equals(value))return type; throw new IllegalArgumentException("unsupported entity type"); }
-    private String label(EntityType type) { return switch(type){case RESOURCE -> "Resource";case SITE -> "Site";case MEMORIAL -> "Memorial";case HERO -> "Hero";case EVENT -> "Event";case STORY -> "Story";default -> throw new IllegalArgumentException("unsupported projection type");}; }
+    private EntityType entityType(String value) { for(EntityType type:EntityType.values())if(type.getValue().equals(value))return type; throw new IllegalArgumentException("不支持的实体类型"); }
+    private String label(EntityType type) { return switch(type){case RESOURCE -> "Resource";case SITE -> "Site";case MEMORIAL -> "Memorial";case HERO -> "Hero";case EVENT -> "Event";case STORY -> "Story";default -> throw new IllegalArgumentException("不支持的投影类型");}; }
     private String relationship(String value) {
         String normalized=value==null?"":value.trim().toUpperCase().replaceAll("[^A-Z_]", "");
-        if(normalized.isBlank())throw new IllegalArgumentException("unsupported relationship type");
+        if(normalized.isBlank())throw new IllegalArgumentException("不支持的关系类型");
         return switch (normalized) {
             case "PARTICIPANT" -> "PARTICIPATED_IN";
             case "WITNESS" -> "WITNESSED";

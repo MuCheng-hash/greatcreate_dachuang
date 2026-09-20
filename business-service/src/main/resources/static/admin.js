@@ -1568,7 +1568,7 @@ async function streamAgentDebug(url, body, signal) {
             const payload = await response.json();
             message = payload.message || message;
         } catch {
-            // SSE error responses may not be JSON.
+// SSE 错误响应不一定是 JSON。
         }
         throw new Error(message);
     }

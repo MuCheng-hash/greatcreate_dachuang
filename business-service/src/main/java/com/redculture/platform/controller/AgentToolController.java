@@ -42,7 +42,7 @@ public class AgentToolController {
     public ApiResponse<Map<String, Object>> health(
             @RequestHeader(value = SERVICE_TOKEN_HEADER, required = false) String token) {
         if (!authorized(token)) {
-            return ApiResponse.fail(403, "agent service token is invalid");
+            return ApiResponse.fail(403, "Agent 服务令牌无效");
         }
         return ApiResponse.success(Map.of("status", "up", "service", "business-service"));
     }
@@ -51,7 +51,7 @@ public class AgentToolController {
     public ApiResponse<Map<String, Object>> webSourceDomains(
             @RequestHeader(value = SERVICE_TOKEN_HEADER, required = false) String token) {
         if (!authorized(token)) {
-            return ApiResponse.fail(403, "agent service token is invalid");
+            return ApiResponse.fail(403, "Agent 服务令牌无效");
         }
         return ApiResponse.success(Map.of("domains", ragWebSourceService.enabledDomains()));
     }
@@ -62,7 +62,7 @@ public class AgentToolController {
             @RequestHeader(value = SERVICE_TOKEN_HEADER, required = false) String token,
             @RequestBody AgentToolRequest request) {
         if (!authorized(token)) {
-            return ApiResponse.fail(403, "agent service token is invalid");
+            return ApiResponse.fail(403, "Agent 服务令牌无效");
         }
         try {
             return ApiResponse.success(agentToolService.schoolContext(request));
@@ -77,7 +77,7 @@ public class AgentToolController {
             @RequestHeader(value = SERVICE_TOKEN_HEADER, required = false) String token,
             @RequestBody AgentToolRequest request) {
         if (!authorized(token)) {
-            return ApiResponse.fail(403, "agent service token is invalid");
+            return ApiResponse.fail(403, "Agent 服务令牌无效");
         }
         try {
             return ApiResponse.success(agentToolService.resourceDetail(request));
@@ -92,7 +92,7 @@ public class AgentToolController {
             @RequestHeader(value = SERVICE_TOKEN_HEADER, required = false) String token,
             @RequestBody AgentToolRequest request) {
         if (!authorized(token)) {
-            return ApiResponse.fail(403, "agent service token is invalid");
+            return ApiResponse.fail(403, "Agent 服务令牌无效");
         }
         try {
             return ApiResponse.success(agentToolService.knowledgeRetrieve(request));
@@ -107,7 +107,7 @@ public class AgentToolController {
             @RequestHeader(value = SERVICE_TOKEN_HEADER, required = false) String token,
             @RequestBody AgentToolRequest request) {
         if (!authorized(token)) {
-            return ApiResponse.fail(403, "agent service token is invalid");
+            return ApiResponse.fail(403, "Agent 服务令牌无效");
         }
         try {
             return ApiResponse.success(agentToolService.relationQuery(request));

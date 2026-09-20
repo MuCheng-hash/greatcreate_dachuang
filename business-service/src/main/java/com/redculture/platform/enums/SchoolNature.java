@@ -49,7 +49,7 @@ public enum SchoolNature {
                 return item;
             }
         }
-        throw new IllegalArgumentException("unsupported schoolNature: " + value);
+        throw new IllegalArgumentException("不支持的 schoolNature：" + value);
     }
 
     /**

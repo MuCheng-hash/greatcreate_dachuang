@@ -34,7 +34,7 @@ public class TeacherRegistrationInviteServiceImpl implements TeacherRegistration
     @Override
     public TeacherRegistrationInviteVO createForSchool(Long schoolId, AuthCurrentUserVO user) {
         requirePlatformAdmin(user);
-        if (schoolId == null) throw new IllegalArgumentException("schoolId is required");
+        if (schoolId == null) throw new IllegalArgumentException("schoolId 不能为空");
         return createForSchoolInternal(schoolId, user.getAccountId());
     }
 
@@ -63,7 +63,7 @@ public class TeacherRegistrationInviteServiceImpl implements TeacherRegistration
     @Override
     public List<TeacherRegistrationInviteVO> listForSchool(Long schoolId, AuthCurrentUserVO user) {
         requirePlatformAdmin(user);
-        if (schoolId == null) throw new IllegalArgumentException("schoolId is required");
+        if (schoolId == null) throw new IllegalArgumentException("schoolId 不能为空");
         return listBySchool(schoolId);
     }
 
@@ -77,11 +77,11 @@ public class TeacherRegistrationInviteServiceImpl implements TeacherRegistration
     @Override
     public void revoke(Long inviteId, AuthCurrentUserVO user) {
         if (user == null || !Set.of("school_admin", "platform_admin").contains(user.getRoleCode())) {
-            throw new IllegalArgumentException("administrator access required");
+            throw new IllegalArgumentException("需要管理员权限");
         }
         TeacherRegistrationInvite invite = inviteMapper.selectById(inviteId);
         if (invite == null || ("school_admin".equals(user.getRoleCode()) && !user.getSchoolId().equals(invite.getSchoolId()))) {
-            throw new IllegalArgumentException("invite not found");
+            throw new IllegalArgumentException("邀请码不存在");
         }
         invite.setStatus("revoked");
         invite.setRevokedAt(LocalDateTime.now());
@@ -90,12 +90,12 @@ public class TeacherRegistrationInviteServiceImpl implements TeacherRegistration
 
     private void requireSchoolAdmin(AuthCurrentUserVO user) {
         if (user == null || !"school_admin".equals(user.getRoleCode()) || user.getSchoolId() == null) {
-            throw new IllegalArgumentException("school administrator access required");
+            throw new IllegalArgumentException("需要学校管理员权限");
         }
     }
 
     private void requirePlatformAdmin(AuthCurrentUserVO user) {
-        if (user == null || !"platform_admin".equals(user.getRoleCode())) throw new IllegalArgumentException("platform administrator access required");
+        if (user == null || !"platform_admin".equals(user.getRoleCode())) throw new IllegalArgumentException("需要平台管理员权限");
     }
 
     private String nextCode() {

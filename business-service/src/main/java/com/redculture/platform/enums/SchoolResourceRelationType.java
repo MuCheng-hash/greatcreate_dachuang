@@ -65,7 +65,7 @@ public enum SchoolResourceRelationType {
                 return type;
             }
         }
-        throw new IllegalArgumentException("unsupported relationType: " + value);
+        throw new IllegalArgumentException("不支持的 relationType：" + value);
     }
 
     /**

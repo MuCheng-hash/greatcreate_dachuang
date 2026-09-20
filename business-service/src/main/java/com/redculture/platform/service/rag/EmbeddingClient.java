@@ -9,7 +9,7 @@ public interface EmbeddingClient {
     default float[] embed(String text) {
         List<float[]> embeddings = embed(List.of(text));
         if (embeddings.size() != 1) {
-            throw new IllegalStateException("embedding provider returned an unexpected result count");
+            throw new IllegalStateException("嵌入服务返回了非预期数量的结果");
         }
         return embeddings.getFirst();
     }

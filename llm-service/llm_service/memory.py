@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 
 def estimate_tokens(text: str) -> int:
-    # Conservative for mixed Chinese/English without coupling to a provider tokenizer.
+# 针对中英文混合内容采取保守策略，不绑定具体提供方的分词器。
     return max(1, (len(text) + 1) // 2)
 
 

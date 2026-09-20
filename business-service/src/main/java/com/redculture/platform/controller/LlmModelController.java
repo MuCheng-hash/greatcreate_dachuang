@@ -25,7 +25,7 @@ public class LlmModelController {
     @GetMapping
     public Mono<ApiResponse<List<LlmModelOption>>> list(HttpServletRequest request) {
         if (AuthContext.currentUser(request) == null) {
-            return Mono.just(ApiResponse.fail(401, "school account is required"));
+            return Mono.just(ApiResponse.fail(401, "需要学校账号"));
         }
         return agentRuntimeClient.listModels()
                 .map(ApiResponse::success)

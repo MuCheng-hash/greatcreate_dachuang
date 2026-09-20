@@ -11,10 +11,12 @@ from .database import Database
 
 
 class ThreadNotFoundError(LookupError):
+    """指定会话不存在，或已不在当前持久化存储中。"""
     pass
 
 
 class ThreadScopeError(PermissionError):
+    """会话所有者或学校/区域范围与经认证请求不一致。"""
     pass
 
 
@@ -54,12 +56,19 @@ class ThreadSummaryRecord:
 
 
 class ConversationRepository:
+    """会话、消息、摘要及工具审计的 PostgreSQL 持久化边界。
+
+    所有会话读取与状态修改都以 ``owner_id``、``scope_type`` 和 ``scope_id`` 为
+    数据所有权边界。该仓库保存已验证的应用层数据，不接受模型自行声明的范围。
+    """
     def __init__(self, database: Database):
         self.database = database
 
     async def create_thread(
         self, owner_id: str, scope_type: str, scope_id: str | int
     ) -> ThreadRecord:
+        """在指定账号和范围下创建活动会话，并持久化其初始摘要游标。"""
+        # 会话标识在应用层生成，使创建结果无需依赖数据库的序列返回值。
         now = utc_now()
         record = ThreadRecord(
             thread_id=str(uuid.uuid4()),
@@ -73,6 +82,7 @@ class ConversationRepository:
             updated_at=_iso(now),
         )
         async with self.database.transaction() as connection:
+            # 新会话必须以空摘要开始；摘要游标隐含地从第一条消息之前的位置起算。
             await connection.execute(
                 """
                 INSERT INTO agent_thread(
@@ -100,9 +110,10 @@ class ConversationRepository:
         scope_type: str | None = None,
         scope_id: str | int | None = None,
     ) -> ThreadRecord:
+        """读取会话并强制校验调用者身份与范围；不匹配时不泄露会话是否存在。"""
         record = await self.get_thread(thread_id, owner_id, scope_type, scope_id)
         if record.status != "active":
-            raise ThreadScopeError("thread is archived")
+            raise ThreadScopeError("会话已归档")
         return record
 
     async def get_thread(
@@ -112,6 +123,7 @@ class ConversationRepository:
         scope_type: str | None = None,
         scope_id: str | int | None = None,
     ) -> ThreadRecord:
+        """读取会话，并以传入的已认证账号和可选范围限制访问。"""
         async with self.database.connection() as connection:
             row = await (
                 await connection.execute(
@@ -120,12 +132,14 @@ class ConversationRepository:
                 )
             ).fetchone()
         if row is None:
+            # 查询条件已包含 owner_id，避免仅凭 thread_id 探测其他账号的会话存在。
             raise ThreadNotFoundError(thread_id)
         record = self._thread_from_row(row)
         if scope_type is not None and record.scope_type != scope_type:
-            raise ThreadScopeError("thread scope does not match")
+            # 账号相同也不能跨学校、区域或资源范围复用会话。
+            raise ThreadScopeError("会话范围不匹配")
         if scope_id is not None and record.scope_id != str(scope_id):
-            raise ThreadScopeError("thread scope does not match")
+            raise ThreadScopeError("会话范围不匹配")
         return record
 
     async def list_threads(
@@ -137,6 +151,7 @@ class ConversationRepository:
         limit: int = 50,
         status: str = "active",
     ) -> list[ThreadSummaryRecord]:
+        """分页列出当前账号在指定范围内可见的会话摘要，不返回跨范围记录。"""
         normalized_status = self._normalize_thread_status(status)
         clauses = ["t.owner_id = %s", "t.status = %s"]
         parameters: list[Any] = [owner_id, normalized_status]
@@ -147,6 +162,7 @@ class ConversationRepository:
             clauses.append("t.scope_id = %s")
             parameters.append(str(scope_id))
         clauses.append(
+            # 仅列出与当前任务类型关联的会话，避免不同 Agent 任务在会话列表混杂。
             "EXISTS (SELECT 1 FROM agent_message tm WHERE tm.thread_id = t.thread_id "
             "AND tm.role = 'user' AND tm.metadata_json ->> 'taskType' = %s)"
         )
@@ -191,6 +207,7 @@ class ConversationRepository:
         content: str,
         metadata: dict[str, Any] | None = None,
     ) -> int:
+        """追加消息及其元数据；调用者须先完成会话所有权校验。"""
         now = utc_now()
         async with self.database.transaction() as connection:
             row = await (
@@ -205,12 +222,14 @@ class ConversationRepository:
                 )
             ).fetchone()
             await connection.execute(
+                # 消息写入与会话更新时间必须同一事务提交，列表排序才反映真实最后活动时间。
                 "UPDATE agent_thread SET updated_at = %s WHERE thread_id = %s",
                 (now, thread_id),
             )
         return int((row or {})["id"])
 
     async def count_completed_formal_account_chat_turns(self) -> int:
+        """统计已完成且来源为正式账号的聊天轮次，供运行指标使用。"""
         async with self.database.connection() as connection:
             row = await (
                 await connection.execute(
@@ -232,6 +251,7 @@ class ConversationRepository:
         return int((row or {}).get("completed_question_count") or 0)
 
     async def list_messages(self, thread_id: str) -> list[dict[str, Any]]:
+        """按持久化顺序读取会话消息；范围校验由上层会话入口负责。"""
         async with self.database.connection() as connection:
             rows = await (
                 await connection.execute(
@@ -256,6 +276,7 @@ class ConversationRepository:
     async def list_context_messages(self, thread_id: str) -> list[dict[str, Any]]:
         """只返回可进入后续模型上下文的正式历史。"""
         async with self.database.connection() as connection:
+            # 中断、失败和等待确认的轮次不能进入模型历史，防止把半成品当作事实。
             rows = await (
                 await connection.execute(
                     """
@@ -283,6 +304,7 @@ class ConversationRepository:
     async def list_messages_for_turn(
         self, turn_id: str
     ) -> list[dict[str, Any]]:
+        """读取单轮次已持久化消息，用于恢复和审计而非模型上下文拼接。"""
         async with self.database.connection() as connection:
             rows = await (
                 await connection.execute(
@@ -314,6 +336,11 @@ class ConversationRepository:
         scope_type: str,
         scope_id: str | int,
     ) -> dict[str, Any] | None:
+        """在调用者所属范围内查找已完成轮次的助手回复。
+
+        未完成轮次的消息不会作为可恢复的正式回复返回，避免客户端将部分输出误认为
+        已提交结果。
+        """
         async with self.database.connection() as connection:
             row = await (
                 await connection.execute(
@@ -357,6 +384,11 @@ class ConversationRepository:
         expected_cursor: int = 0,
         new_cursor: int = 0,
     ) -> bool:
+        """以摘要游标的乐观并发条件提交压缩结果。
+
+        返回 ``False`` 表示另一执行者已经推进游标；调用方应重新读取会话后构建
+        新窗口，不能用旧摘要覆盖较新的上下文。
+        """
         async with self.database.transaction() as connection:
             row = await (
                 await connection.execute(
@@ -385,6 +417,7 @@ class ConversationRepository:
     async def find_tool_audit(
         self, turn_id: str, tool_call_id: str
     ) -> dict[str, Any] | None:
+        """按轮次和确定性工具调用键查询既有审计结果，支持幂等恢复。"""
         async with self.database.connection() as connection:
             row = await (
                 await connection.execute(
@@ -410,6 +443,11 @@ class ConversationRepository:
         turn_id: str | None = None,
         tool_call_id: str | None = None,
     ) -> dict[str, Any]:
+        """持久化工具执行摘要，并按 ``turn_id``/``tool_call_id`` 实现回放语义。
+
+        非失败记录在冲突时保持原值，确保恢复不会覆盖已完成事实；失败记录允许被
+        后续重试结果替换。传入参数应已脱敏，仓库不会再解释或过滤其业务字段。
+        """
         async with self.database.transaction() as connection:
             row = await (
                 await connection.execute(
@@ -442,6 +480,7 @@ class ConversationRepository:
                 )
             ).fetchone()
             if row is None and turn_id and tool_call_id:
+                # 非失败审计记录拒绝被覆盖时没有 RETURNING 行，读取既有事实作为恢复结果。
                 row = await (
                     await connection.execute(
                         """
@@ -465,6 +504,7 @@ class ConversationRepository:
         status: str | None = None,
         limit: int = 50,
     ) -> list[dict[str, Any]]:
+        """按可选工具名和状态查询受限数量的审计记录，供受控运维视图使用。"""
         clauses: list[str] = []
         parameters: list[Any] = []
         if tool_name and tool_name.strip():
@@ -508,6 +548,7 @@ class ConversationRepository:
         scope_type: str | None = None,
         scope_id: str | int | None = None,
     ) -> None:
+        """将当前调用者可见的活动会话归档；归档后不允许继续写入该会话。"""
         await self._change_status(
             thread_id,
             owner_id,
@@ -524,6 +565,7 @@ class ConversationRepository:
         scope_type: str | None = None,
         scope_id: str | int | None = None,
     ) -> None:
+        """恢复当前调用者可见的归档会话；不改变其原始账号和范围归属。"""
         async with self.database.transaction() as connection:
             row = await (
                 await connection.execute(
@@ -540,9 +582,10 @@ class ConversationRepository:
             record = self._thread_from_row(row)
             self._validate_scope(record, scope_type, scope_id)
             if record.status == "active":
+                # 恢复接口对活动会话幂等，重复调用不会改变更新时间或消息内容。
                 return
             if record.status != "archived":
-                raise ThreadScopeError("thread status does not match")
+                raise ThreadScopeError("会话状态不匹配")
             await connection.execute(
                 "UPDATE agent_thread SET status = 'active', updated_at = %s WHERE thread_id = %s",
                 (utc_now(), thread_id),
@@ -557,6 +600,7 @@ class ConversationRepository:
         scope_type: str | None,
         scope_id: str | int | None,
     ) -> None:
+        """在所有权、范围和当前状态同时匹配时执行单向状态迁移。"""
         async with self.database.transaction() as connection:
             row = await (
                 await connection.execute(
@@ -573,7 +617,7 @@ class ConversationRepository:
             record = self._thread_from_row(row)
             self._validate_scope(record, scope_type, scope_id)
             if record.status != expected_status:
-                raise ThreadScopeError("thread status does not match")
+                raise ThreadScopeError("会话状态不匹配")
             await connection.execute(
                 "UPDATE agent_thread SET status = %s, updated_at = %s WHERE thread_id = %s",
                 (next_status, utc_now(), thread_id),
@@ -602,9 +646,9 @@ class ConversationRepository:
         scope_id: str | int | None,
     ) -> None:
         if scope_type is not None and record.scope_type != scope_type:
-            raise ThreadScopeError("thread scope does not match")
+            raise ThreadScopeError("会话范围不匹配")
         if scope_id is not None and record.scope_id != str(scope_id):
-            raise ThreadScopeError("thread scope does not match")
+            raise ThreadScopeError("会话范围不匹配")
 
     @staticmethod
     def _preview(value: str | None, limit: int) -> str:
@@ -615,5 +659,5 @@ class ConversationRepository:
     def _normalize_thread_status(status: str) -> str:
         normalized = str(status or "").strip().lower()
         if normalized not in {"active", "archived"}:
-            raise ValueError("thread status must be active or archived")
+            raise ValueError("会话状态必须为 active 或 archived")
         return normalized

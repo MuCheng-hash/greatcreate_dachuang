@@ -68,9 +68,9 @@ import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 /**
- * Retrieves approved evidence with deterministic planning and scoped hybrid recall.
- * Agent and teaching-plan generation both consume this implementation through
- * {@link KnowledgeRetriever}; Dense and MySQL Lexical candidates are fused by RRF.
+ * 通过确定性规划和限定范围的混合召回检索已审核证据。
+ * Agent 与教学方案生成均通过 {@link KnowledgeRetriever} 使用此实现；
+ * 稠密检索候选和 MySQL 词法候选通过 RRF 融合。
  */
 @Component
 @Profile("!mock-rag")
@@ -172,19 +172,28 @@ public class DatabaseKnowledgeRetriever implements KnowledgeRetriever {
     }
 
     @Override
+    /**
+     * 从已审核数据中执行范围受限的混合检索。
+     * 入口先校验请求并确定意图与实体范围，再融合向量、词法和图谱证据；单一通道失败会降级，
+     * 但不会用范围外或未审核实体弥补结果。
+     */
     public KnowledgeRetrieveResult retrieve(KnowledgeRetrieveRequest request) {
+        // 缺少查询或可信范围时直接返回空结果，不把不完整请求扩展为全库检索。
         if (!validRequest(request)) {
             return KnowledgeRetrieveResult.empty();
         }
 
         try {
+            // 上下文先固定可见实体集合，后续所有候选通道只能在该集合内执行。
             RetrievalContext context = loadContext(request);
             RetrievalPlan plan = buildPlan(request, context);
+            // 分块召回、来源关系和重排分层执行，使任一非关键通道失败仍可保留其他已审核证据。
             ChunkLoad chunkLoad = loadChunks(plan, request);
             SourceContext sourceContext = loadSourceContext(plan, context, chunkLoad.chunks());
             RerankLoad rerankLoad = rerank(plan, context, chunkLoad, sourceContext);
             List<KnowledgeCitationCandidateVO> candidates = new ArrayList<>(rerankLoad.jointCandidates());
             candidates.addAll(buildSourceCandidates(sourceContext));
+            // 候选先去重再限额，避免同一资料以多个通道重复占用模型引用预算。
             candidates = limitList(deduplicateCandidates(candidates), MAX_CITATIONS);
             List<String> retrievalMethods = new ArrayList<>(chunkLoad.retrievalMethods());
             if (!rerankLoad.evidences().isEmpty()) {
@@ -209,6 +218,7 @@ public class DatabaseKnowledgeRetriever implements KnowledgeRetriever {
                     result.getRetrievalMethods()));
             return result;
         } catch (RuntimeException exception) {
+            // 检索基础设施异常只降级本次回答，不能将异常转换为范围外数据或中断调用方的恢复流程。
             log.warn("Knowledge retrieval failed", exception);
             return KnowledgeRetrieveResult.degraded();
         }
@@ -233,6 +243,7 @@ public class DatabaseKnowledgeRetriever implements KnowledgeRetriever {
 
         switch (request.getScopeType()) {
             case SCHOOL -> {
+                // 学校范围以聚合详情作为授权目录；仅详情中可见的资源才允许进入候选实体集合。
                 SchoolMapDetailVO detail = schoolMapService.getSchoolDetail(request.getScopeId());
                 if (detail == null) {
                     return new RetrievalContext(Collections.emptyMap(), Collections.emptyList(),
@@ -245,6 +256,7 @@ public class DatabaseKnowledgeRetriever implements KnowledgeRetriever {
                         school == null ? null : school.getSchoolName());
                 if (detail.getResources() != null) {
                     for (SchoolResourceItemVO item : detail.getResources()) {
+                        // 无资源标识或不符合教学条件的关联不能作为模型证据，避免将展示用关联混入检索。
                         if (item == null || item.getResourceId() == null) {
                             continue;
                         }
@@ -317,6 +329,7 @@ public class DatabaseKnowledgeRetriever implements KnowledgeRetriever {
                 : Math.max(1, ragProperties.getGraphCandidateLimit());
         int expandedCount = 0;
         for (KnowledgeGraphFactVO fact : graphFacts) {
+            // 图谱扩展有意受限；关系问答与附近资源分别使用不同上限，防止路径遍历扩大可见范围。
             if (fact == null || fact.getObjectId() == null || expandedCount >= expansionLimit) {
                 continue;
             }
@@ -342,6 +355,7 @@ public class DatabaseKnowledgeRetriever implements KnowledgeRetriever {
                 ? Collections.emptyMap()
                 : entityMetadataService.loadApproved(validationIds);
         if (entityMetadataService != null) {
+            // 即使图谱返回了实体，也必须二次按审核元数据过滤，图数据库不是授权来源。
             expanded = filterApprovedEntityIds(expanded, metadata);
             metadata.values().forEach(item -> addEntityHint(entityHints, item.entityType(), item.entityId(),
                     Stream.concat(Stream.of(item.canonicalName()), item.aliases().stream())
@@ -349,6 +363,7 @@ public class DatabaseKnowledgeRetriever implements KnowledgeRetriever {
         }
 
         List<KnowledgeGraphFactVO> approvedFacts = graphFacts.stream()
+                // 图谱事实与实体审核采用同一边界，名称仅在过滤后补齐，避免未审核名称进入提示词。
                 .filter(Objects::nonNull)
                 .filter(fact -> approvedGraphFact(intent, fact, approvedSchoolResourceIds, metadata))
                 .peek(fact -> enrichGraphFactNames(fact, metadata))
@@ -672,7 +687,7 @@ public class DatabaseKnowledgeRetriever implements KnowledgeRetriever {
                 AgentIntent provided = AgentIntent.valueOf(request.getIntent().trim().toUpperCase(Locale.ROOT));
                 return provided;
             } catch (IllegalArgumentException ignored) {
-                // Fall through to the deterministic keyword recognizer.
+                // 转入确定性的关键词识别器。
             }
         }
         String normalized = normalize(request == null ? null : request.getQuery());
@@ -1414,8 +1429,8 @@ public class DatabaseKnowledgeRetriever implements KnowledgeRetriever {
         List<ScoredWebEvidence> result = new ArrayList<>();
         for (int index = 0; index < accepted.size(); index++) {
             WebEvidenceVO item = accepted.get(index);
-            // Tavily's provider score is not comparable to local vector/FTS scores.
-            // Treat its response order as a ranked route and put it into the same RRF scale.
+            // Tavily 提供方的分数不能与本地向量或 FTS 分数直接比较。
+            // 将其响应顺序视为排序路线，并映射到相同的 RRF 分数范围。
             double rrfScore = ragProperties.getWebRrfWeight()
                     / (ragProperties.getRrfK() + Math.max(1, index + 1));
             result.add(new ScoredWebEvidence(item, rrfScore));

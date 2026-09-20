@@ -70,6 +70,10 @@ public class TeachingActivityPlanServiceImpl extends ServiceImpl<TeachingActivit
     }
 
     @Override
+    /**
+     * 创建方案及其资源关联。先验证学校、资源和方案编号，再写入主体后替换关联，
+     * 使 AI 草稿和后台手工创建使用同一份数据完整性规则。
+     */
     public TeachingActivityPlanAdminVO createPlan(TeachingActivityPlanCreateRequest request) {
         validateCreateRequest(request);
         ensurePlanCodeUnique(request.getPlanCode(), null);
@@ -103,9 +107,10 @@ public class TeachingActivityPlanServiceImpl extends ServiceImpl<TeachingActivit
     }
 
     @Override
+    /** 更新后台方案；资源列表存在时整体替换关联，空值则表示保持既有关联不变。 */
     public TeachingActivityPlanAdminVO updatePlan(Long planId, TeachingActivityPlanUpdateRequest request) {
         if (request == null) {
-            throw new IllegalArgumentException("request cannot be null");
+            throw new IllegalArgumentException("请求不能为空");
         }
         TeachingActivityPlan plan = requirePlan(planId);
         ensureResourceExistsIfNeeded(request.getResourceId());
@@ -145,6 +150,7 @@ public class TeachingActivityPlanServiceImpl extends ServiceImpl<TeachingActivit
                                                              ReviewStatus reviewStatus,
                                                              Long pageNum,
                                                              Long pageSize) {
+        // 分页参数先规范化并限制上限，防止管理端误传过大 pageSize 拉取整校方案。
         long safePageNum = pageNum == null || pageNum <= 0 ? DEFAULT_PAGE_NUM : pageNum;
         long safePageSize = pageSize == null || pageSize <= 0 ? DEFAULT_PAGE_SIZE : Math.min(pageSize, MAX_PAGE_SIZE);
 
@@ -155,6 +161,7 @@ public class TeachingActivityPlanServiceImpl extends ServiceImpl<TeachingActivit
                 .orderByDesc(TeachingActivityPlan::getCreatedAt);
 
         if (StringUtils.hasText(theme)) {
+            // 主题采用模糊筛选，输入仅参与参数绑定而不拼接 SQL。
             wrapper.like(TeachingActivityPlan::getTheme, theme.trim());
         }
         if (StringUtils.hasText(activityType)) {
@@ -173,7 +180,7 @@ public class TeachingActivityPlanServiceImpl extends ServiceImpl<TeachingActivit
     @Override
     public PageResult<TeachingActivityPlanAdminVO> listBySchoolId(Long schoolId, Long pageNum, Long pageSize) {
         if (schoolId == null) {
-            throw new IllegalArgumentException("schoolId is required");
+            throw new IllegalArgumentException("schoolId 不能为空");
         }
         return pagePlans(schoolId, null, null, null, null, pageNum, pageSize);
     }
@@ -182,7 +189,8 @@ public class TeachingActivityPlanServiceImpl extends ServiceImpl<TeachingActivit
     public PageResult<TeachingActivityPlanAdminVO> listMine(AuthCurrentUserVO user, String grade, String theme,
                                                             Long resourceId, LocalDateTime createdFrom,
                                                             LocalDateTime createdTo, Long pageNum, Long pageSize) {
-        if (user == null || user.getAccountId() == null || user.getSchoolId() == null) throw new IllegalArgumentException("authenticated school account is required");
+        // “我的方案”同时以账号和学校过滤；仅账号匹配不足以防御账号迁校或脏数据造成的越权展示。
+        if (user == null || user.getAccountId() == null || user.getSchoolId() == null) throw new IllegalArgumentException("需要已认证的学校账号");
         validateFilters(grade, theme, createdFrom, createdTo);
         long safePageNum = pageNum == null || pageNum <= 0 ? DEFAULT_PAGE_NUM : pageNum;
         long safePageSize = pageSize == null || pageSize <= 0 ? 20L : Math.min(pageSize, MAX_PAGE_SIZE);
@@ -195,6 +203,7 @@ public class TeachingActivityPlanServiceImpl extends ServiceImpl<TeachingActivit
         if (createdFrom != null) wrapper.ge(TeachingActivityPlan::getCreatedAt, createdFrom);
         if (createdTo != null) wrapper.le(TeachingActivityPlan::getCreatedAt, createdTo);
         if (resourceId != null) {
+            // 资源可作为主资源或关联资源命中，EXISTS 避免关联表多行导致分页记录重复。
             wrapper.and(q -> q.eq(TeachingActivityPlan::getResourceId, resourceId)
                     .or().apply("EXISTS (SELECT 1 FROM teaching_activity_plan_resource r WHERE r.plan_id = teaching_activity_plan.id AND r.resource_id = {0})", resourceId));
         }
@@ -203,13 +212,14 @@ public class TeachingActivityPlanServiceImpl extends ServiceImpl<TeachingActivit
     }
 
     private void validateFilters(String grade, String theme, LocalDateTime from, LocalDateTime to) {
-        if (StringUtils.hasText(grade) && grade.trim().length() > 100) throw new IllegalArgumentException("grade is too long");
-        if (StringUtils.hasText(theme) && theme.trim().length() > 200) throw new IllegalArgumentException("theme is too long");
-        if (from != null && to != null && from.isAfter(to)) throw new IllegalArgumentException("createdFrom must not be after createdTo");
+        if (StringUtils.hasText(grade) && grade.trim().length() > 100) throw new IllegalArgumentException("grade 长度过长");
+        if (StringUtils.hasText(theme) && theme.trim().length() > 200) throw new IllegalArgumentException("主题长度过长");
+        if (from != null && to != null && from.isAfter(to)) throw new IllegalArgumentException("createdFrom 不能晚于 createdTo");
     }
 
     @Override
     public byte[] exportMine(Long planId, AuthCurrentUserVO user) throws IOException {
+        // 导出前先做所有权校验；只有已确认归属的方案才会进入内存中的文档生成流程。
         TeachingActivityPlan plan = requireOwned(planId, user);
         TeachingActivityPlanAdminVO vo = buildAdminVO(plan);
         try (XWPFDocument document = new XWPFDocument(); ByteArrayOutputStream output = new ByteArrayOutputStream()) {
@@ -224,6 +234,7 @@ public class TeachingActivityPlanServiceImpl extends ServiceImpl<TeachingActivit
             addLine(document, "方案编号", vo.getPlanCode());
             addLine(document, "创建时间", vo.getCreatedAt() == null ? null : vo.getCreatedAt().format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm")));
             addPayloadOrText(document, vo);
+            // 所有段落构造完成后一次性写入输出流，避免返回半成品文档。
             document.write(output);
             return output.toByteArray();
         }
@@ -232,6 +243,7 @@ public class TeachingActivityPlanServiceImpl extends ServiceImpl<TeachingActivit
     @Override
     public TeachingActivityPlanAdminVO adoptMine(Long planId, AuthCurrentUserVO user) {
         TeachingActivityPlan plan = requireOwned(planId, user);
+        // 已采用时不重复写库，保证重复点击采用不会制造无意义的状态更新。
         if (plan.getReviewStatus() != ReviewStatus.ADOPTED) {
             plan.setReviewStatus(ReviewStatus.ADOPTED);
             updateById(plan);
@@ -242,6 +254,7 @@ public class TeachingActivityPlanServiceImpl extends ServiceImpl<TeachingActivit
     private void addPayloadOrText(XWPFDocument document, TeachingActivityPlanAdminVO vo) {
         JsonNode payload = null;
         if (StringUtils.hasText(vo.getPlanPayload())) {
+            // JSON 载荷可能来自历史生成记录；解析失败时退回结构化文本字段，导出不因旧数据中断。
             try { payload = objectMapper.readTree(vo.getPlanPayload()); } catch (Exception ignored) { }
         }
         addSection(document, "教学目标", payload == null ? splitLines(vo.getObjectiveText()) : arrayOrText(payload, "objectives", vo.getObjectiveText()));
@@ -273,12 +286,14 @@ public class TeachingActivityPlanServiceImpl extends ServiceImpl<TeachingActivit
 
     private List<String> resourceNames(List<Long> resourceIds) {
         if (resourceIds == null || resourceIds.isEmpty()) return List.of();
+        // 已删除资源被过滤而非抛错，使历史方案仍可导出，同时不虚构不存在的资源名称。
         return resourceIds.stream().map(localEduResourceService::getById).filter(java.util.Objects::nonNull)
                 .map(resource -> resource.getResourceName()).filter(StringUtils::hasText).toList();
     }
 
     private boolean practiceRequired(String payload) {
         if (!StringUtils.hasText(payload)) return false;
+        // 兼容非 JSON 的旧载荷：无法读取标记时按未标注处理，避免导出流程失败。
         try { return objectMapper.readTree(payload).path("practiceRequired").asBoolean(false); }
         catch (Exception ignored) { return false; }
     }
@@ -287,12 +302,17 @@ public class TeachingActivityPlanServiceImpl extends ServiceImpl<TeachingActivit
     private String clean(String value, String fallback) { return StringUtils.hasText(value) ? value.trim() : fallback; }
 
     @Override
+    /** 只查询认证用户账号和学校均匹配的方案，避免通过 planId 枚举其他教师的数据。 */
     public TeachingActivityPlanAdminVO getMine(Long planId, AuthCurrentUserVO user) {
         TeachingActivityPlan plan = requireOwned(planId, user);
         return buildAdminVO(plan);
     }
 
     @Override
+    /**
+     * 修改本人方案后将已采用或其他审核状态退回草稿，确保内容变更需要重新确认。
+     * 所有权验证先于通用更新逻辑，通用更新不会自行扩大账号范围。
+     */
     public TeachingActivityPlanAdminVO updateMine(Long planId, TeachingActivityPlanUpdateRequest request, AuthCurrentUserVO user) {
         TeachingActivityPlan plan = requireOwned(planId, user);
         TeachingActivityPlanAdminVO value = updatePlan(planId, request);
@@ -306,8 +326,10 @@ public class TeachingActivityPlanServiceImpl extends ServiceImpl<TeachingActivit
     }
 
     @Override
+    /** 复制方案时新建所有权、编号和资源关系，原方案及其审核状态保持不变。 */
     public TeachingActivityPlanAdminVO copyMine(Long planId, AuthCurrentUserVO user) {
         TeachingActivityPlan source = requireOwned(planId, user);
+        // 副本只继承教学内容，不继承原方案的审核/发布状态，必须作为新的草稿重新确认。
         TeachingActivityPlan copy = new TeachingActivityPlan();
         copy.setPlanCode("COPY_" + System.currentTimeMillis());
         copy.setSchoolId(source.getSchoolId());
@@ -328,26 +350,34 @@ public class TeachingActivityPlanServiceImpl extends ServiceImpl<TeachingActivit
         copy.setReviewStatus(ReviewStatus.DRAFT);
         copy.setActive(true);
         save(copy);
+        // 关联资源在新方案持久化后重建，关系始终指向新 planId，绝不复用原关系行。
         if (planResourceMapper != null) replaceResources(copy.getPlanId(), planResourceMapper.selectResourceIds(source.getPlanId()), copy.getSchoolId());
         return buildAdminVO(copy);
     }
 
+    /** 以账号和学校双重条件确认方案归属，对外统一表现为未找到，避免泄露跨校记录存在性。 */
     private TeachingActivityPlan requireOwned(Long planId, AuthCurrentUserVO user) {
-        if (user == null || user.getAccountId() == null || user.getSchoolId() == null) throw new IllegalArgumentException("authentication required");
+        if (user == null || user.getAccountId() == null || user.getSchoolId() == null) throw new IllegalArgumentException("需要完成身份认证");
         TeachingActivityPlan plan = getById(planId);
         if (plan == null || !user.getAccountId().equals(plan.getOwnerAccountId()) || !user.getSchoolId().equals(plan.getSchoolId())) {
-            throw new IllegalArgumentException("plan not found");
+            throw new IllegalArgumentException("教学方案不存在");
         }
         return plan;
     }
 
+    /**
+     * 在资源列表明确提供时原子语义地重建方案资源关联；每项先通过资源存在性校验，
+     * 并以输入顺序确定展示顺序和主资源，防止陈旧关联遗留在更新结果中。
+     */
     private void replaceResources(Long planId, List<Long> resourceIds, Long schoolId) {
         if (planResourceMapper == null || planId == null) return;
         if (resourceIds == null) return;
         List<Long> ids = resourceIds.stream().filter(java.util.Objects::nonNull).distinct().toList();
+        // 先完整校验再删除旧关联，避免半数资源非法时留下被清空的方案。
         for (Long id : ids) ensureResourceExistsIfNeeded(id);
         planResourceMapper.deleteByPlanId(planId);
         for (int i = 0; i < ids.size(); i++) {
+            // 输入顺序即展示顺序，首项兼容旧字段作为主资源。
             Long id = ids.get(i);
             com.redculture.platform.entity.TeachingActivityPlanResource relation = new com.redculture.platform.entity.TeachingActivityPlanResource();
             relation.setPlanId(planId); relation.setResourceId(id); relation.setSortOrder(i); relation.setPrimary(i == 0);
@@ -357,19 +387,19 @@ public class TeachingActivityPlanServiceImpl extends ServiceImpl<TeachingActivit
 
     private void validateCreateRequest(TeachingActivityPlanCreateRequest request) {
         if (request == null) {
-            throw new IllegalArgumentException("request cannot be null");
+            throw new IllegalArgumentException("请求不能为空");
         }
         if (!StringUtils.hasText(request.getPlanCode())) {
-            throw new IllegalArgumentException("planCode is required");
+            throw new IllegalArgumentException("planCode 不能为空");
         }
         if (request.getSchoolId() == null) {
-            throw new IllegalArgumentException("schoolId is required");
+            throw new IllegalArgumentException("schoolId 不能为空");
         }
         if (!StringUtils.hasText(request.getTheme())) {
-            throw new IllegalArgumentException("theme is required");
+            throw new IllegalArgumentException("主题不能为空");
         }
         if (!StringUtils.hasText(request.getActivityContent())) {
-            throw new IllegalArgumentException("activityContent is required");
+            throw new IllegalArgumentException("activityContent 不能为空");
         }
     }
 
@@ -380,29 +410,29 @@ public class TeachingActivityPlanServiceImpl extends ServiceImpl<TeachingActivit
             wrapper.ne(TeachingActivityPlan::getPlanId, excludePlanId);
         }
         if (count(wrapper) > 0) {
-            throw new IllegalArgumentException("planCode already exists");
+            throw new IllegalArgumentException("planCode 已存在");
         }
     }
 
     private void ensureSchoolExists(Long schoolId) {
         if (schoolService.getById(schoolId) == null) {
-            throw new IllegalArgumentException("school not found");
+            throw new IllegalArgumentException("学校不存在");
         }
     }
 
     private void ensureResourceExistsIfNeeded(Long resourceId) {
         if (resourceId != null && localEduResourceService.getById(resourceId) == null) {
-            throw new IllegalArgumentException("resource not found");
+            throw new IllegalArgumentException("资源不存在");
         }
     }
 
     private TeachingActivityPlan requirePlan(Long planId) {
         if (planId == null) {
-            throw new IllegalArgumentException("planId is required");
+            throw new IllegalArgumentException("planId 不能为空");
         }
         TeachingActivityPlan plan = getById(planId);
         if (plan == null) {
-            throw new IllegalArgumentException("plan not found");
+            throw new IllegalArgumentException("教学方案不存在");
         }
         return plan;
     }

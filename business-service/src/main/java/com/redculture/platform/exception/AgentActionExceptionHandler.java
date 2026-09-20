@@ -41,7 +41,7 @@ public class AgentActionExceptionHandler {
     @ExceptionHandler(AgentBusyException.class)
     public ResponseEntity<ApiResponse<Void>> handleAgentBusy(AgentBusyException exception) {
         return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE).body(
-                ApiResponse.fail(HttpStatus.SERVICE_UNAVAILABLE.value(), "agent_busy")
+                ApiResponse.fail(HttpStatus.SERVICE_UNAVAILABLE.value(), "Agent 当前繁忙，请稍后重试")
         );
     }
 

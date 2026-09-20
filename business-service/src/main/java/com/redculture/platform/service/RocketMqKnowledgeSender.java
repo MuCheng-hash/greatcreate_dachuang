@@ -21,7 +21,7 @@ public class RocketMqKnowledgeSender implements KnowledgeMessageSender {
             @Value("${app.knowledge-mq.request-timeout-seconds:10}") long requestTimeoutSeconds) {
         this.endpoints = endpoints;
         this.topic = topic;
-        if (requestTimeoutSeconds <= 0) throw new IllegalArgumentException("MQ request timeout must be positive");
+        if (requestTimeoutSeconds <= 0) throw new IllegalArgumentException("MQ 请求超时时间必须为正数");
         this.requestTimeout = Duration.ofSeconds(requestTimeoutSeconds);
     }
 

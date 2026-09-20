@@ -53,7 +53,7 @@ public enum GeoConfidenceLevel {
                 return item;
             }
         }
-        throw new IllegalArgumentException("unsupported geoConfidence: " + value);
+        throw new IllegalArgumentException("不支持的 geoConfidence：" + value);
     }
 
     /**

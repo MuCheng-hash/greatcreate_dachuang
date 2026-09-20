@@ -77,7 +77,7 @@ public class TeacherClassServiceImpl implements TeacherClassService {
     @Override
     public List<ClassTeacherVO> availableTeachers(AuthCurrentUserVO user) {
         requireAdmin(user);
-        if (user.getSchoolId() == null) throw new IllegalArgumentException("school account is required");
+        if (user.getSchoolId() == null) throw new IllegalArgumentException("需要学校账号");
         return teacherMapper.selectList(new LambdaQueryWrapper<TeacherProfile>().eq(TeacherProfile::getSchoolId, user.getSchoolId())
                         .eq(TeacherProfile::getStatus, ACTIVE).orderByAsc(TeacherProfile::getTeacherName)).stream()
                 .map(profile -> { ClassTeacherVO vo = new ClassTeacherVO(); vo.setTeacherId(profile.getTeacherId()); vo.setTeacherName(profile.getTeacherName()); return vo; }).toList();
@@ -93,7 +93,7 @@ public class TeacherClassServiceImpl implements TeacherClassService {
         entity.setStatus(ACTIVE);
         classMapper.insert(entity);
         replaceTeachers(entity.getClassId(), request);
-        // The creator may deliberately have no class-teacher relation after creation.
+        // 创建者在创建后可能有意不建立班主任关系。
         return joinedClassVO(entity);
     }
 
@@ -103,7 +103,7 @@ public class TeacherClassServiceImpl implements TeacherClassService {
         ClassInfo entity = requireClass(classId);
         requireAdmin(user);
         if (request != null && request.getSchoolId() != null && !request.getSchoolId().equals(entity.getSchoolId())) {
-            throw new IllegalArgumentException("class school cannot be changed");
+            throw new IllegalArgumentException("班级所属学校不能修改");
         }
         if (request != null) request.setSchoolId(entity.getSchoolId());
         validateSaveRequest(request, user);
@@ -164,7 +164,7 @@ public class TeacherClassServiceImpl implements TeacherClassService {
         requireAdmin(user);
         StudentProfile student = studentMapper.selectById(studentId);
         if (student == null || !ACTIVE.equals(student.getStatus()) || !entity.getSchoolId().equals(student.getSchoolId())) {
-            throw new IllegalArgumentException("student must be an active student in this school");
+            throw new IllegalArgumentException("学生必须是本校在读学生");
         }
         addOrRestoreMember(entity.getClassId(), student.getStudentId(), "manual");
         assignPublishedTasks(entity.getClassId(), student.getStudentId());
@@ -176,7 +176,7 @@ public class TeacherClassServiceImpl implements TeacherClassService {
         requireAdmin(user);
         ClassMember member = classMemberMapper.selectOne(new LambdaQueryWrapper<ClassMember>()
                 .eq(ClassMember::getClassId, classId).eq(ClassMember::getStudentId, studentId).last("LIMIT 1"));
-        if (member == null || !ACTIVE.equals(member.getStatus())) throw new IllegalArgumentException("student is not in this class");
+        if (member == null || !ACTIVE.equals(member.getStatus())) throw new IllegalArgumentException("学生不在该班级中");
         member.setStatus("removed");
         member.setPrimaryClass(false);
         classMemberMapper.updateById(member);
@@ -192,13 +192,13 @@ public class TeacherClassServiceImpl implements TeacherClassService {
         for (String raw : numbers) {
             String studentNo = raw == null ? "" : raw.trim();
             try {
-                if (!StringUtils.hasText(studentNo)) throw new IllegalArgumentException("student number is required");
+                if (!StringUtils.hasText(studentNo)) throw new IllegalArgumentException("学号不能为空");
                 StudentProfile student = studentMapper.selectOne(new LambdaQueryWrapper<StudentProfile>()
                         .eq(StudentProfile::getSchoolId, entity.getSchoolId()).eq(StudentProfile::getStudentNo, studentNo).last("LIMIT 1"));
-                if (student == null || !ACTIVE.equals(student.getStatus())) throw new IllegalArgumentException("student not found or inactive");
+                if (student == null || !ACTIVE.equals(student.getStatus())) throw new IllegalArgumentException("学生不存在或未启用");
                 Long existing = classMemberMapper.selectCount(new LambdaQueryWrapper<ClassMember>().eq(ClassMember::getClassId, classId)
                         .eq(ClassMember::getStudentId, student.getStudentId()).eq(ClassMember::getStatus, ACTIVE));
-                if (existing > 0) throw new IllegalArgumentException("student is already in this class");
+                if (existing > 0) throw new IllegalArgumentException("学生已在该班级中");
                 addOrRestoreMember(classId, student.getStudentId(), "import");
                 assignPublishedTasks(classId, student.getStudentId());
                 result.setSuccessCount(result.getSuccessCount() + 1);
@@ -220,7 +220,7 @@ public class TeacherClassServiceImpl implements TeacherClassService {
         List<String> studentNos = new ArrayList<>();
         try (Workbook workbook = WorkbookFactory.create(file.getInputStream())) {
             Sheet sheet = workbook.getNumberOfSheets() > 0 ? workbook.getSheetAt(0) : null;
-            if (sheet == null || sheet.getPhysicalNumberOfRows() < 1) throw new IllegalArgumentException("Excel 没有数据");
+            if (sheet == null || sheet.getPhysicalNumberOfRows() < 1) throw new IllegalArgumentException("Excel 文件没有数据");
             Row header = sheet.getRow(sheet.getFirstRowNum());
             int studentNoColumn = -1;
             DataFormatter formatter = new DataFormatter();
@@ -252,7 +252,7 @@ public class TeacherClassServiceImpl implements TeacherClassService {
                 entity.setInviteCode(code); classMapper.updateById(entity); return code;
             }
         }
-        throw new IllegalStateException("could not generate a unique invite code");
+        throw new IllegalStateException("无法生成唯一邀请码");
     }
 
     @Override
@@ -265,13 +265,13 @@ public class TeacherClassServiceImpl implements TeacherClassService {
     @Override
     @Transactional
     public TeacherClassVO joinByInvite(InviteJoinRequest request, AuthCurrentUserVO user) {
-        if (user == null || !"student".equals(user.getRoleCode())) throw new IllegalArgumentException("student access required");
-        if (request == null || !StringUtils.hasText(request.getInviteCode())) throw new IllegalArgumentException("inviteCode is required");
+        if (user == null || !"student".equals(user.getRoleCode())) throw new IllegalArgumentException("需要学生权限");
+        if (request == null || !StringUtils.hasText(request.getInviteCode())) throw new IllegalArgumentException("inviteCode 不能为空");
         ClassInfo entity = classMapper.selectOne(new LambdaQueryWrapper<ClassInfo>()
                 .eq(ClassInfo::getInviteCode, request.getInviteCode().trim()).eq(ClassInfo::getStatus, ACTIVE).last("LIMIT 1"));
-        if (entity == null) throw new IllegalArgumentException("invalid invite code");
+        if (entity == null) throw new IllegalArgumentException("邀请码无效");
         StudentProfile student = requireStudent(user);
-        if (!entity.getSchoolId().equals(student.getSchoolId())) throw new IllegalArgumentException("cannot join a class from another school");
+        if (!entity.getSchoolId().equals(student.getSchoolId())) throw new IllegalArgumentException("不能加入其他学校的班级");
         addOrRestoreMember(entity.getClassId(), student.getStudentId(), "invite");
         assignPublishedTasks(entity.getClassId(), student.getStudentId());
         return joinedClassVO(entity);
@@ -295,24 +295,24 @@ public class TeacherClassServiceImpl implements TeacherClassService {
     public ClassTaskVO publishTask(Long classId, ClassTaskSaveRequest request, MultipartFile material, AuthCurrentUserVO user) {
         ClassInfo entity = requireClass(classId);
         Access access = requireClassAccess(entity, user);
-        if (!access.teacher || access.teacherId == null) throw new IllegalArgumentException("an assigned teacher must publish the task");
-        if (request == null || !StringUtils.hasText(request.getTitle())) throw new IllegalArgumentException("task title is required");
-        if (request.getDueAt() != null && request.getDueAt().isBefore(LocalDateTime.now())) throw new IllegalArgumentException("dueAt must be in the future");
-        if (request.getStartAt() != null && request.getDueAt() != null && !request.getDueAt().isAfter(request.getStartAt())) throw new IllegalArgumentException("dueAt must be after startAt");
+        if (!access.teacher || access.teacherId == null) throw new IllegalArgumentException("必须由已分配的教师发布任务");
+        if (request == null || !StringUtils.hasText(request.getTitle())) throw new IllegalArgumentException("任务标题不能为空");
+        if (request.getDueAt() != null && request.getDueAt().isBefore(LocalDateTime.now())) throw new IllegalArgumentException("dueAt 必须为未来时间");
+        if (request.getStartAt() != null && request.getDueAt() != null && !request.getDueAt().isAfter(request.getStartAt())) throw new IllegalArgumentException("dueAt 必须晚于 startAt");
         String taskType = StringUtils.hasText(request.getTaskType()) ? request.getTaskType() : "red_culture_learning";
         String rule = StringUtils.hasText(request.getSubmissionRule()) ? request.getSubmissionRule() : "text_required";
-        if (!Set.of("red_culture_learning", "map_exploration").contains(taskType)) throw new IllegalArgumentException("unsupported taskType");
-        if (!Set.of("text_only", "text_required", "attachment_required", "text_and_attachment", "image_required", "document_required", "image_or_document", "text_and_image", "text_and_document", "image_and_document", "text_and_image_and_document").contains(rule)) throw new IllegalArgumentException("unsupported submissionRule");
+        if (!Set.of("red_culture_learning", "map_exploration").contains(taskType)) throw new IllegalArgumentException("不支持的 taskType");
+        if (!Set.of("text_only", "text_required", "attachment_required", "text_and_attachment", "image_required", "document_required", "image_or_document", "text_and_image", "text_and_document", "image_and_document", "text_and_image_and_document").contains(rule)) throw new IllegalArgumentException("不支持的 submissionRule");
         List<Long> resourceIds = request.getResourceIds() == null ? Collections.emptyList() : request.getResourceIds().stream().filter(Objects::nonNull).distinct().toList();
-        if ("map_exploration".equals(taskType) && resourceIds.isEmpty()) throw new IllegalArgumentException("map exploration tasks require at least one resource");
+        if ("map_exploration".equals(taskType) && resourceIds.isEmpty()) throw new IllegalArgumentException("地图探索任务至少需要一个资源");
         for (Long resourceId : resourceIds) {
             LocalEduResource resource = resourceMapper.selectById(resourceId);
-            if (resource == null || !Boolean.TRUE.equals(resource.getActive()) || resource.getReviewStatus() != com.redculture.platform.enums.ReviewStatus.APPROVED) throw new IllegalArgumentException("resource is not published");
+            if (resource == null || !Boolean.TRUE.equals(resource.getActive()) || resource.getReviewStatus() != com.redculture.platform.enums.ReviewStatus.APPROVED) throw new IllegalArgumentException("资源尚未发布");
         }
         com.redculture.platform.service.TaskSubmissionStorageService.StoredFile stored = null;
         if (material != null && !material.isEmpty()) {
             String name = material.getOriginalFilename() == null ? "" : material.getOriginalFilename().toLowerCase(Locale.ROOT);
-            if (!name.endsWith(".docx")) throw new IllegalArgumentException("task material must be a DOCX Word document");
+            if (!name.endsWith(".docx")) throw new IllegalArgumentException("任务材料必须为 DOCX Word 文档");
             stored = storage.store(material);
         }
         ClassLearningTask task = new ClassLearningTask();
@@ -329,7 +329,7 @@ public class TeacherClassServiceImpl implements TeacherClassService {
     @Override
     public TeacherClassService.TaskMaterial downloadTaskMaterial(Long taskId, AuthCurrentUserVO user) {
         ClassLearningTask task = requireTask(taskId);
-        if (!"published".equals(task.getStatus()) || !StringUtils.hasText(task.getMaterialStorageKey())) throw new IllegalArgumentException("task material not found");
+        if (!"published".equals(task.getStatus()) || !StringUtils.hasText(task.getMaterialStorageKey())) throw new IllegalArgumentException("任务材料不存在");
         boolean allowed = isAdmin(user);
         if (!allowed && "student".equals(user == null ? null : user.getRoleCode())) {
             StudentProfile student = requireStudent(user);
@@ -337,7 +337,7 @@ public class TeacherClassServiceImpl implements TeacherClassService {
         } else if (!allowed && "teacher".equals(user == null ? null : user.getRoleCode())) {
             TeacherProfile teacher = requireTeacher(user); allowed = teacher.getTeacherId().equals(task.getPublisherTeacherId());
         }
-        if (!allowed) throw new IllegalArgumentException("task material access denied");
+        if (!allowed) throw new IllegalArgumentException("没有任务材料访问权限");
         Resource resource = storage.load(task.getMaterialStorageKey());
         return new TeacherClassService.TaskMaterial(resource, task.getMaterialFilename(), task.getMaterialContentType());
     }
@@ -362,7 +362,7 @@ public class TeacherClassServiceImpl implements TeacherClassService {
         StudentProfile student = requireStudent(user);
         StudentTaskProgress progress = progressMapper.selectOne(new LambdaQueryWrapper<StudentTaskProgress>()
                 .eq(StudentTaskProgress::getTaskId, taskId).eq(StudentTaskProgress::getStudentId, student.getStudentId()).last("LIMIT 1"));
-        if (progress == null) throw new IllegalArgumentException("task is not assigned to this student");
+        if (progress == null) throw new IllegalArgumentException("该任务未分配给当前学生");
         if (!"completed".equals(progress.getStatus())) {
             progress.setStatus("completed"); progress.setCompletedAt(LocalDateTime.now()); progressMapper.updateById(progress);
         }
@@ -419,14 +419,14 @@ public class TeacherClassServiceImpl implements TeacherClassService {
         activities.sort(Comparator.comparing(StudentClassActivityVO::getCreatedAt, Comparator.nullsLast(Comparator.reverseOrder()))); long page = pageNum == null || pageNum < 1 ? 1 : pageNum; long size = pageSize == null || pageSize < 1 ? 20 : Math.min(pageSize, 100); int from = (int)Math.min((page - 1) * size, activities.size()); int to = (int)Math.min(from + size, activities.size()); return PageResult.of(activities.subList(from, to), activities.size(), page, size);
     }
 
-    private ClassInfo requireStudentClass(Long classId, AuthCurrentUserVO user) { StudentProfile student = requireStudent(user); ClassInfo entity = requireClass(classId); boolean joined = classMemberMapper.exists(new LambdaQueryWrapper<ClassMember>().eq(ClassMember::getClassId, classId).eq(ClassMember::getStudentId, student.getStudentId()).eq(ClassMember::getStatus, ACTIVE)); if (!joined) throw new IllegalArgumentException("class not found"); return entity; }
+    private ClassInfo requireStudentClass(Long classId, AuthCurrentUserVO user) { StudentProfile student = requireStudent(user); ClassInfo entity = requireClass(classId); boolean joined = classMemberMapper.exists(new LambdaQueryWrapper<ClassMember>().eq(ClassMember::getClassId, classId).eq(ClassMember::getStudentId, student.getStudentId()).eq(ClassMember::getStatus, ACTIVE)); if (!joined) throw new IllegalArgumentException("班级不存在"); return entity; }
 
     private String statusFor(ClassLearningTask task, StudentTaskProgress progress) { if (progress != null && "completed".equals(progress.getStatus())) return "completed"; return task.getDueAt() != null && task.getDueAt().isBefore(LocalDateTime.now()) ? "overdue" : "pending"; }
 
     private void validateSaveRequest(TeacherClassSaveRequest request, AuthCurrentUserVO user) {
         if (request == null || request.getSchoolId() == null || !StringUtils.hasText(request.getClassName()) || !StringUtils.hasText(request.getClassType()))
-            throw new IllegalArgumentException("schoolId, className and classType are required");
-        if (!CLASS_TYPES.contains(request.getClassType())) throw new IllegalArgumentException("classType must be administrative or teaching");
+            throw new IllegalArgumentException("schoolId、className 和 classType 不能为空");
+        if (!CLASS_TYPES.contains(request.getClassType())) throw new IllegalArgumentException("classType 必须为 administrative 或 teaching");
         requireSchoolAccess(request.getSchoolId(), user);
         if (request.getHeadTeacherId() != null) requireActiveTeacher(request.getHeadTeacherId(), request.getSchoolId());
         for (Long id : request.getSubjectTeacherIds() == null ? Collections.<Long>emptyList() : request.getSubjectTeacherIds()) requireActiveTeacher(id, request.getSchoolId());
@@ -503,16 +503,16 @@ public class TeacherClassServiceImpl implements TeacherClassService {
         return vo;
     }
 
-    private ClassInfo requireClass(Long classId) { ClassInfo entity = classMapper.selectById(classId); if (entity == null || !ACTIVE.equals(entity.getStatus())) throw new IllegalArgumentException("class not found"); return entity; }
-    private ClassLearningTask requireTask(Long taskId) { ClassLearningTask task = taskMapper.selectById(taskId); if (task == null) throw new IllegalArgumentException("task not found"); return task; }
-    private TeacherProfile requireTeacher(AuthCurrentUserVO user) { TeacherProfile teacher = teacherMapper.selectOne(new LambdaQueryWrapper<TeacherProfile>().eq(TeacherProfile::getAccountId, user.getAccountId()).eq(TeacherProfile::getStatus, ACTIVE).last("LIMIT 1")); if (teacher == null) throw new IllegalArgumentException("active teacher profile is required"); return teacher; }
-    private StudentProfile requireStudent(AuthCurrentUserVO user) { if (user == null || !"student".equals(user.getRoleCode())) throw new IllegalArgumentException("student access required"); StudentProfile student = studentMapper.selectOne(new LambdaQueryWrapper<StudentProfile>().eq(StudentProfile::getAccountId, user.getAccountId()).eq(StudentProfile::getStatus, ACTIVE).last("LIMIT 1")); if (student == null) throw new IllegalArgumentException("active student profile is required"); return student; }
-    private TeacherProfile requireActiveTeacher(Long teacherId, Long schoolId) { if (teacherId == null) throw new IllegalArgumentException("teacherId is required"); TeacherProfile teacher = teacherMapper.selectById(teacherId); if (teacher == null || !ACTIVE.equals(teacher.getStatus()) || !schoolId.equals(teacher.getSchoolId())) throw new IllegalArgumentException("teacher must be active and in this school"); return teacher; }
-    private void requireTeacherOrAdmin(AuthCurrentUserVO user) { if (user == null || !Set.of("teacher", "school_admin", "platform_admin").contains(user.getRoleCode())) throw new IllegalArgumentException("teacher access required"); if (!"platform_admin".equals(user.getRoleCode()) && user.getSchoolId() == null) throw new IllegalArgumentException("school account is required"); }
-    private void requireAdmin(AuthCurrentUserVO user) { requireTeacherOrAdmin(user); if (!isAdmin(user)) throw new IllegalArgumentException("administrator access required"); }
-    private void requireSchoolAccess(Long schoolId, AuthCurrentUserVO user) { requireTeacherOrAdmin(user); if (!"platform_admin".equals(user.getRoleCode()) && !schoolId.equals(user.getSchoolId())) throw new IllegalArgumentException("cannot access another school"); }
-    private Access requireClassAccess(ClassInfo entity, AuthCurrentUserVO user) { requireTeacherOrAdmin(user); requireSchoolAccess(entity.getSchoolId(), user); if (isAdmin(user)) return new Access(null, true, true); TeacherProfile teacher = requireTeacher(user); ClassTeacher relation = classTeacherMapper.selectOne(new LambdaQueryWrapper<ClassTeacher>().eq(ClassTeacher::getClassId, entity.getClassId()).eq(ClassTeacher::getTeacherId, teacher.getTeacherId()).eq(ClassTeacher::getStatus, ACTIVE).last("LIMIT 1")); if (relation == null) throw new IllegalArgumentException("cannot access this class"); return new Access(teacher.getTeacherId(), true, "head_teacher".equals(relation.getTeacherRole())); }
-    private void requireHeadTeacherOrAdmin(ClassInfo entity, AuthCurrentUserVO user) { if (!requireClassAccess(entity, user).headTeacher && !isAdmin(user)) throw new IllegalArgumentException("head teacher access required"); }
+    private ClassInfo requireClass(Long classId) { ClassInfo entity = classMapper.selectById(classId); if (entity == null || !ACTIVE.equals(entity.getStatus())) throw new IllegalArgumentException("班级不存在"); return entity; }
+    private ClassLearningTask requireTask(Long taskId) { ClassLearningTask task = taskMapper.selectById(taskId); if (task == null) throw new IllegalArgumentException("任务不存在"); return task; }
+    private TeacherProfile requireTeacher(AuthCurrentUserVO user) { TeacherProfile teacher = teacherMapper.selectOne(new LambdaQueryWrapper<TeacherProfile>().eq(TeacherProfile::getAccountId, user.getAccountId()).eq(TeacherProfile::getStatus, ACTIVE).last("LIMIT 1")); if (teacher == null) throw new IllegalArgumentException("需要有效的教师档案"); return teacher; }
+    private StudentProfile requireStudent(AuthCurrentUserVO user) { if (user == null || !"student".equals(user.getRoleCode())) throw new IllegalArgumentException("需要学生权限"); StudentProfile student = studentMapper.selectOne(new LambdaQueryWrapper<StudentProfile>().eq(StudentProfile::getAccountId, user.getAccountId()).eq(StudentProfile::getStatus, ACTIVE).last("LIMIT 1")); if (student == null) throw new IllegalArgumentException("需要有效的学生档案"); return student; }
+    private TeacherProfile requireActiveTeacher(Long teacherId, Long schoolId) { if (teacherId == null) throw new IllegalArgumentException("teacherId 不能为空"); TeacherProfile teacher = teacherMapper.selectById(teacherId); if (teacher == null || !ACTIVE.equals(teacher.getStatus()) || !schoolId.equals(teacher.getSchoolId())) throw new IllegalArgumentException("教师必须处于启用状态且属于本校"); return teacher; }
+    private void requireTeacherOrAdmin(AuthCurrentUserVO user) { if (user == null || !Set.of("teacher", "school_admin", "platform_admin").contains(user.getRoleCode())) throw new IllegalArgumentException("需要教师权限"); if (!"platform_admin".equals(user.getRoleCode()) && user.getSchoolId() == null) throw new IllegalArgumentException("需要学校账号"); }
+    private void requireAdmin(AuthCurrentUserVO user) { requireTeacherOrAdmin(user); if (!isAdmin(user)) throw new IllegalArgumentException("需要管理员权限"); }
+    private void requireSchoolAccess(Long schoolId, AuthCurrentUserVO user) { requireTeacherOrAdmin(user); if (!"platform_admin".equals(user.getRoleCode()) && !schoolId.equals(user.getSchoolId())) throw new IllegalArgumentException("无权访问其他学校"); }
+    private Access requireClassAccess(ClassInfo entity, AuthCurrentUserVO user) { requireTeacherOrAdmin(user); requireSchoolAccess(entity.getSchoolId(), user); if (isAdmin(user)) return new Access(null, true, true); TeacherProfile teacher = requireTeacher(user); ClassTeacher relation = classTeacherMapper.selectOne(new LambdaQueryWrapper<ClassTeacher>().eq(ClassTeacher::getClassId, entity.getClassId()).eq(ClassTeacher::getTeacherId, teacher.getTeacherId()).eq(ClassTeacher::getStatus, ACTIVE).last("LIMIT 1")); if (relation == null) throw new IllegalArgumentException("无权访问该班级"); return new Access(teacher.getTeacherId(), true, "head_teacher".equals(relation.getTeacherRole())); }
+    private void requireHeadTeacherOrAdmin(ClassInfo entity, AuthCurrentUserVO user) { if (!requireClassAccess(entity, user).headTeacher && !isAdmin(user)) throw new IllegalArgumentException("需要班主任或管理员权限"); }
     private boolean isAdmin(AuthCurrentUserVO user) { return user != null && Set.of("school_admin", "platform_admin").contains(user.getRoleCode()); }
     private String nextInviteCode() { StringBuilder result = new StringBuilder(10); for (int i = 0; i < 10; i++) result.append(INVITE_ALPHABET[RANDOM.nextInt(INVITE_ALPHABET.length)]); return result.toString(); }
     private void copy(TeacherClassVO source, TeacherClassDetailVO target) { target.setClassId(source.getClassId()); target.setSchoolId(source.getSchoolId()); target.setClassName(source.getClassName()); target.setGradeName(source.getGradeName()); target.setClassType(source.getClassType()); target.setInviteCode(source.getInviteCode()); target.setStatus(source.getStatus()); target.setHeadTeacher(source.isHeadTeacher()); target.setStudentCount(source.getStudentCount()); target.setActiveTaskCount(source.getActiveTaskCount()); target.setCompletedTaskCount(source.getCompletedTaskCount()); target.setOverdueTaskCount(source.getOverdueTaskCount()); target.setCompletionRate(source.getCompletionRate()); target.setTeachers(source.getTeachers()); }

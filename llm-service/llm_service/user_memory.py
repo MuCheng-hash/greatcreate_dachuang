@@ -74,6 +74,7 @@ class MemoryConflictPreview:
 
 
 class MemoryConflictError(RuntimeError):
+    """激活记忆会与同一字段的既有记忆冲突，需要调用方显式确认替换。"""
     def __init__(self, preview: MemoryConflictPreview):
         self.preview = preview
         message = "该记忆已存在" if preview.duplicate else "该字段已有已生效记忆，请先确认是否替换"
@@ -82,11 +83,13 @@ class MemoryConflictError(RuntimeError):
 
 @dataclass(frozen=True, slots=True)
 class MemoryContext:
+    """经筛选后允许进入模型提示词的长期记忆快照。"""
     items: tuple[MemoryRecord, ...]
     prompt: str
 
     @classmethod
     def empty(cls) -> "MemoryContext":
+        """返回不含记忆和提示词的空上下文，用于禁用或不适用的任务类型。"""
         return cls((), "")
 
 
@@ -98,6 +101,11 @@ class MemoryDraft:
 
 
 class ExplicitMemoryExtractor:
+    """从用户明确的“记住”指令中提取候选记忆。
+
+    只识别显式表达，避免将普通聊天推断为持久化数据；字段归类仅决定冲突策略，
+    真实内容仍会在仓库入口经过敏感信息校验。
+    """
     _remember_prefix = re.compile(
         r"^\s*(?:(?:请|麻烦|务必)?(?:帮我)?记住(?:一下)?|记一下)"
         r"\s*[：:，,]?\s*(?P<content>.+?)\s*$"
@@ -119,6 +127,7 @@ class ExplicitMemoryExtractor:
     )
 
     def extract(self, message: str) -> MemoryDraft | None:
+        """解析显式记忆指令并推断稳定画像或阶段任务；未命中时不产生副作用。"""
         match = self._remember_prefix.match(str(message or ""))
         if match is None:
             return None
@@ -157,6 +166,7 @@ class ExplicitMemoryExtractor:
 
 
 class MemoryContentPolicy:
+    """长期记忆内容的最小安全策略，拒绝凭据、身份信息和精确住址。"""
     _credential_keyword = re.compile(
         r"(?:密码|口令|令牌|密钥|私钥|助记词|password|passcode|api[\s_-]*key|"
         r"access[\s_-]*token|refresh[\s_-]*token|client[\s_-]*secret|secret)",
@@ -178,9 +188,11 @@ class MemoryContentPolicy:
     )
 
     def __init__(self, max_characters: int = 500):
+        """设置允许保存的最大字符数，并保留一个防止过小配置的下限。"""
         self.max_characters = max(20, int(max_characters))
 
     def validate(self, content: str) -> str:
+        """规范化并校验待持久化内容，发现敏感模式时拒绝而非脱敏保存。"""
         normalized = " ".join(str(content or "").split())
         if len(normalized) < 2:
             raise MemoryValidationError("记忆内容不能为空")
@@ -204,7 +216,11 @@ class MemoryContentPolicy:
 
 
 class MemoryRepository:
-    """账号与学校双重隔离的 PostgreSQL 长期记忆仓库。"""
+    """账号与学校双重隔离的 PostgreSQL 长期记忆仓库。
+
+    每次读写均以账号和范围联合定位，防止记忆跨学校或区域泄露。候选记忆经过内容
+    策略、状态机和字段冲突检查后才可激活；所有变更都会写入审计表。
+    """
 
     def __init__(
         self,
@@ -216,6 +232,7 @@ class MemoryRepository:
         task_days: int = 90,
         recycle_bin_days: int = 30,
     ):
+        """注入存储、时钟和生命周期参数，便于在测试中固定时间语义。"""
         self.database = database
         self._now_provider = now_provider or (lambda: datetime.now(timezone.utc))
         self.content_policy = content_policy or MemoryContentPolicy()
@@ -227,6 +244,7 @@ class MemoryRepository:
     async def get_setting(
         self, owner_id: str, scope_type: str, scope_id: str | int
     ) -> MemorySettingRecord:
+        """读取当前账号与范围的记忆开关；缺省记录按关闭处理。"""
         owner, scope, scope_value = self._normalize_scope(
             owner_id, scope_type, scope_id
         )
@@ -253,6 +271,7 @@ class MemoryRepository:
         scope_id: str | int,
         enabled: bool,
     ) -> MemorySettingRecord:
+        """原子更新记忆开关并写入设置审计，不影响已保存的记忆内容。"""
         owner, scope, scope_value = self._normalize_scope(
             owner_id, scope_type, scope_id
         )
@@ -302,6 +321,12 @@ class MemoryRepository:
         confidence: float | None = None,
         replace_conflicts: bool = False,
     ) -> MemoryRecord:
+        """创建长期记忆，并在同一范围内执行去重、冲突确认和审计。
+
+        内容先经过敏感信息策略；相同活动内容直接复用既有记录。稳定字段的活动记忆
+        若冲突，默认抛出 ``MemoryConflictError``，只有 ``replace_conflicts`` 为真
+        才会在同一事务内将冲突项移入回收状态后创建候选项。
+        """
         owner, scope, scope_value = self._normalize_scope(
             owner_id, scope_type, scope_id
         )
@@ -309,6 +334,7 @@ class MemoryRepository:
         normalized_status = self._normalize_status(status)
         normalized_source = self._normalize_source(source)
         normalized_content = self.content_policy.validate(content)
+        # 字段键和正文均在进入事务前标准化，保证去重比较与后续审计使用同一语义值。
         normalized_field = self._normalize_field_key(field_key)
         normalized_confidence = self._normalize_confidence(confidence)
         normalized_thread = self._normalize_optional(source_thread_id, 128)
@@ -318,6 +344,7 @@ class MemoryRepository:
             normalized_type, normalized_status, now_dt
         )
         async with self.database.transaction() as connection:
+            # 范围顾问锁让“检测冲突-回收-创建”成为串行决策，避免并发双激活。
             await self._lock_scope(connection, owner, scope, scope_value)
             duplicate = await self._find_exact_duplicate(
                 connection,
@@ -330,6 +357,7 @@ class MemoryRepository:
                 normalized_field,
             )
             if duplicate is not None:
+                # 重复创建直接复用既有记录，不重写生命周期时间或制造额外审计事件。
                 return self._memory_from_row(duplicate)
             memory_id = str(uuid.uuid4())
             candidate = MemoryRecord(
@@ -351,9 +379,11 @@ class MemoryRepository:
                 updated_at=self._iso(now_dt),
             )
             if normalized_status == "active" and normalized_field:
+                # 只有已激活的单值字段会替换旧事实；pending 候选仍等待用户确认。
                 preview = await self._activation_preview(connection, candidate)
                 if preview.conflicts:
                     if not replace_conflicts:
+                        # 创建方必须显式承担替换影响，默认把冲突详情交回界面展示。
                         raise MemoryConflictError(preview)
                     await self._recycle_field_conflicts(
                         connection,
@@ -422,6 +452,7 @@ class MemoryRepository:
         memory_type: str | None = None,
         limit: int = 200,
     ) -> list[MemoryRecord]:
+        """列出当前账号和范围内的记忆，可按状态和类型筛选且限制最大返回量。"""
         owner, scope, scope_value = self._normalize_scope(
             owner_id, scope_type, scope_id
         )
@@ -451,6 +482,7 @@ class MemoryRepository:
         scope_id: str | int,
         memory_id: str,
     ) -> MemoryRecord:
+        """读取一条归属当前账号和范围的记忆，找不到时统一返回范围安全的错误。"""
         owner, scope, scope_value = self._normalize_scope(
             owner_id, scope_type, scope_id
         )
@@ -463,7 +495,7 @@ class MemoryRepository:
                 self._normalize_id(memory_id),
             )
         if row is None:
-            raise MemoryNotFoundError("memory not found")
+            raise MemoryNotFoundError("记忆不存在")
         return self._memory_from_row(row)
 
     async def confirmation_preview(
@@ -473,6 +505,7 @@ class MemoryRepository:
         scope_id: str | int,
         memory_id: str,
     ) -> MemoryConflictPreview:
+        """预览候选记忆激活后会替换的字段冲突，供界面请求用户确认。"""
         owner, scope, scope_value = self._normalize_scope(
             owner_id, scope_type, scope_id
         )
@@ -498,8 +531,14 @@ class MemoryRepository:
         task_limit: int = 5,
         character_limit: int = 1500,
     ) -> MemoryContext:
+        """检索当前范围允许注入提示词的活动记忆，并构造受长度限制的上下文。
+
+        记忆开关关闭时不读取内容；稳定画像优先保留，阶段任务按查询词重合度排序。
+        输出声明记忆不能覆盖本轮输入、业务事实或权限边界。
+        """
         await self.maybe_cleanup()
         if not (await self.get_setting(owner_id, scope_type, scope_id)).enabled:
+            # 范围级关闭时不查询正文，避免“未展示但仍读取”的隐私语义问题。
             return MemoryContext.empty()
         active = await self.list_memories(
             owner_id, scope_type, scope_id, status="active", limit=500
@@ -509,6 +548,7 @@ class MemoryRepository:
             key=self._profile_sort_key,
         )
         query_terms = self._relevance_terms(query)
+        # TASK 是阶段性信息，按与当前问题的词项重合度排序而非仅按创建时间。
         tasks = sorted(
             (item for item in active if item.memory_type == "TASK"),
             key=lambda item: (
@@ -538,6 +578,7 @@ class MemoryRepository:
                 continue
             remaining = limit - len(prompt) - len(separator) - len(prefix)
             if remaining >= 8 and item.memory_type == "PROFILE":
+                # 长期画像可在最后预算内被截断；TASK 截断容易改变任务约束，故直接停止。
                 prompt += f"{separator}{prefix}{item.content[:remaining]}"
                 selected.append(item)
             break
@@ -555,19 +596,22 @@ class MemoryRepository:
         field_key: str | None | object = _UNSET,
         replace_conflicts: bool = False,
     ) -> MemoryRecord:
+        """更新归属当前范围的记忆，并重新执行内容策略、生命周期和字段冲突规则。"""
         owner, scope, scope_value = self._normalize_scope(
             owner_id, scope_type, scope_id
         )
         normalized_id = self._normalize_id(memory_id)
         now_dt = self._now()
         async with self.database.transaction() as connection:
+            # 同一账号与业务范围的记忆变更串行化，避免两个确认请求同时激活冲突字段。
             await self._lock_scope(connection, owner, scope, scope_value)
             row = await self._require_memory(
                 connection, owner, scope, scope_value, normalized_id, for_update=True
             )
             current = self._memory_from_row(row)
             if current.status == "deleted":
-                raise MemoryStateError("deleted memory cannot be edited")
+                # 已删除记录只能走恢复状态机，编辑接口不能绕过回收站审计。
+                raise MemoryStateError("已删除的记忆不能编辑")
             next_type = (
                 self._normalize_memory_type(memory_type)
                 if memory_type is not None
@@ -585,6 +629,7 @@ class MemoryRepository:
             )
             expires_at, _, _ = self._lifecycle(next_type, current.status, now_dt)
             if current.status == "active" and next_field:
+                # 编辑活动单值字段会重新触发冲突检测，不能沿用创建时的旧结论。
                 candidate = replace(
                     current,
                     memory_type=next_type,
@@ -596,6 +641,7 @@ class MemoryRepository:
                 preview = await self._activation_preview(connection, candidate)
                 if preview.conflicts:
                     if preview.duplicate or not replace_conflicts:
+                        # 内容重复永远不替换活动事实；真正冲突也必须由调用方显式许可。
                         raise MemoryConflictError(preview)
                     await self._recycle_field_conflicts(
                         connection,
@@ -647,6 +693,7 @@ class MemoryRepository:
         *,
         replace_conflicts: bool = False,
     ) -> MemoryRecord:
+        """确认待审核记忆并激活；字段冲突仍需显式允许替换。"""
         return await self._activate_memory(
             owner_id,
             scope_type,
@@ -664,6 +711,7 @@ class MemoryRepository:
         scope_id: str | int,
         memory_id: str,
     ) -> MemoryRecord:
+        """将记忆软删除至回收期，保留审计和可恢复窗口；重复删除幂等返回。"""
         owner, scope, scope_value = self._normalize_scope(
             owner_id, scope_type, scope_id
         )
@@ -681,6 +729,7 @@ class MemoryRepository:
             )
             current = self._memory_from_row(row)
             if current.status == "deleted":
+                # 软删除是幂等操作，避免重复点击把回收期延长或重复写审计。
                 return current
             deleted = await (
                 await connection.execute(
@@ -717,6 +766,7 @@ class MemoryRepository:
         *,
         replace_conflicts: bool = False,
     ) -> MemoryRecord:
+        """恢复仍在回收期内的已删除记忆，并重新执行字段冲突确认。"""
         return await self._activate_memory(
             owner_id,
             scope_type,
@@ -734,6 +784,7 @@ class MemoryRepository:
         scope_id: str | int,
         memory_id: str,
     ) -> None:
+        """永久删除回收状态的记忆；活动或待确认记忆不能绕过软删除流程。"""
         owner, scope, scope_value = self._normalize_scope(
             owner_id, scope_type, scope_id
         )
@@ -750,8 +801,9 @@ class MemoryRepository:
             )
             current = self._memory_from_row(row)
             if current.status != "deleted":
+                # 物理删除只允许回收状态，强制使用软删除保留纠错窗口。
                 raise MemoryStateError(
-                    "only deleted memory can be permanently deleted"
+                    "只有已删除的记忆可以永久删除"
                 )
             await self._write_audit(
                 connection,
@@ -767,10 +819,16 @@ class MemoryRepository:
                 now_dt,
             )
             await connection.execute(
+                # 审计先于物理删除提交，确保删除后仍可追溯操作发生的范围和时间。
                 "DELETE FROM agent_memory WHERE id = %s", (current.id,)
             )
 
     async def cleanup_expired(self, batch_size: int = 200) -> dict[str, int]:
+        """并发安全地删除已过期待确认、阶段任务和回收站记忆。
+
+        每批使用 ``SKIP LOCKED``，允许多个维护进程共享工作而不重复删除；每条删除
+        前写审计，返回值按生命周期原因汇总。
+        """
         now_dt = self._now()
         counts = {"pending": 0, "task": 0, "deleted": 0}
         safe_batch = max(1, min(int(batch_size), 1000))
@@ -828,6 +886,7 @@ class MemoryRepository:
     async def maybe_cleanup(
         self, minimum_interval_seconds: int = 300
     ) -> dict[str, int]:
+        """按最小时间间隔触发过期清理，避免每次读取记忆都产生维护事务。"""
         now = self._now()
         if (
             self._last_cleanup_at is not None
@@ -838,6 +897,7 @@ class MemoryRepository:
         return await self.cleanup_expired()
 
     async def aggregate_metrics(self) -> dict[str, Any]:
+        """汇总不含内容的记忆配置和生命周期指标，供运行监测使用。"""
         await self.maybe_cleanup()
         async with self.database.connection() as connection:
             settings = await (
@@ -886,6 +946,11 @@ class MemoryRepository:
         require_deleted: bool,
         replace_conflicts: bool,
     ) -> MemoryRecord:
+        """在范围锁内将待确认或已删除记忆激活，并执行冲突回收和审计。
+
+        ``require_deleted`` 区分确认与恢复路径；已过回收期的删除记录会先被清理，
+        因而不会被重新激活。
+        """
         owner, scope, scope_value = self._normalize_scope(
             owner_id, scope_type, scope_id
         )
@@ -904,11 +969,13 @@ class MemoryRepository:
             current = self._memory_from_row(row)
             expected = "deleted" if require_deleted else "pending"
             if current.status != expected:
+                # 确认和恢复是不同状态机边，禁止通过 API 跳过待确认或回收站语义。
                 raise MemoryStateError(
-                    f"memory must be {expected} before it can be {event_type}"
+                    f"记忆必须处于 {expected} 后才能执行 {event_type}"
                 )
             purge_at = self._parse_iso(current.purge_after)
             if require_deleted and purge_at is not None and purge_at <= now_dt:
+                # 回收期已结束的记录先留下清理审计，再物理删除，不能被恢复接口复活。
                 await self._write_audit(
                     connection,
                     current.id,
@@ -922,11 +989,12 @@ class MemoryRepository:
                 await connection.execute(
                     "DELETE FROM agent_memory WHERE id = %s", (current.id,)
                 )
-                raise MemoryNotFoundError("memory not found")
+                raise MemoryNotFoundError("记忆不存在")
             expires_at, _, _ = self._lifecycle(
                 current.memory_type, "active", now_dt
             )
             if current.field_key:
+                # 有字段键的记忆代表单值事实；激活前必须判断重复和替换冲突。
                 preview = await self._activation_preview(connection, current)
                 if preview.duplicate:
                     return await self._recycle_duplicate_candidate(
@@ -939,6 +1007,7 @@ class MemoryRepository:
                     )
                 if preview.conflicts:
                     if not replace_conflicts:
+                        # 默认只返回预览，让调用方显式确认替换，避免静默丢弃旧偏好。
                         raise MemoryConflictError(preview)
                     await self._recycle_field_conflicts(
                         connection,
@@ -978,6 +1047,7 @@ class MemoryRepository:
         connection: AsyncConnection[dict[str, Any]],
         candidate: MemoryRecord,
     ) -> MemoryConflictPreview:
+        """锁定候选字段的活动记忆并生成冲突/重复预览。"""
         if not candidate.field_key:
             return MemoryConflictPreview(candidate, (), False)
         conflicts = await self._find_active_field_conflicts(
@@ -989,6 +1059,7 @@ class MemoryRepository:
             exclude_id=candidate.id,
         )
         duplicate = any(
+            # 内容相同的字段冲突不是新事实，后续路径会回收候选而不替换已激活记录。
             self._same_memory_content(item.content, candidate.content)
             for item in conflicts
         )
@@ -1004,6 +1075,7 @@ class MemoryRepository:
         *,
         exclude_id: str,
     ) -> tuple[MemoryRecord, ...]:
+        """查询并锁定同一范围与字段别名集合的活动记忆，供替换决策使用。"""
         rows = await (
             await connection.execute(
                 """
@@ -1035,6 +1107,7 @@ class MemoryRepository:
         content: str,
         field_key: str | None,
     ) -> dict[str, Any] | None:
+        """在范围锁内寻找与候选完全相同的记忆，避免重复插入。"""
         clauses = [
             "owner_id = %s",
             "scope_type = %s",
@@ -1077,8 +1150,10 @@ class MemoryRepository:
         replacement_id: str,
         now_dt: datetime,
     ) -> None:
+        """将被替换字段的活动记忆移入回收站，并逐条记录替换审计。"""
         purge_after = now_dt + timedelta(days=self.recycle_bin_days)
         for current in conflicts:
+            # 逐条审计替换关系，避免批量更新后无法追踪哪个新记忆淘汰了旧记忆。
             await connection.execute(
                 """
                 UPDATE agent_memory
@@ -1111,6 +1186,7 @@ class MemoryRepository:
         scope_id: str,
         now_dt: datetime,
     ) -> MemoryRecord:
+        """回收与活动记忆重复的候选，保留审计而不制造第二份相同事实。"""
         if current.status == "deleted":
             await self._write_audit(
                 connection,
@@ -1189,7 +1265,7 @@ class MemoryRepository:
             for_update=for_update,
         )
         if row is None:
-            raise MemoryNotFoundError("memory not found")
+            raise MemoryNotFoundError("记忆不存在")
         return row
 
     @staticmethod
@@ -1203,13 +1279,15 @@ class MemoryRepository:
         metadata: dict[str, Any],
         created_at: datetime,
     ) -> None:
+        """写入不含记忆正文的审计事件，防止审计表扩大敏感内容暴露面。"""
         forbidden_keys = {
             key
             for key in metadata
             if str(key).strip().lower() in {"content", "body", "text", "value"}
         }
         if forbidden_keys:
-            raise ValueError("audit metadata cannot contain memory content")
+            # 即便调用者误传正文，也在事务提交前拒绝，避免后续无法彻底清理的副本。
+            raise ValueError("审计元数据不能包含记忆内容")
         await connection.execute(
             """
             INSERT INTO agent_memory_audit(
@@ -1235,6 +1313,7 @@ class MemoryRepository:
         scope_type: str,
         scope_id: str,
     ) -> None:
+        """对账号和范围组合加事务级咨询锁，保护该范围内的记忆状态机。"""
         await connection.execute(
             "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
             (f"agent-memory:{owner_id}:{scope_type}:{scope_id}",),
@@ -1243,6 +1322,7 @@ class MemoryRepository:
     def _lifecycle(
         self, memory_type: str, status: str, now: datetime
     ) -> tuple[datetime | None, datetime | None, datetime | None]:
+        """按记忆类型与状态计算过期、删除和物理清理时间，不由模型决定生命周期。"""
         if status == "pending":
             return now + timedelta(days=self.pending_days), None, None
         if status == "deleted":
@@ -1289,7 +1369,7 @@ class MemoryRepository:
     def _normalize_memory_type(value: str) -> str:
         normalized = str(value or "").strip().upper()
         if normalized not in MEMORY_TYPES:
-            raise MemoryValidationError("memoryType 必须是 PROFILE 或 TASK")
+            raise MemoryValidationError("memoryType 必须为 PROFILE 或 TASK")
         return normalized
 
     @staticmethod
@@ -1321,14 +1401,14 @@ class MemoryRepository:
     def _normalize_status(value: str) -> str:
         normalized = str(value or "").strip().lower()
         if normalized not in MEMORY_STATUSES:
-            raise MemoryValidationError("status 必须是 pending、active 或 deleted")
+            raise MemoryValidationError("status 必须为 pending、active 或 deleted")
         return normalized
 
     @staticmethod
     def _normalize_source(value: str) -> str:
         normalized = str(value or "").strip().lower()
         if normalized not in MEMORY_SOURCES:
-            raise MemoryValidationError("memory source 不受支持")
+            raise MemoryValidationError("不支持的记忆来源")
         return normalized
 
     @staticmethod
@@ -1387,7 +1467,7 @@ class MemoryRepository:
     def _normalize_id(value: str) -> str:
         normalized = str(value or "").strip()
         if not normalized or len(normalized) > 128:
-            raise MemoryNotFoundError("memory not found")
+            raise MemoryNotFoundError("记忆不存在")
         return normalized
 
     @classmethod

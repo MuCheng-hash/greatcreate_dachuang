@@ -74,7 +74,7 @@ public class TeachingPlanFeedbackServiceImpl implements TeachingPlanFeedbackServ
                                  Long accountId,
                                  String actorRole) {
         if (request == null || response == null || accountId == null || !StringUtils.hasText(actorRole)) {
-            throw new IllegalArgumentException("generation actor and result are required");
+            throw new IllegalArgumentException("生成操作主体和结果不能为空");
         }
         AiTeachingPlanGeneration generation = new AiTeachingPlanGeneration();
         generation.setSchoolId(request.getSchoolId());
@@ -333,7 +333,7 @@ public class TeachingPlanFeedbackServiceImpl implements TeachingPlanFeedbackServ
 
     private void requireTeacher(AuthCurrentUserVO user) {
         if (user == null || !"teacher".equals(user.getRoleCode()) || user.getAccountId() == null) {
-            throw forbidden("teacher_access_required", "teacher access required");
+            throw forbidden("teacher_access_required", "需要教师权限");
         }
     }
 
@@ -345,7 +345,7 @@ public class TeachingPlanFeedbackServiceImpl implements TeachingPlanFeedbackServ
             throw badRequest("rating_out_of_range", "rating must be between 1 and 5");
         }
         if (request.getTeacherNote() != null && request.getTeacherNote().length() > MAX_NOTE_LENGTH) {
-            throw badRequest("teacher_note_too_long", "teacherNote must not exceed 2000 characters");
+            throw badRequest("teacher_note_too_long", "teacherNote 长度不能超过 2000 个字符");
         }
     }
 
@@ -478,7 +478,7 @@ public class TeachingPlanFeedbackServiceImpl implements TeachingPlanFeedbackServ
         try {
             return objectMapper.writeValueAsString(value);
         } catch (JsonProcessingException exception) {
-            throw new IllegalStateException("teaching plan snapshot serialization failed", exception);
+            throw new IllegalStateException("教学方案快照序列化失败", exception);
         }
     }
 

@@ -84,7 +84,7 @@ public class SchoolResourceRelServiceImpl extends ServiceImpl<SchoolResourceRelM
     @Transactional
     public SchoolResourceRelAdminVO updateRelation(Long relId, SchoolResourceRelUpdateRequest request) {
         if (request == null) {
-            throw new IllegalArgumentException("request cannot be null");
+            throw new IllegalArgumentException("请求不能为空");
         }
         SchoolResourceRel relation = requireRelation(relId);
         SchoolResourceRelationType nextRelationType = valueOrOriginal(request.getRelationType(), relation.getRelationType());
@@ -137,7 +137,7 @@ public class SchoolResourceRelServiceImpl extends ServiceImpl<SchoolResourceRelM
     @Transactional
     public SchoolResourceCandidateResultVO batchCreateRelations(Long schoolId, SchoolResourceRelBatchCreateRequest request) {
         if (request == null || request.getResourceIds() == null || request.getResourceIds().isEmpty()) {
-            throw new IllegalArgumentException("resourceIds is required");
+            throw new IllegalArgumentException("resourceIds 不能为空");
         }
         School school = requireActiveSchoolWithLocation(schoolId);
         double effectiveRadiusKm = effectiveRadiusKm(request.getRadiusKm());
@@ -145,7 +145,7 @@ public class SchoolResourceRelServiceImpl extends ServiceImpl<SchoolResourceRelM
                 .filter(id -> id != null && id > 0)
                 .collect(Collectors.toSet());
         if (requestedIds.isEmpty()) {
-            throw new IllegalArgumentException("resourceIds is required");
+            throw new IllegalArgumentException("resourceIds 不能为空");
         }
         Map<Long, SchoolResourceRel> existingRelations = existingRelationsByResourceId(schoolId);
         List<LocalEduResource> resources = localEduResourceService.list(
@@ -177,7 +177,7 @@ public class SchoolResourceRelServiceImpl extends ServiceImpl<SchoolResourceRelM
     @Override
     public PageResult<SchoolResourceRelAdminVO> listBySchoolId(Long schoolId, Long pageNum, Long pageSize) {
         if (schoolId == null) {
-            throw new IllegalArgumentException("schoolId is required");
+            throw new IllegalArgumentException("schoolId 不能为空");
         }
         return pageRelations(new LambdaQueryWrapper<SchoolResourceRel>()
                 .eq(SchoolResourceRel::getSchoolId, schoolId)
@@ -188,7 +188,7 @@ public class SchoolResourceRelServiceImpl extends ServiceImpl<SchoolResourceRelM
     @Override
     public PageResult<SchoolResourceRelAdminVO> listByResourceId(Long resourceId, Long pageNum, Long pageSize) {
         if (resourceId == null) {
-            throw new IllegalArgumentException("resourceId is required");
+            throw new IllegalArgumentException("resourceId 不能为空");
         }
         return pageRelations(new LambdaQueryWrapper<SchoolResourceRel>()
                 .eq(SchoolResourceRel::getResourceId, resourceId)
@@ -212,38 +212,38 @@ public class SchoolResourceRelServiceImpl extends ServiceImpl<SchoolResourceRelM
 
     private void validateCreateRequest(SchoolResourceRelCreateRequest request) {
         if (request == null) {
-            throw new IllegalArgumentException("request cannot be null");
+            throw new IllegalArgumentException("请求不能为空");
         }
         if (request.getSchoolId() == null) {
-            throw new IllegalArgumentException("schoolId is required");
+            throw new IllegalArgumentException("schoolId 不能为空");
         }
         if (request.getResourceId() == null) {
-            throw new IllegalArgumentException("resourceId is required");
+            throw new IllegalArgumentException("resourceId 不能为空");
         }
     }
 
     private void ensureSchoolExists(Long schoolId) {
         if (schoolService.getById(schoolId) == null) {
-            throw new IllegalArgumentException("school not found");
+            throw new IllegalArgumentException("学校不存在");
         }
     }
 
     private void ensureResourceExists(Long resourceId) {
         if (localEduResourceService.getById(resourceId) == null) {
-            throw new IllegalArgumentException("resource not found");
+            throw new IllegalArgumentException("资源不存在");
         }
     }
 
     private School requireActiveSchoolWithLocation(Long schoolId) {
         if (schoolId == null) {
-            throw new IllegalArgumentException("schoolId is required");
+            throw new IllegalArgumentException("schoolId 不能为空");
         }
         School school = schoolService.getById(schoolId);
         if (school == null || !Boolean.TRUE.equals(school.getActive())) {
-            throw new IllegalArgumentException("school not found");
+            throw new IllegalArgumentException("学校不存在");
         }
         if (school.getLongitude() == null || school.getLatitude() == null) {
-            throw new IllegalArgumentException("school location is required");
+            throw new IllegalArgumentException("学校位置信息不能为空");
         }
         return school;
     }
@@ -444,17 +444,17 @@ public class SchoolResourceRelServiceImpl extends ServiceImpl<SchoolResourceRelM
             wrapper.ne(SchoolResourceRel::getRelId, excludeRelId);
         }
         if (count(wrapper) > 0) {
-            throw new IllegalArgumentException("relation already exists");
+            throw new IllegalArgumentException("关系已存在");
         }
     }
 
     private SchoolResourceRel requireRelation(Long relId) {
         if (relId == null) {
-            throw new IllegalArgumentException("relId is required");
+            throw new IllegalArgumentException("relId 不能为空");
         }
         SchoolResourceRel relation = getById(relId);
         if (relation == null) {
-            throw new IllegalArgumentException("relation not found");
+            throw new IllegalArgumentException("关系不存在");
         }
         return relation;
     }

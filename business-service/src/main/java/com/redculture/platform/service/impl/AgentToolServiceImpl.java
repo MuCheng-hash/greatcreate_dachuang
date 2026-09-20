@@ -47,11 +47,11 @@ public class AgentToolServiceImpl implements AgentToolService {
         accessGuard.assertToolAccess(request);
         KnowledgeScopeType scopeType = scopeType(request);
         if (scopeType != KnowledgeScopeType.SCHOOL) {
-            throw new IllegalArgumentException("school-context only supports SCHOOL scope");
+            throw new IllegalArgumentException("学校上下文只支持 SCHOOL 范围");
         }
         SchoolMapDetailVO detail = schoolMapService.getSchoolDetail(request.getScope().getScopeId());
         if (detail == null) {
-            throw new IllegalArgumentException("school not found or unavailable");
+            throw new IllegalArgumentException("学校不存在或不可用");
         }
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("school", detail.getSchool());
@@ -70,12 +70,12 @@ public class AgentToolServiceImpl implements AgentToolService {
     public LocalEduResource resourceDetail(AgentToolRequest request) {
         accessGuard.assertToolAccess(request);
         if (request.getResourceId() == null || request.getResourceId() <= 0) {
-            throw new IllegalArgumentException("resourceId must be positive");
+            throw new IllegalArgumentException("resourceId 必须为正数");
         }
         LocalEduResource resource = localEduResourceService.getById(request.getResourceId());
         if (resource == null || !Boolean.TRUE.equals(resource.getActive())
                 || resource.getReviewStatus() != ReviewStatus.APPROVED) {
-            throw new IllegalArgumentException("resource not found or unavailable");
+            throw new IllegalArgumentException("资源不存在或不可用");
         }
         if (!"platform_admin".equals(request.getActor().getRoleCode())) {
             SchoolMapDetailVO detail = schoolMapService.getSchoolDetail(request.getScope().getScopeId());
@@ -83,7 +83,7 @@ public class AgentToolServiceImpl implements AgentToolService {
                     && detail.getResources().stream().anyMatch(item ->
                     item != null && request.getResourceId().equals(item.getResourceId()));
             if (!related) {
-                throw new IllegalArgumentException("resource is outside the current school scope");
+                throw new IllegalArgumentException("资源不在当前学校范围内");
             }
         }
         return resource;
@@ -130,7 +130,7 @@ public class AgentToolServiceImpl implements AgentToolService {
     private KnowledgeScopeType scopeType(AgentToolRequest request) {
         KnowledgeScopeType scopeType = KnowledgeScopeType.from(request.getScope().getScopeType());
         if (scopeType == null) {
-            throw new IllegalArgumentException("scopeType is required");
+            throw new IllegalArgumentException("scopeType 不能为空");
         }
         return scopeType;
     }

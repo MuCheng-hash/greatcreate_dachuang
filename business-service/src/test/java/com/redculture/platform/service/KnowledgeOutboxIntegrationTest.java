@@ -82,7 +82,7 @@ class KnowledgeOutboxIntegrationTest {
 
     @Test void retryAndExpiredLeasePreserveMessageIdentity() {
         transactions.run(() -> { transactions.enqueue(jobId,documentId); return null; });
-        // Scope claimable fixtures to this test.
+        // 将可认领的测试数据限定在本测试范围内。
         jdbc.update("UPDATE knowledge_ingest_outbox SET status='PUBLISHED' WHERE job_id<>?",jobId);
         var attempts=new AtomicInteger();
         KnowledgeMessageSender sender=(id,body) -> {

@@ -99,10 +99,10 @@ public class CatalogAdminService {
     @Transactional
     public CatalogEntityVO update(EntityType type, Long id, CatalogEntityRequest request) {
         validateRequest(request);
-        if (type != request.getEntityType()) throw new IllegalArgumentException("entityType cannot be changed");
+        if (type != request.getEntityType()) throw new IllegalArgumentException("entityType 不能修改");
         Object entity = require(type, id);
         apply(type, entity, request);
-        // The catalog is maintained exclusively by platform administrators, so edited imports remain published.
+        // 目录仅由平台管理员维护，因此编辑后的导入数据仍保持已发布状态。
         setReviewStatus(entity, ReviewStatus.APPROVED);
         setActive(entity, true);
         update(type, entity);
@@ -131,7 +131,7 @@ public class CatalogAdminService {
     public CatalogMediaRequest uploadMedia(EntityType type, Long id, MultipartFile file) {
         Object entity = require(type, id);
         if (!Boolean.TRUE.equals(active(entity))) {
-            throw new IllegalArgumentException("inactive entities cannot receive media");
+            throw new IllegalArgumentException("未启用实体不能添加媒体文件");
         }
         CatalogMediaStorageService.StoredMedia stored = mediaStorageService.store(file);
         try {
@@ -154,7 +154,7 @@ public class CatalogAdminService {
         require(type, id);
         ResourceMedia media = mediaMapper.selectById(mediaId);
         if (media == null || media.getEntityType() != type || !id.equals(media.getEntityId())) {
-            throw new IllegalArgumentException("catalog media not found");
+            throw new IllegalArgumentException("目录媒体不存在");
         }
         mediaMapper.deleteById(mediaId);
         mediaStorageService.deleteIfManaged(media.getMediaUrl());
@@ -198,7 +198,7 @@ public class CatalogAdminService {
 
     public void validateRelationType(EntityType sourceType, EntityType targetType, String relationType) {
         if (sourceType == null || targetType == null || !StringUtils.hasText(relationType)) {
-            throw new IllegalArgumentException("relation source, target and type are required");
+            throw new IllegalArgumentException("关系源、目标和类型不能为空");
         }
         String normalized = normalizeRelation(relationType);
         try {
@@ -209,9 +209,9 @@ public class CatalogAdminService {
             else if (sourceType == EntityType.MEMORIAL && targetType == EntityType.HERO) MemorialRelationType.valueOf(normalized);
             else if (sourceType == EntityType.MEMORIAL && targetType == EntityType.EVENT) MemorialRelationType.valueOf(normalized);
             else if (sourceType == EntityType.STORY && List.of(EntityType.RESOURCE, EntityType.SITE, EntityType.MEMORIAL, EntityType.HERO, EntityType.EVENT).contains(targetType)) StoryEntityRelationType.valueOf(normalized);
-            else throw new IllegalArgumentException("unsupported relation direction or type");
+            else throw new IllegalArgumentException("不支持的关系方向或类型");
         } catch (IllegalArgumentException exception) {
-            throw new IllegalArgumentException("unsupported relation direction or type: " + relationType, exception);
+            throw new IllegalArgumentException("不支持的关系方向或类型: " + relationType, exception);
         }
     }
 
@@ -282,7 +282,7 @@ public class CatalogAdminService {
             item.setRelationType(StoryEntityRelationType.valueOf(relation)); storyEntityRelMapper.insert(item);
             result.setRelationKind("story_entity"); result.setRelationId(item.getRelId()); return result;
         }
-        throw new IllegalArgumentException("unsupported relation direction or type");
+        throw new IllegalArgumentException("不支持的关系方向或类型");
     }
 
     public CatalogRelationVO relation(String kind, Long relationId) {
@@ -317,7 +317,7 @@ public class CatalogAdminService {
     public CatalogRelationVO deleteRelation(String kind, Long relationId) {
         CatalogRelationVO result = relation(kind, relationId);
         if (result == null) {
-            throw new IllegalArgumentException("catalog relation not found");
+            throw new IllegalArgumentException("目录关系不存在");
         }
         switch (kind) {
             case "site_event" -> siteEventRelMapper.deleteById(relationId);
@@ -327,7 +327,7 @@ public class CatalogAdminService {
             case "memorial_hero" -> memorialHeroRelMapper.deleteById(relationId);
             case "memorial_event" -> memorialEventRelMapper.deleteById(relationId);
             case "story_entity" -> storyEntityRelMapper.deleteById(relationId);
-            default -> throw new IllegalArgumentException("unsupported relation kind");
+            default -> throw new IllegalArgumentException("不支持的关系类别");
         }
         return result;
     }
@@ -367,7 +367,7 @@ public class CatalogAdminService {
             case HERO -> { HeroPerson item = new HeroPerson(); apply(type, item, request); item.setReviewStatus(ReviewStatus.APPROVED); item.setActive(true); heroMapper.insert(item); yield item.getHeroId(); }
             case EVENT -> { HistoricalEvent item = new HistoricalEvent(); apply(type, item, request); item.setReviewStatus(ReviewStatus.APPROVED); item.setActive(true); eventMapper.insert(item); yield item.getEventId(); }
             case STORY -> { RedStory item = new RedStory(); apply(type, item, request); item.setReviewStatus(ReviewStatus.APPROVED); item.setActive(true); storyMapper.insert(item); yield item.getStoryId(); }
-            default -> throw new IllegalArgumentException("unsupported entity type");
+            default -> throw new IllegalArgumentException("不支持的实体类型");
         };
     }
 
@@ -379,7 +379,7 @@ public class CatalogAdminService {
             case HERO -> { HeroPerson item=(HeroPerson) entity; item.setHeroCode(clean(request.getCode())); item.setHeroName(clean(request.getName())); item.setNativePlaceRegionId(request.getRegionId()); item.setNativePlaceText(clean(request.getAddress())); item.setProfileSummary(clean(request.getSummary())); item.setMainDeeds(clean(request.getDetail())); }
             case EVENT -> { HistoricalEvent item=(HistoricalEvent) entity; item.setEventCode(clean(request.getCode())); item.setEventName(clean(request.getName())); item.setPrimaryRegionId(request.getRegionId()); item.setLongitude(request.getLongitude()); item.setLatitude(request.getLatitude()); item.setHistoricalSignificance(clean(request.getSummary())); item.setEventProcess(clean(request.getDetail())); }
             case STORY -> { RedStory item=(RedStory) entity; item.setStoryCode(clean(request.getCode())); item.setStoryTitle(clean(request.getName())); item.setRelatedRegionId(request.getRegionId()); item.setSummary(clean(request.getSummary())); item.setStoryContent(clean(request.getDetail())); }
-            default -> throw new IllegalArgumentException("unsupported entity type");
+            default -> throw new IllegalArgumentException("不支持的实体类型");
         }
     }
 
@@ -388,10 +388,10 @@ public class CatalogAdminService {
         return switch (type) { case RESOURCE -> resourceMapper.selectById(id); case SITE -> siteMapper.selectById(id); case MEMORIAL -> memorialMapper.selectById(id); case HERO -> heroMapper.selectById(id); case EVENT -> eventMapper.selectById(id); case STORY -> storyMapper.selectById(id); default -> null; };
     }
 
-    private Object require(EntityType type, Long id) { Object value=find(type,id); if(value==null) throw new IllegalArgumentException("catalog entity not found"); return value; }
-    private void requirePublished(EntityType type, Long id) { Object value=require(type,id); if(reviewStatus(value)!=ReviewStatus.APPROVED || !Boolean.TRUE.equals(active(value))) throw new IllegalArgumentException("relation endpoints must be approved and active"); }
+    private Object require(EntityType type, Long id) { Object value=find(type,id); if(value==null) throw new IllegalArgumentException("目录实体不存在"); return value; }
+    private void requirePublished(EntityType type, Long id) { Object value=require(type,id); if(reviewStatus(value)!=ReviewStatus.APPROVED || !Boolean.TRUE.equals(active(value))) throw new IllegalArgumentException("关系两端实体必须已审核通过且处于启用状态"); }
 
-    private void update(EntityType type, Object entity) { switch (type) { case RESOURCE -> resourceMapper.updateById((LocalEduResource)entity); case SITE -> siteMapper.updateById((RedSite)entity); case MEMORIAL -> memorialMapper.updateById((MemorialHall)entity); case HERO -> heroMapper.updateById((HeroPerson)entity); case EVENT -> eventMapper.updateById((HistoricalEvent)entity); case STORY -> storyMapper.updateById((RedStory)entity); default -> throw new IllegalArgumentException("unsupported entity type"); } }
+    private void update(EntityType type, Object entity) { switch (type) { case RESOURCE -> resourceMapper.updateById((LocalEduResource)entity); case SITE -> siteMapper.updateById((RedSite)entity); case MEMORIAL -> memorialMapper.updateById((MemorialHall)entity); case HERO -> heroMapper.updateById((HeroPerson)entity); case EVENT -> eventMapper.updateById((HistoricalEvent)entity); case STORY -> storyMapper.updateById((RedStory)entity); default -> throw new IllegalArgumentException("不支持的实体类型"); } }
     private ReviewStatus reviewStatus(Object value) { return switchEntity(value, LocalEduResource::getReviewStatus, RedSite::getReviewStatus, MemorialHall::getReviewStatus, HeroPerson::getReviewStatus, HistoricalEvent::getReviewStatus, RedStory::getReviewStatus); }
     private Boolean active(Object value) { return switchEntity(value, LocalEduResource::getActive, RedSite::getActive, MemorialHall::getActive, HeroPerson::getActive, HistoricalEvent::getActive, RedStory::getActive); }
     private void setReviewStatus(Object value, ReviewStatus status) { if(value instanceof LocalEduResource x)x.setReviewStatus(status); else if(value instanceof RedSite x)x.setReviewStatus(status); else if(value instanceof MemorialHall x)x.setReviewStatus(status); else if(value instanceof HeroPerson x)x.setReviewStatus(status); else if(value instanceof HistoricalEvent x)x.setReviewStatus(status); else if(value instanceof RedStory x)x.setReviewStatus(status); }
@@ -425,11 +425,11 @@ public class CatalogAdminService {
     private String entityName(EntityType type, Long id){CatalogEntityVO entity=toVO(type,find(type,id));return entity==null?null:entity.getName();}
     private String relationLabel(EntityType sourceType, EntityType targetType, String relationType){String normalized=normalizeRelation(relationType);return relationOptions().stream().filter(option->sourceType.getValue().equals(option.getSourceType())&&targetType.getValue().equals(option.getTargetType())&&normalized.equals(option.getRelationType())).map(CatalogRelationOptionVO::getLabel).findFirst().orElse(normalized);}
     private String relationDisplayLabel(String relationType){return switch(normalizeRelation(relationType)){case "OCCURRED_AT"->"发生于";case "MEMORIALIZED_AT"->"被纪念于";case "PARTICIPANT"->"参与";case "LEADER"->"领导";case "WITNESS"->"见证";case "MARTYR"->"烈士";case "COMMEMORATES"->"纪念";case "EXHIBITS"->"展出";case "LOCATED_AT"->"位于";case "DISPLAYS"->"展示";case "BORN_IN"->"出生于";case "FOUGHT_IN"->"战斗于";case "MEMORIALIZED"->"被纪念";case "VISITED"->"到访";case "ABOUT"->"讲述";case "MENTIONS"->"提及";case "TEACHES"->"教育启示";case "RELATED_TO"->"相关";default->normalizeRelation(relationType);};}
-    private MediaType parseMedia(String value){if(!StringUtils.hasText(value))return MediaType.IMAGE;try{return MediaType.valueOf(value.trim().toUpperCase(Locale.ROOT));}catch(IllegalArgumentException ex){throw new IllegalArgumentException("unsupported mediaType");}}
-    private void validateRelationRequest(CatalogRelationRequest request){if(request==null||request.getSourceType()==null||request.getTargetType()==null||request.getSourceId()==null||request.getTargetId()==null||!StringUtils.hasText(request.getRelationType()))throw new IllegalArgumentException("relation source, target and type are required");validateRelationType(request.getSourceType(),request.getTargetType(),request.getRelationType());}
+    private MediaType parseMedia(String value){if(!StringUtils.hasText(value))return MediaType.IMAGE;try{return MediaType.valueOf(value.trim().toUpperCase(Locale.ROOT));}catch(IllegalArgumentException ex){throw new IllegalArgumentException("不支持的 mediaType");}}
+    private void validateRelationRequest(CatalogRelationRequest request){if(request==null||request.getSourceType()==null||request.getTargetType()==null||request.getSourceId()==null||request.getTargetId()==null||!StringUtils.hasText(request.getRelationType()))throw new IllegalArgumentException("关系源、目标和类型不能为空");validateRelationType(request.getSourceType(),request.getTargetType(),request.getRelationType());}
     private String normalizeRelation(String value){return value==null?"":value.trim().toUpperCase(Locale.ROOT).replace('-', '_').replace(' ', '_');}
-    private void validateRequest(CatalogEntityRequest request){if(request==null||request.getEntityType()==null||!StringUtils.hasText(request.getCode())||!StringUtils.hasText(request.getName()))throw new IllegalArgumentException("entityType, code and name are required");if(request.getEntityType()==EntityType.SCHOOL||request.getEntityType()==EntityType.ACTIVITY_PLAN)throw new IllegalArgumentException("unsupported catalog entity type");}
-    private EntityType entityType(String value){for(EntityType type:EntityType.values())if(type.getValue().equals(value))return type;throw new IllegalArgumentException("unsupported catalog entity type");}
+    private void validateRequest(CatalogEntityRequest request){if(request==null||request.getEntityType()==null||!StringUtils.hasText(request.getCode())||!StringUtils.hasText(request.getName()))throw new IllegalArgumentException("entityType、code 和 name 不能为空");if(request.getEntityType()==EntityType.SCHOOL||request.getEntityType()==EntityType.ACTIVITY_PLAN)throw new IllegalArgumentException("不支持的目录实体类型");}
+    private EntityType entityType(String value){for(EntityType type:EntityType.values())if(type.getValue().equals(value))return type;throw new IllegalArgumentException("不支持的目录实体类型");}
     private boolean contains(CatalogEntityVO item,String keyword){String lower=keyword.toLowerCase(Locale.ROOT);return containsText(item.getCode(),lower)||containsText(item.getName(),lower)||containsText(item.getSummary(),lower)||containsText(item.getAddress(),lower);}
     private boolean containsText(String value,String keyword){return value!=null&&value.toLowerCase(Locale.ROOT).contains(keyword);}
     private String clean(String value){return StringUtils.hasText(value)?value.trim():null;}

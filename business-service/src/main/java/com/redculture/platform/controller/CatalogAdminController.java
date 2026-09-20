@@ -23,7 +23,7 @@ public class CatalogAdminController {
     @GetMapping("/entities")
     public ApiResponse<PageResult<CatalogEntityVO>> page(@RequestParam(required = false) EntityType entityType, @RequestParam(required = false) ResourceCategory resourceCategory, @RequestParam(required = false) Long regionId, @RequestParam(required = false) ReviewStatus reviewStatus, @RequestParam(required = false) Boolean active, @RequestParam(required = false) String keyword, @RequestParam(required = false) Long pageNum, @RequestParam(required = false) Long pageSize) { return ApiResponse.success(catalogService.page(entityType, resourceCategory, regionId, reviewStatus, active, keyword, pageNum, pageSize)); }
     @GetMapping("/entities/{entityType}/{entityId}")
-    public ApiResponse<CatalogEntityVO> detail(@PathVariable EntityType entityType,@PathVariable Long entityId){CatalogEntityVO item=catalogService.detail(entityType,entityId);return item==null?ApiResponse.fail("catalog entity not found"):ApiResponse.success(item);}
+    public ApiResponse<CatalogEntityVO> detail(@PathVariable EntityType entityType,@PathVariable Long entityId){CatalogEntityVO item=catalogService.detail(entityType,entityId);return item==null?ApiResponse.fail("目录实体不存在"):ApiResponse.success(item);}
     @PutMapping("/entities/{entityType}/{entityId}")
     public ApiResponse<CatalogEntityVO> update(@PathVariable EntityType entityType,@PathVariable Long entityId,@RequestBody CatalogEntityRequest request){try{CatalogEntityVO item=catalogService.update(entityType,entityId,request);projectionService.projectEntity(item);return ApiResponse.success("catalog entity updated",item);}catch(IllegalArgumentException ex){return ApiResponse.fail(ex.getMessage());}}
     @DeleteMapping("/entities/{entityType}/{entityId}")
@@ -39,7 +39,7 @@ public class CatalogAdminController {
     @GetMapping("/entities/{entityType}/{entityId}/relations")
     public ApiResponse<List<CatalogRelationVO>> relations(@PathVariable EntityType entityType,@PathVariable Long entityId){try{return ApiResponse.success(catalogService.relations(entityType,entityId));}catch(IllegalArgumentException ex){return ApiResponse.fail(ex.getMessage());}}
     @DeleteMapping("/relations/{kind}/{relationId}")
-    public ApiResponse<CatalogRelationVO> deleteRelation(@PathVariable String kind,@PathVariable Long relationId){try{CatalogRelationVO relation=catalogService.relation(kind,relationId);if(relation==null)return ApiResponse.fail("catalog relation not found");projectionService.removeRelation(relation);return ApiResponse.success("catalog relation deleted",catalogService.deleteRelation(kind,relationId));}catch(IllegalArgumentException ex){return ApiResponse.fail(ex.getMessage());}}
+    public ApiResponse<CatalogRelationVO> deleteRelation(@PathVariable String kind,@PathVariable Long relationId){try{CatalogRelationVO relation=catalogService.relation(kind,relationId);if(relation==null)return ApiResponse.fail("目录关系不存在");projectionService.removeRelation(relation);return ApiResponse.success("catalog relation deleted",catalogService.deleteRelation(kind,relationId));}catch(IllegalArgumentException ex){return ApiResponse.fail(ex.getMessage());}}
     @GetMapping("/relation-options")
     public ApiResponse<List<CatalogRelationOptionVO>> relationOptions(){return ApiResponse.success(catalogService.relationOptions());}
     @PostMapping("/projection-tasks/{taskId}/retry")

@@ -276,7 +276,7 @@ class SqliteImporter:
         backup_path = self._backup(source_path)
         backup_snapshot = self._inspect(backup_path)
         if backup_snapshot.row_counts != snapshot.row_counts:
-            raise SqliteImportError("SQLite backup verification failed")
+            raise SqliteImportError("SQLite 备份校验失败")
         verification: dict[str, Any]
         async with self.database.transaction() as connection:
             await connection.execute(
@@ -304,7 +304,7 @@ class SqliteImporter:
             }
             if nonempty:
                 raise SqliteImportError(
-                    "PostgreSQL target tables must be empty before first import"
+                    "首次导入前 PostgreSQL 目标表必须为空"
                 )
             await self._insert_all(connection, backup_snapshot)
             await self._reset_sequences(connection)
@@ -337,7 +337,7 @@ class SqliteImporter:
     @staticmethod
     def _readonly_connection(path: Path) -> sqlite3.Connection:
         if not path.is_file():
-            raise SqliteImportError(f"SQLite source not found: {path}")
+            raise SqliteImportError(f"SQLite 源文件不存在：{path}")
         connection = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA query_only = ON")
@@ -357,13 +357,13 @@ class SqliteImporter:
             missing = [spec.name for spec in TABLE_SPECS if spec.name not in available]
             if missing:
                 raise SqliteImportError(
-                    "SQLite source is missing required tables: " + ", ".join(missing)
+                    "SQLite 源数据缺少必需表：" + ", ".join(missing)
                 )
             foreign_key_errors = connection.execute(
                 "PRAGMA foreign_key_check"
             ).fetchall()
             if foreign_key_errors:
-                raise SqliteImportError("SQLite source contains foreign-key orphans")
+                raise SqliteImportError("SQLite 源数据包含孤立外键记录")
             for spec in TABLE_SPECS:
                 actual_columns = {
                     str(row["name"])
@@ -376,7 +376,7 @@ class SqliteImporter:
                 ]
                 if missing_columns:
                     raise SqliteImportError(
-                        f"SQLite table {spec.name} is missing columns: "
+                        f"SQLite 表 {spec.name} 缺少字段："
                         + ", ".join(missing_columns)
                     )
                 selected = ", ".join(f'"{column}"' for column in spec.columns)
@@ -399,7 +399,7 @@ class SqliteImporter:
             ).fetchall()
             if active_duplicates:
                 raise SqliteImportError(
-                    "SQLite source contains multiple active Prompt versions"
+                    "SQLite 源数据包含多个启用的提示词版本"
                 )
         return SqliteSnapshot(
             source_path=resolved,
@@ -420,17 +420,17 @@ class SqliteImporter:
                     parsed = json.loads(value or "{}")
                 except (TypeError, ValueError, json.JSONDecodeError) as exc:
                     raise SqliteImportError(
-                        f"invalid JSON in {spec.name}.{column} row {index}"
+                        f"JSON 无效，位于 {spec.name}.{column} 行{index}"
                     ) from exc
                 if not isinstance(parsed, (dict, list)):
                     raise SqliteImportError(
-                        f"invalid JSON shape in {spec.name}.{column} row {index}"
+                        f"JSON 结构无效，位于 {spec.name}.{column} 行{index}"
                     )
             for column in spec.boolean_columns:
                 value = row[column]
                 if value is not None and value not in (0, 1, False, True):
                     raise SqliteImportError(
-                        f"invalid boolean in {spec.name}.{column} row {index}"
+                        f"布尔值无效，位于 {spec.name}.{column} 行{index}"
                     )
             for column in spec.timestamp_columns:
                 value = row[column]
@@ -445,7 +445,7 @@ class SqliteImporter:
             parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
         except ValueError as exc:
             raise SqliteImportError(
-                f"invalid timestamp in {table}.{column} row {row_index}"
+                f"无效的时间戳，位于 {table}.{column} 行{row_index}"
             ) from exc
         if parsed.tzinfo is None:
             parsed = parsed.replace(tzinfo=timezone.utc)
@@ -497,8 +497,8 @@ class SqliteImporter:
         for column in spec.columns:
             value = row[column]
             if spec.name == "agent_thread" and column == "summary":
-                # Legacy summaries may already contain repeated compression output.
-                # Import raw messages as the source of truth and rebuild summaries.
+# 旧版摘要可能已经包含重复的压缩结果。
+# 以原始消息为事实来源重新导入并构建摘要。
                 value = ""
             if column in spec.json_columns:
                 value = Jsonb(json.loads(value or "{}"))
@@ -524,7 +524,7 @@ class SqliteImporter:
             sequence_name = str((sequence or {}).get("sequence_name") or "")
             if not sequence_name:
                 raise SqliteImportError(
-                    f"identity sequence not found for {spec.name}"
+                    f"未找到对应的标识序列：{spec.name}"
                 )
             row = await (
                 await connection.execute(
@@ -555,7 +555,7 @@ class SqliteImporter:
             else counts == snapshot.row_counts
         )
         if not counts_match:
-            raise SqliteImportError("PostgreSQL row-count verification failed")
+            raise SqliteImportError("PostgreSQL 行数校验失败")
         primary_key_digests: dict[str, str] = {}
         for spec in TABLE_SPECS:
             columns = sql.SQL(", ").join(
@@ -579,7 +579,7 @@ class SqliteImporter:
             )
             if not keys_match:
                 raise SqliteImportError(
-                    f"PostgreSQL primary-key verification failed for {spec.name}"
+                    f"PostgreSQL 主键校验失败：{spec.name}"
                 )
             primary_key_digests[spec.name] = self._key_digest(source_keys)
         orphan_row = await (
@@ -597,7 +597,7 @@ class SqliteImporter:
         ).fetchone()
         orphan_count = int((orphan_row or {}).get("orphan_count") or 0)
         if orphan_count:
-            raise SqliteImportError("PostgreSQL foreign-key verification failed")
+            raise SqliteImportError("PostgreSQL 外键校验失败")
         active_duplicates = await (
             await connection.execute(
                 """
@@ -608,7 +608,7 @@ class SqliteImporter:
         ).fetchall()
         if active_duplicates:
             raise SqliteImportError(
-                "PostgreSQL active Prompt uniqueness verification failed"
+                "PostgreSQL 当前启用提示词唯一性校验失败"
             )
         sequences: dict[str, int] = {}
         for spec in TABLE_SPECS:
@@ -647,7 +647,7 @@ class SqliteImporter:
             )
             if not sequence_valid:
                 raise SqliteImportError(
-                    f"PostgreSQL identity sequence verification failed for {spec.name}"
+                    f"PostgreSQL 标识序列校验失败：{spec.name}"
                 )
             sequences[spec.name] = actual_next
         return {

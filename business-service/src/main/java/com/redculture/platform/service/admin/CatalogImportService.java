@@ -432,8 +432,8 @@ public class CatalogImportService {
     }
 
     /**
-     * Resolves the most specific supplied administrative region and verifies every supplied parent-child link.
-     * The former single-region column remains supported by {@link #resolveRegion(String)} for older workbooks.
+     * 解析输入的最细行政区划，并校验每一条输入的父子级联关系。
+     * 对旧版工作簿仍通过 {@link #resolveRegion(String)} 支持原有的单行政区划列。
      */
     private Long resolveRegionPath(String provinceName, String cityName, String countyName, String townshipName) {
         AdministrativeRegion province = resolveRegionByName(RegionLevel.PROVINCE, provinceName, null, "省份");
@@ -557,7 +557,7 @@ public class CatalogImportService {
         for (EntityType type : EntityType.values()) {
             if (type.getValue().equalsIgnoreCase(normalized) || type.name().equalsIgnoreCase(normalized)) return type;
         }
-        throw new IllegalArgumentException("unsupported entity type");
+        throw new IllegalArgumentException("不支持的实体类型");
     }
 
     private Long resolveEntityId(EntityType type, String code, Map<String, Long> importedEntityIds) {

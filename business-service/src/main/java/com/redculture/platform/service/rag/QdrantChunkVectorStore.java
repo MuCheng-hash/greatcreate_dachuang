@@ -148,7 +148,7 @@ public class QdrantChunkVectorStore implements ChunkVectorStore {
                 JsonNode nextOffset = result.path("next_page_offset");
                 offset = nextOffset.canConvertToLong() ? nextOffset.asLong() : null;
             } catch (Exception exception) {
-                throw new IllegalStateException("failed to parse Qdrant scroll response", exception);
+                throw new IllegalStateException("解析 Qdrant 滚动查询响应失败", exception);
             }
         } while (offset != null);
         return ids;
@@ -179,7 +179,7 @@ public class QdrantChunkVectorStore implements ChunkVectorStore {
             }
             throw exception;
         } catch (Exception exception) {
-            throw new IllegalStateException("failed to resolve Qdrant alias", exception);
+            throw new IllegalStateException("解析 Qdrant 别名失败", exception);
         }
     }
 
@@ -248,7 +248,7 @@ public class QdrantChunkVectorStore implements ChunkVectorStore {
         try {
             JsonNode result = objectMapper.readTree(response).path("result");
             if (!result.isArray()) {
-                throw new IllegalStateException("Qdrant response has no result array");
+                throw new IllegalStateException("Qdrant 响应缺少 result 数组");
             }
             List<VectorSearchCandidate> candidates = new ArrayList<>();
             for (JsonNode item : result) {
@@ -261,7 +261,7 @@ public class QdrantChunkVectorStore implements ChunkVectorStore {
         } catch (IllegalStateException exception) {
             throw exception;
         } catch (Exception exception) {
-            throw new IllegalStateException("failed to parse Qdrant response", exception);
+            throw new IllegalStateException("解析 Qdrant 响应失败", exception);
         }
     }
 

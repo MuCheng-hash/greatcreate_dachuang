@@ -64,11 +64,11 @@ LOGGER = logging.getLogger("llm.stateful_agent.api")
 
 
 class DisconnectAwareStreamingResponse(StreamingResponse):
-    """Monitor ASGI disconnects even while an SSE producer is idle.
+    """即使 SSE 生产者空闲，也监测 ASGI 断开连接。
 
-    Starlette's ASGI 2.4 path discovers disconnects only on the next failed
-    response write. Agent model/tool calls can be silent for many seconds, so
-    the upstream task must also listen for ``http.disconnect`` concurrently.
+    Starlette 的 ASGI 2.4 路径只有在下一次响应写入失败时才能发现断开连接。
+    Agent 模型或工具调用可能静默数秒，因此上游任务还必须并发监听
+    ``http.disconnect``。
     """
 
     async def __call__(self, scope, receive, send) -> None:
@@ -81,8 +81,7 @@ class DisconnectAwareStreamingResponse(StreamingResponse):
                 try:
                     await self.stream_response(send)
                 except OSError:
-                    # A failed send is the transport-level equivalent of the
-                    # disconnect message handled by the sibling task.
+                    # 发送失败在传输层等价于由同级任务处理的断开连接消息。
                     pass
                 finally:
                     task_group.cancel_scope.cancel()
@@ -98,8 +97,10 @@ class DisconnectAwareStreamingResponse(StreamingResponse):
 async def _thread_response(
     runtime: AgentRuntime, record: Any, include_messages: bool = True
 ) -> ThreadResponse:
+    """将已完成范围校验的仓储会话转换为 API 响应，可选携带按序消息历史。"""
     messages = []
     if include_messages:
+        # 列表读取只在本函数上游已经完成所有权校验后执行，仓储层不会重复猜测调用身份。
         for item in await runtime.repository.list_messages(record.thread_id):
             messages.append(StoredMessage(
                 id=item["id"], role=item["role"], content=item["content"],
@@ -113,6 +114,7 @@ async def _thread_response(
 
 
 def _memory_response(record: MemoryRecord) -> MemoryItem:
+    """将内部记忆记录映射为 API 模型，明确暴露生命周期时间而不补造状态。"""
     return MemoryItem(
         id=record.id,
         memoryType=record.memory_type,
@@ -131,6 +133,7 @@ def _memory_response(record: MemoryRecord) -> MemoryItem:
 
 
 def _memory_conflict_preview_response(preview: Any) -> MemoryConflictPreviewResponse:
+    """返回确认前冲突预览，使客户端在替换旧记忆前获得显式决策机会。"""
     return MemoryConflictPreviewResponse(
         candidate=_memory_response(preview.candidate),
         conflicts=[_memory_response(item) for item in preview.conflicts],
@@ -139,6 +142,7 @@ def _memory_conflict_preview_response(preview: Any) -> MemoryConflictPreviewResp
 
 
 def _raise_memory_http_error(exc: Exception) -> None:
+    """将记忆状态机的受控异常映射为稳定 HTTP 语义，不泄露数据库细节。"""
     if isinstance(exc, MemoryConflictError):
         preview = _memory_conflict_preview_response(exc.preview)
         raise HTTPException(
@@ -150,7 +154,7 @@ def _raise_memory_http_error(exc: Exception) -> None:
             },
         ) from exc
     if isinstance(exc, MemoryNotFoundError):
-        raise HTTPException(status_code=404, detail="memory not found") from exc
+        raise HTTPException(status_code=404, detail="记忆不存在") from exc
     if isinstance(exc, MemoryStateError):
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     if isinstance(exc, MemoryValidationError):
@@ -164,11 +168,17 @@ def create_app(
     alerts: FallbackAlertManager | None = None,
     container: AppContainer | None = None,
 ) -> FastAPI:
+    """组装 FastAPI、生命周期任务和受认证的 Agent API 路由。
+
+    ``container`` 用于测试或外部依赖注入；显式传入的 ``settings`` 必须与容器共享
+    同一对象，避免路由鉴权和运行时读取到两套配置。
+    """
     if container is None:
         settings = settings or get_settings()
         container = build_container(settings, observability, alerts)
     elif settings is not None and settings is not container.settings:
-        raise ValueError("settings and container.settings must reference the same object")
+        # 同一进程中的令牌、模型链和数据库配置必须一致，不能混用测试容器与外部设置。
+        raise ValueError("settings 与 container.settings 必须引用同一对象")
     settings = container.settings
     repository = container.repository
     observability = container.observability
@@ -184,6 +194,7 @@ def create_app(
     action_repository = container.action_repository
 
     def action_response(action: AgentActionRecord) -> AgentActionResponse:
+        """生成待确认写操作的公开视图，仅返回已脱敏参数和状态机允许的字段。"""
         title = f"确认执行 {action.tool_name}"
         summary = "该操作会修改业务数据，请确认是否继续。"
         return AgentActionResponse(
@@ -203,6 +214,7 @@ def create_app(
         )
 
     async def memory_cleanup_loop() -> None:
+        """按配置周期清理过期记忆；单次失败只记录日志，不终止 API 服务。"""
         interval = max(1, settings.agent_memory_cleanup_interval_seconds)
         while True:
             await asyncio.sleep(interval)
@@ -212,11 +224,13 @@ def create_app(
                 LOGGER.exception("agent_memory_cleanup_failed")
 
     async def checkpoint_cleanup_once() -> None:
+        """领取一批过期检查点清理任务，删除成功后才确认该任务。"""
         turn_ids = await turn_repository.claim_checkpoint_cleanup(
             settings.agent_checkpoint_retention_days,
             settings.agent_checkpoint_cleanup_batch_size,
         )
         for turn_id in turn_ids:
+            # 清理领取和完成确认分离，进程在删除中断后可由过期租约重新领取。
             deleted = False
             try:
                 await checkpoints.delete_thread(turn_id)
@@ -227,6 +241,7 @@ def create_app(
                     extra={"turnId": turn_id},
                 )
             finally:
+                # 无论底层删除是否失败都归还领取状态；失败会保留为可再次领取的任务。
                 await turn_repository.finish_checkpoint_cleanup(
                     turn_id, deleted=deleted
                 )
@@ -243,6 +258,7 @@ def create_app(
                 LOGGER.exception("agent_checkpoint_cleanup_loop_failed")
 
     async def action_cleanup_once() -> None:
+        """使过期的待确认动作失效，并按保留期脱敏已结束动作的载荷。"""
         await action_repository.expire_pending()
         await action_repository.redact_finished(
             settings.agent_action_payload_retention_days,
@@ -260,6 +276,7 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(application: FastAPI):
+        """管理数据库、检查点和后台清理任务的启动顺序与有序关闭。"""
         cleanup_task: asyncio.Task[None] | None = None
         checkpoint_cleanup_task: asyncio.Task[None] | None = None
         action_cleanup_task: asyncio.Task[None] | None = None
@@ -268,6 +285,7 @@ def create_app(
             await database.open()
             database_open = True
             if settings.app_env == "dev":
+                # 仅开发环境允许自动创建结构；生产环境只验证，避免启动时隐式迁移。
                 await migrator.migrate()
                 await checkpoints.setup(settings.migration_dsn)
             else:
@@ -292,6 +310,7 @@ def create_app(
             application.state.action_cleanup_task = action_cleanup_task
             yield
         finally:
+            # 先停止产生数据库写入的后台任务，再关闭依赖连接，避免关闭期间的新事务。
             if action_cleanup_task is not None:
                 action_cleanup_task.cancel()
                 with suppress(asyncio.CancelledError):
@@ -324,6 +343,7 @@ def create_app(
     app.state.alerts = alerts
 
     async def database_unavailable(_request: Any, exc: Exception) -> Response:
+        """统一数据库连接故障响应，向客户端返回可重试的 503 而不暴露内部错误。"""
         LOGGER.error(
             "postgresql_unavailable",
             extra={"errorType": type(exc).__name__},
@@ -343,28 +363,31 @@ def create_app(
     async def require_internal_agent_token(
         token: str | None = Header(default=None, alias="X-Agent-Service-Token"),
     ) -> None:
+        """校验 Java 等内部调用方携带的服务令牌，拒绝未配置或不匹配请求。"""
         expected = settings.internal_service_token.strip()
         if not expected:
-            raise HTTPException(status_code=503, detail="AGENT_INTERNAL_SERVICE_TOKEN is not configured")
+            raise HTTPException(status_code=503, detail="AGENT_INTERNAL_SERVICE_TOKEN 未配置")
         if not secrets.compare_digest(token or "", expected):
-            raise HTTPException(status_code=401, detail="agent service token is invalid")
+            raise HTTPException(status_code=401, detail="Agent 服务令牌无效")
 
     async def require_model_gateway_key(
         token: str | None = Header(default=None, alias="X-Model-Gateway-Key"),
     ) -> None:
+        """保护模型和嵌入内部网关，使用恒定时间比较避免令牌时序泄露。"""
         expected = settings.internal_service_token.strip()
         if not expected or not secrets.compare_digest(token or "", expected):
-            raise HTTPException(status_code=401, detail="model gateway key is invalid")
+            raise HTTPException(status_code=401, detail="模型网关密钥无效")
 
     @app.post("/internal/vision/analyze", dependencies=[Depends(require_model_gateway_key)])
     async def analyze_image(payload: dict[str, Any]) -> dict[str, Any]:
+        """将入库图片送入已配置视觉模型，返回供检索使用的中文描述。"""
         model_name = str(payload.get("model") or settings.vision_model).strip()
         image = str(payload.get("imageBase64") or "")
         if not model_name or not image:
-            raise HTTPException(status_code=422, detail="model and imageBase64 are required")
+            raise HTTPException(status_code=422, detail="model 和 imageBase64 不能为空")
         vision = next((item for target, item in model.chat_models if target.model == model_name), None)
         if vision is None:
-            raise HTTPException(status_code=422, detail="vision model is not configured")
+            raise HTTPException(status_code=422, detail="视觉模型未配置")
         result = await vision.ainvoke([{"role": "user", "content": [
             {"type": "text", "text": "请用中文客观描述图片中的场景、文字、人物、地点和结构信息，返回一段可用于知识库检索的描述。"},
             {"type": "image_url", "image_url": {"url": "data:image/png;base64," + image}},
@@ -373,40 +396,46 @@ def create_app(
 
     @app.post("/internal/embeddings/hybrid", dependencies=[Depends(require_model_gateway_key)])
     async def hybrid_embeddings(payload: dict[str, Any]) -> dict[str, Any]:
+        """调用内部嵌入网关，并在本地构造稀疏词频向量用于混合检索。"""
         texts = payload.get("texts")
         if not isinstance(texts, list) or not settings.embedding_api_url:
-            raise HTTPException(status_code=503, detail="embedding gateway is not configured")
+            raise HTTPException(status_code=503, detail="嵌入模型网关未配置")
         async with httpx.AsyncClient(timeout=90) as client:
             response = await client.post(settings.embedding_api_url.rstrip("/") + "/embeddings", headers={"Authorization": "Bearer " + settings.embedding_api_key}, json={"model": payload.get("model") or settings.embedding_model, "input": texts, "dimensions": settings.embedding_dimensions})
         response.raise_for_status()
         items = []
         for item, text in zip(response.json().get("data", []), texts):
+            # 稀疏部分与输入文本一一对应；zip 自然截断异常响应中缺失的嵌入项。
             tokens = {}
             for token in str(text).lower().split(): tokens[token] = tokens.get(token, 0) + 1
             items.append({"dense": item["embedding"], "sparse": {"indices": list(range(len(tokens))), "values": list(tokens.values())}})
         return {"items": items, "model": payload.get("model") or settings.embedding_model}
 
     async def require_prompt_admin(x_prompt_admin_token: str = Header(default="")) -> None:
+        """校验提示词管理令牌；未启用管理令牌时拒绝所有变更入口。"""
         if not settings.prompt_admin_token:
-            raise HTTPException(status_code=503, detail="PROMPT_ADMIN_TOKEN is not configured")
+            raise HTTPException(status_code=503, detail="PROMPT_ADMIN_TOKEN 未配置")
         if not hmac.compare_digest(x_prompt_admin_token, settings.prompt_admin_token):
-            raise HTTPException(status_code=401, detail="invalid prompt admin token")
+            raise HTTPException(status_code=401, detail="提示词管理员令牌无效")
 
     async def require_observability_admin(
         x_observability_admin_token: str = Header(default=""),
     ) -> None:
+        """校验观测查询令牌，避免工具审计和追踪信息暴露给普通调用方。"""
         if not settings.observability_token:
-            raise HTTPException(status_code=503, detail="OBSERVABILITY_ADMIN_TOKEN is not configured")
+            raise HTTPException(status_code=503, detail="OBSERVABILITY_ADMIN_TOKEN 未配置")
         if not hmac.compare_digest(x_observability_admin_token, settings.observability_token):
-            raise HTTPException(status_code=401, detail="invalid observability admin token")
+            raise HTTPException(status_code=401, detail="可观测性管理员令牌无效")
 
     def validate_model_selection(request: AgentMessageRequest) -> None:
+        """在创建轮次前验证 modelId，避免无效选择被写入幂等请求摘要。"""
         try:
             model.model_configs_for(request.model_id)
         except ValueError as exc:
-            raise HTTPException(status_code=422, detail="unknown modelId") from exc
+            raise HTTPException(status_code=422, detail="未知的 modelId") from exc
 
     def raise_turn_conflict(exc: TurnConflictError) -> None:
+        """将轮次并发与幂等冲突统一映射为包含机器码的 409 响应。"""
         raise HTTPException(
             status_code=409,
             detail={"code": exc.code, "message": str(exc)},
@@ -463,6 +492,7 @@ def create_app(
     async def update_memory_setting(
         request: MemorySettingUpdateRequest,
     ) -> MemorySettingResponse:
+        """更新账号在指定范围内的记忆开关；全局关闭时仍保留用户设置供日后恢复。"""
         try:
             record = await memory_repository.update_setting(
                 request.owner_id,
@@ -495,6 +525,7 @@ def create_app(
         ),
         limit: int = Query(default=200, ge=1, le=500),
     ) -> list[MemoryItem]:
+        """列出当前账号和范围内的记忆，可按状态与类型过滤且先执行节流清理。"""
         try:
             await memory_repository.maybe_cleanup()
             records = await memory_repository.list_memories(
@@ -516,6 +547,7 @@ def create_app(
         dependencies=[Depends(require_internal_agent_token)],
     )
     async def create_memory(request: MemoryCreateRequest) -> MemoryItem:
+        """创建显式或推断记忆；字段冲突必须由请求明确允许替换才会继续。"""
         try:
             record = await memory_repository.create_memory(
                 request.owner_id,
@@ -545,6 +577,7 @@ def create_app(
         scope_type: Literal["SCHOOL", "REGION", "RESOURCE"] = Query(alias="scopeType"),
         scope_id: str = Query(alias="scopeId"),
     ) -> MemoryConflictPreviewResponse:
+        """读取待确认记忆的冲突预览，不执行激活或替换等状态变更。"""
         try:
             preview = await memory_repository.confirmation_preview(
                 owner_id, scope_type, scope_id, memory_id
@@ -565,6 +598,7 @@ def create_app(
         scope_type: Literal["SCHOOL", "REGION", "RESOURCE"] = Query(alias="scopeType"),
         scope_id: str = Query(alias="scopeId"),
     ) -> MemoryItem:
+        """更新范围内记忆的可编辑字段；只转发请求实际携带的字段避免空值误覆盖。"""
         updates: dict[str, Any] = {}
         if "content" in request.model_fields_set:
             updates["content"] = request.content
@@ -597,6 +631,7 @@ def create_app(
         scope_type: Literal["SCHOOL", "REGION", "RESOURCE"] = Query(alias="scopeType"),
         scope_id: str = Query(alias="scopeId"),
     ) -> MemoryItem:
+        """确认 pending 记忆并尝试激活；存在字段冲突时返回 409 供调用方明确决策。"""
         try:
             record = await memory_repository.confirm_memory(
                 owner_id,
@@ -620,6 +655,7 @@ def create_app(
         scope_type: Literal["SCHOOL", "REGION", "RESOURCE"] = Query(alias="scopeType"),
         scope_id: str = Query(alias="scopeId"),
     ) -> MemoryItem:
+        """将范围内记忆移入回收站，保留在保留期内恢复和审计的可能。"""
         try:
             record = await memory_repository.delete_memory(
                 owner_id, scope_type, scope_id, memory_id
@@ -640,6 +676,7 @@ def create_app(
         scope_type: Literal["SCHOOL", "REGION", "RESOURCE"] = Query(alias="scopeType"),
         scope_id: str = Query(alias="scopeId"),
     ) -> MemoryItem:
+        """恢复回收站中的记忆；若与活动记忆冲突，仍需显式允许替换。"""
         try:
             record = await memory_repository.restore_memory(
                 owner_id,
@@ -663,6 +700,7 @@ def create_app(
         scope_type: Literal["SCHOOL", "REGION", "RESOURCE"] = Query(alias="scopeType"),
         scope_id: str = Query(alias="scopeId"),
     ) -> Response:
+        """永久删除回收站记忆；活动或待确认状态不得绕过生命周期直接物理删除。"""
         try:
             await memory_repository.permanent_delete(
                 owner_id, scope_type, scope_id, memory_id
@@ -673,6 +711,7 @@ def create_app(
 
     @app.get("/metrics", response_class=PlainTextResponse)
     async def metrics() -> str:
+        """返回 Prometheus 指标文本，供受控采集端轮询而非前端业务展示。"""
         return await observability.prometheus_metrics()
 
     @app.get("/admin/observability/traces")
@@ -689,6 +728,7 @@ def create_app(
         offset: int = Query(default=0, ge=0),
         _admin: None = Depends(require_observability_admin),
     ) -> list[dict[str, Any]]:
+        """按受限筛选条件返回模型调用追踪，仅允许观测管理员访问。"""
         return await observability.traces(
             {
                 "user_id": user_id, "session_id": session_id, "feature": feature,
@@ -712,12 +752,14 @@ def create_app(
         include_question_metrics: bool = Query(default=False, alias="includeQuestionMetrics"),
         _admin: None = Depends(require_observability_admin),
     ) -> dict[str, Any]:
+        """聚合模型追踪指标；问题完成数仅在请求参数明确要求时额外查询。"""
         summary = await observability.summary({
             "user_id": user_id, "session_id": session_id, "feature": feature,
             "model": model_name, "status": status, "trace_id": trace_id,
             "started_after": started_after, "started_before": started_before,
         })
         if include_question_metrics:
+            # 此统计需要跨表聚合，默认跳过以保持常规观测查询成本可控。
             summary["completedQuestionCount"] = (
                 await repository.count_completed_formal_account_chat_turns()
             )
@@ -730,12 +772,14 @@ def create_app(
         limit: int = Query(default=50, ge=1, le=100),
         _admin: None = Depends(require_observability_admin),
     ) -> list[dict[str, Any]]:
+        """返回已脱敏的工具审计摘要，供管理员定位工具降级和失败。"""
         return await repository.list_tool_audits(tool_name, status, limit)
 
     @app.get("/admin/memory-metrics")
     async def memory_metrics(
         _admin: None = Depends(require_observability_admin),
     ) -> dict[str, Any]:
+        """返回不含记忆正文的生命周期统计，供管理员评估功能运行状态。"""
         return await memory_repository.aggregate_metrics()
 
     @app.post(
@@ -743,6 +787,7 @@ def create_app(
         dependencies=[Depends(require_internal_agent_token)],
     )
     async def create_thread(request: ThreadCreateRequest) -> ThreadResponse:
+        """在内部调用方提供的账号和范围下创建空会话，不接受模型自行声明身份。"""
         record = await runtime.create_thread(
             request.owner_id, request.scope_type, request.scope_id
         )
@@ -760,6 +805,7 @@ def create_app(
         limit: int = Query(default=50, ge=1, le=100),
         status: Literal["active", "archived"] = Query(default="active"),
     ) -> list[ThreadSummaryResponse]:
+        """分页列出当前账号和可选范围内的会话摘要，不返回消息正文。"""
         return [
             ThreadSummaryResponse(
                 threadId=item.thread_id, scopeType=item.scope_type, scopeId=item.scope_id,
@@ -781,6 +827,7 @@ def create_app(
         scope_type: str = Query(alias="scopeType"),
         scope_id: str | int = Query(alias="scopeId"),
     ) -> TurnRecoveryResponse:
+        """按 clientTurnId 恢复同一身份和范围内的轮次状态及已提交/部分回答。"""
         try:
             turn = await turn_repository.get(
                 client_turn_id,
@@ -789,6 +836,7 @@ def create_app(
                 scope_id=scope_id,
             )
         except PermissionError as exc:
+            # 对越权与不存在统一返回未找到，避免通过恢复接口枚举其他范围的轮次。
             LOGGER.info(
                 "agent_turn_recovery_scope_miss",
                 extra={"errorType": type(exc).__name__},
@@ -803,6 +851,7 @@ def create_app(
         messages = await repository.list_messages_for_turn(turn.turn_id)
         pending_action = await action_repository.pending_for_turn(turn.turn_id)
         assistant = next(
+            # 一轮正式回复至多一条助手消息；部分回答也沿用该位置供客户端续显。
             (item for item in messages if item["role"] == "assistant"), None
         )
         stored = (
@@ -840,14 +889,15 @@ def create_app(
         scope_type: str = Query(alias="scopeType"),
         scope_id: str | int = Query(alias="scopeId"),
     ) -> AgentActionResponse:
+        """读取当前身份和范围可见的待确认或已结束动作；越权统一表现为 404。"""
         try:
             action = await action_repository.get_for_scope(
                 action_id, owner_id, scope_type, scope_id
             )
         except PermissionError as exc:
-            raise HTTPException(status_code=404, detail="action not found") from exc
+            raise HTTPException(status_code=404, detail="动作不存在") from exc
         if action is None:
-            raise HTTPException(status_code=404, detail="action not found")
+            raise HTTPException(status_code=404, detail="动作不存在")
         return action_response(action)
 
     @app.post(
@@ -858,6 +908,7 @@ def create_app(
     async def decide_agent_action(
         action_id: str, request: AgentActionDecisionRequest
     ) -> AgentActionResponse:
+        """提交用户对高风险写操作的批准或拒绝，动作状态冲突返回 409。"""
         try:
             action = await action_repository.decide(
                 action_id=action_id,
@@ -867,7 +918,7 @@ def create_app(
                 scope_id=request.scope_id,
             )
         except (LookupError, PermissionError) as exc:
-            raise HTTPException(status_code=404, detail="action not found") from exc
+            raise HTTPException(status_code=404, detail="动作不存在") from exc
         except ActionConflictError as exc:
             raise HTTPException(
                 status_code=409,
@@ -886,6 +937,7 @@ def create_app(
         scope_type: str = Query(alias="scopeType"),
         scope_id: str | int = Query(alias="scopeId"),
     ) -> TurnCancelResponse:
+        """请求取消指定轮次；若轮次正等待写操作确认，先拒绝待确认动作。"""
         try:
             existing = await turn_repository.get(
                 client_turn_id,
@@ -896,6 +948,7 @@ def create_app(
             if existing is not None:
                 pending = await action_repository.pending_for_turn(existing.turn_id)
                 if pending is not None:
+                    # 取消应同时终结人工确认分支，防止取消后的页面仍可批准旧动作。
                     await action_repository.decide(
                         action_id=pending.action_id,
                         decision="reject",
@@ -907,7 +960,7 @@ def create_app(
                 client_turn_id, owner_id, scope_type, scope_id
             )
         except (LookupError, PermissionError) as exc:
-            raise HTTPException(status_code=404, detail="turn not found") from exc
+            raise HTTPException(status_code=404, detail="轮次不存在") from exc
         return TurnCancelResponse(
             clientTurnId=client_turn_id,
             threadId=turn.thread_id,
@@ -928,12 +981,13 @@ def create_app(
         scope_type: str | None = Query(default=None, alias="scopeType"),
         scope_id: str | int | None = Query(default=None, alias="scopeId"),
     ) -> ThreadResponse:
+        """读取当前账号和可选范围内的会话及其消息历史，越权统一返回 404。"""
         try:
             record = await repository.get_thread(
                 thread_id, owner_id, scope_type, scope_id
             )
         except (ThreadNotFoundError, ThreadScopeError) as exc:
-            raise HTTPException(status_code=404, detail="thread not found") from exc
+            raise HTTPException(status_code=404, detail="会话不存在") from exc
         return await _thread_response(runtime, record)
 
     @app.post(
@@ -941,9 +995,11 @@ def create_app(
         dependencies=[Depends(require_internal_agent_token)],
     )
     async def send_thread_message(thread_id: str, request: AgentMessageRequest) -> AgentMessageResponse:
+        """向 URL 指定会话提交同步消息，拒绝正文中的 threadId 与路径不一致。"""
         validate_model_selection(request)
         if request.thread_id and request.thread_id != thread_id:
-            raise HTTPException(status_code=400, detail="threadId does not match URL")
+            # 以 URL 会话为唯一权威来源，避免客户端把身份和范围校验通过的请求写到另一会话。
+            raise HTTPException(status_code=400, detail="threadId 与 URL 不匹配")
         request.thread_id = thread_id
         try:
             return await runtime.handle(request)
@@ -965,7 +1021,7 @@ def create_app(
                 detail={"code": "turn_in_progress", "message": str(exc)},
             ) from exc
         except (ThreadNotFoundError, ThreadScopeError) as exc:
-            raise HTTPException(status_code=404, detail="thread not found") from exc
+            raise HTTPException(status_code=404, detail="会话不存在") from exc
         except MemoryValidationError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -974,6 +1030,7 @@ def create_app(
         dependencies=[Depends(require_internal_agent_token)],
     )
     async def send_message(request: AgentMessageRequest) -> AgentMessageResponse:
+        """提交同步 Agent 消息；运行时负责注册幂等轮次、持久化和模型调用。"""
         validate_model_selection(request)
         try:
             return await runtime.handle(request)
@@ -995,7 +1052,7 @@ def create_app(
                 detail={"code": "turn_in_progress", "message": str(exc)},
             ) from exc
         except (ThreadNotFoundError, ThreadScopeError) as exc:
-            raise HTTPException(status_code=404, detail="thread not found") from exc
+            raise HTTPException(status_code=404, detail="会话不存在") from exc
         except MemoryValidationError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -1004,24 +1061,27 @@ def create_app(
         dependencies=[Depends(require_internal_agent_token)],
     )
     async def stream_message(request: AgentMessageRequest) -> StreamingResponse:
+        """提交 SSE Agent 消息流；连接断开不取消已登记轮次，客户端可按幂等键恢复。"""
         validate_model_selection(request)
         if request.thread_id:
+            # 流式执行前先校验会话归属，防止后台任务在越权会话上启动。
             try:
                 await repository.require_thread(
                     request.thread_id, request.owner_id, request.scope_type, request.scope_id
                 )
             except (ThreadNotFoundError, ThreadScopeError) as exc:
-                raise HTTPException(status_code=404, detail="thread not found") from exc
+                raise HTTPException(status_code=404, detail="会话不存在") from exc
         try:
             event_stream = await runtime.start_stream(request)
         except TurnConflictError as exc:
             raise_turn_conflict(exc)
         except (ThreadNotFoundError, ThreadScopeError) as exc:
-            raise HTTPException(status_code=404, detail="thread not found") from exc
+            raise HTTPException(status_code=404, detail="会话不存在") from exc
         return DisconnectAwareStreamingResponse(
             event_stream,
             media_type="text/event-stream",
             headers={
+                # 禁用代理缓冲，确保 token、工具阶段和最终状态按 SSE 顺序尽快交付。
                 "Cache-Control": "no-cache",
                 "Connection": "keep-alive",
                 "X-Accel-Buffering": "no",
@@ -1044,9 +1104,9 @@ def create_app(
             )
             record = await repository.get_thread(thread_id, owner_id)
         except ThreadScopeError:
-            raise HTTPException(status_code=404, detail="thread not found")
+            raise HTTPException(status_code=404, detail="会话不存在")
         except ThreadNotFoundError as exc:
-            raise HTTPException(status_code=404, detail="thread not found") from exc
+            raise HTTPException(status_code=404, detail="会话不存在") from exc
         return await _thread_response(runtime, record)
 
     @app.post(
@@ -1067,7 +1127,7 @@ def create_app(
                 thread_id, owner_id, scope_type, scope_id
             )
         except (ThreadNotFoundError, ThreadScopeError) as exc:
-            raise HTTPException(status_code=404, detail="thread not found") from exc
+            raise HTTPException(status_code=404, detail="会话不存在") from exc
         return await _thread_response(runtime, record)
 
     @app.get("/admin/prompts/{prompt_key}/versions")
@@ -1100,7 +1160,7 @@ def create_app(
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except PromptVersionExistsError as exc:
-            raise HTTPException(status_code=409, detail="prompt version already exists") from exc
+            raise HTTPException(status_code=409, detail="提示词版本已存在") from exc
 
     @app.post("/admin/prompts/{prompt_key}/versions/{version}/activate")
     async def activate_prompt_version(

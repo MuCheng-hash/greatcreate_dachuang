@@ -30,12 +30,11 @@ T = TypeVar("T")
 
 
 async def _await_checkpoint_operation(operation: Awaitable[T]) -> T:
-    """Drain a started Psycopg operation before propagating task cancellation.
+    """在传播任务取消前，先完成已经开始的 Psycopg 操作。
 
-    Returning a pool connection while its pipeline command is still active makes
-    Psycopg discard that connection and may leave a server-side command running.
-    Checkpoint statements are short, so cancellation stops graph/model work
-    immediately but waits for the already-started database statement to settle.
+    如果流水线命令仍在执行时归还连接，Psycopg 会丢弃该连接，服务端命令也可能继续运行。
+    检查点语句执行时间较短，因此取消操作会立即停止图和模型工作，
+    但会等待已经开始的数据库语句完成。
     """
 
     task = asyncio.ensure_future(operation)
@@ -51,8 +50,7 @@ async def _await_checkpoint_operation(operation: Awaitable[T]) -> T:
             try:
                 task.result()
             except Exception:
-                # The caller is already cancelled; consuming the exception keeps
-                # the task from becoming an unobserved background failure.
+                # 调用方已经被取消；消费该异常可避免任务成为未观察到的后台失败。
                 pass
         raise
 
@@ -73,7 +71,7 @@ class NamespaceCheckpointSaver(BaseCheckpointSaver):
 
     def __init__(self, delegate: AsyncPostgresSaver, namespace: str):
         if not namespace.strip():
-            raise ValueError("checkpoint namespace cannot be empty")
+            raise ValueError("检查点命名空间不能为空")
         super().__init__(serde=delegate.serde)
         self.delegate = delegate
         self.namespace = namespace.strip()
@@ -101,6 +99,7 @@ class NamespaceCheckpointSaver(BaseCheckpointSaver):
         before: RunnableConfig | None = None,
         limit: int | None = None,
     ) -> AsyncIterator[CheckpointTuple]:
+        """列出当前命名空间的检查点，并在返回前去除内部前缀。"""
         scoped_config = self._scoped(config or {"configurable": {}})
         scoped_before = self._scoped(before) if before is not None else None
         iterator = self.delegate.alist(
@@ -114,8 +113,10 @@ class NamespaceCheckpointSaver(BaseCheckpointSaver):
                     break
                 unscoped = self._unscoped_tuple(value)
                 if unscoped is not None:
+                    # 调用方只能看到自己的逻辑命名空间，不能据此拼接其他轮次的存储键。
                     yield unscoped
         finally:
+            # 提前退出迭代也要关闭数据库游标，避免长连接泄漏到后续 Agent 轮次。
             await _await_checkpoint_operation(iterator.aclose())
 
     async def aput(
@@ -125,6 +126,7 @@ class NamespaceCheckpointSaver(BaseCheckpointSaver):
         metadata: CheckpointMetadata,
         new_versions: ChannelVersions,
     ) -> RunnableConfig:
+        """将图状态写入命名空间隔离后的存储键，并还原调用方配置。"""
         stored = await _await_checkpoint_operation(
             self.delegate.aput(
                 self._scoped(config), checkpoint, metadata, new_versions
@@ -139,6 +141,7 @@ class NamespaceCheckpointSaver(BaseCheckpointSaver):
         task_id: str,
         task_path: str = "",
     ) -> None:
+        """持久化图节点的增量写入，保持与所属检查点相同的命名空间。"""
         await _await_checkpoint_operation(
             self.delegate.aput_writes(
                 self._scoped(config), writes, task_id, task_path
@@ -146,11 +149,13 @@ class NamespaceCheckpointSaver(BaseCheckpointSaver):
         )
 
     async def adelete_thread(self, thread_id: str) -> None:
+        """删除委托存储中指定线程的全部命名空间检查点。"""
         await _await_checkpoint_operation(
             self.delegate.adelete_thread(thread_id)
         )
 
     def _scoped(self, config: RunnableConfig) -> RunnableConfig:
+        """为底层存储键附加受控前缀，隔离不同图或任务的检查点。"""
         configurable = dict(config.get("configurable") or {})
         inner_namespace = str(configurable.get("checkpoint_ns") or "")
         configurable["checkpoint_ns"] = (
@@ -161,6 +166,7 @@ class NamespaceCheckpointSaver(BaseCheckpointSaver):
         return {**config, "configurable": configurable}
 
     def _unscoped(self, config: RunnableConfig) -> RunnableConfig:
+        """移除仅供持久化使用的前缀，使上层恢复时保持原有配置形状。"""
         configurable = dict(config.get("configurable") or {})
         stored_namespace = str(configurable.get("checkpoint_ns") or "")
         prefix = f"{self.namespace}{self._separator}"
@@ -173,6 +179,7 @@ class NamespaceCheckpointSaver(BaseCheckpointSaver):
     def _unscoped_tuple(
         self, value: CheckpointTuple | None
     ) -> CheckpointTuple | None:
+        """还原检查点及其父配置的命名空间，避免恢复链暴露内部存储坐标。"""
         if value is None:
             return None
         return CheckpointTuple(
@@ -203,6 +210,7 @@ class CheckpointManager:
 
     @property
     def saver(self) -> AsyncPostgresSaver:
+        """按事件循环缓存 saver，避免跨事件循环复用异步资源。"""
         loop = asyncio.get_running_loop()
         if self._saver is None or self._saver_loop is not loop:
             self._saver = AsyncPostgresSaver(
@@ -216,6 +224,7 @@ class CheckpointManager:
         return len(MIGRATIONS) - 1
 
     async def setup(self, migration_dsn: str | None = None) -> int:
+        """仅在开发初始化路径创建检查点表，完成后立即校验完整迁移版本。"""
         if migration_dsn:
             async with AsyncPostgresSaver.from_conn_string(
                 migration_dsn, serde=self.serializer
@@ -226,6 +235,7 @@ class CheckpointManager:
         return await self.validate()
 
     async def validate(self) -> int:
+        """验证生产环境检查点表和迁移序列完整，拒绝带缺口的部分初始化状态。"""
         async with self.database.connection() as connection:
             row = await (
                 await connection.execute(
@@ -239,7 +249,7 @@ class CheckpointManager:
                 )
             ).fetchone()
             if not row or any(row.get(key) is None for key in row):
-                raise CheckpointSchemaError("checkpointer schema is not initialized")
+                raise CheckpointSchemaError("检查点存储结构尚未初始化")
             version = await (
                 await connection.execute(
                     """
@@ -257,21 +267,25 @@ class CheckpointManager:
             or int(version["maximum"]) != self.latest_version
             or int(version["migration_count"]) != expected_count
         ):
+            # 只比较最大版本不足会放过中间缺失迁移，因此同时校验最小值、最大值和数量。
             raise CheckpointSchemaError(
-                f"checkpointer schema version is not current (expected {self.latest_version})"
+                f"检查点存储结构版本不是当前版本（期望值：{self.latest_version})"
             )
         return self.latest_version
 
     async def has_checkpoint(self, thread_id: str, checkpoint_ns: str) -> bool:
+        """判断指定轮次与命名空间是否已有可恢复图状态，不读取其正文。"""
         value = await _await_checkpoint_operation(
             self.saver.aget_tuple(self.config(thread_id, checkpoint_ns))
         )
         return value is not None
 
     def scoped_saver(self, checkpoint_ns: str) -> NamespaceCheckpointSaver:
+        """返回限定命名空间的 saver，供单个图执行防止键空间串用。"""
         return NamespaceCheckpointSaver(self.saver, checkpoint_ns)
 
     async def delete_thread(self, thread_id: str) -> None:
+        """清理轮次关联的检查点；调用方负责先取得清理任务的租约。"""
         await _await_checkpoint_operation(
             self.saver.adelete_thread(thread_id)
         )

@@ -92,10 +92,10 @@ public class UserManagementServiceImpl implements UserManagementService {
     @Transactional
     public UserAccountAdminVO createAccount(UserAccountCreateRequest request) {
         if (request == null || !StringUtils.hasText(request.getUsername())) {
-            throw new IllegalArgumentException("username is required");
+            throw new IllegalArgumentException("用户名不能为空");
         }
         if (!StringUtils.hasText(request.getPassword()) || request.getPassword().length() < 6) {
-            throw new IllegalArgumentException("password must be at least 6 characters");
+            throw new IllegalArgumentException("密码长度不能少于 6 个字符");
         }
         ensureUsernameAvailable(request.getUsername(), null);
         SchoolUserAccount account = new SchoolUserAccount();
@@ -121,7 +121,7 @@ public class UserManagementServiceImpl implements UserManagementService {
     public UserAccountAdminVO updateAccount(Long accountId, UserAccountUpdateRequest request) {
         SchoolUserAccount account = requireAccount(accountId);
         if (request == null) {
-            throw new IllegalArgumentException("request is required");
+            throw new IllegalArgumentException("请求不能为空");
         }
         account.setDisplayName(valueOrOriginal(request.getDisplayName(), account.getDisplayName()));
         account.setRealName(valueOrOriginal(request.getRealName(), account.getRealName()));
@@ -151,7 +151,7 @@ public class UserManagementServiceImpl implements UserManagementService {
         SchoolUserAccount account = requireAccount(accountId);
         String password = request == null ? null : request.getPassword();
         if (!StringUtils.hasText(password) || password.length() < 6) {
-            throw new IllegalArgumentException("password must be at least 6 characters");
+            throw new IllegalArgumentException("密码长度不能少于 6 个字符");
         }
         account.setPasswordHash(passwordEncoder.encode(password));
         account.setForcePasswordChange(Boolean.TRUE.equals(request.getForcePasswordChange()));
@@ -198,7 +198,7 @@ public class UserManagementServiceImpl implements UserManagementService {
         validateProfileRequest(request);
         if (userProfileMapper.selectCount(new LambdaQueryWrapper<UserProfile>()
                 .eq(UserProfile::getAccountId, request.getAccountId())) > 0) {
-            throw new IllegalArgumentException("account already has a profile");
+            throw new IllegalArgumentException("该账号已有关联档案");
         }
         UserProfile profile = new UserProfile();
         fillProfile(profile, request);
@@ -213,7 +213,7 @@ public class UserManagementServiceImpl implements UserManagementService {
     public UserProfileAdminVO updateProfile(Long profileId, UserProfileSaveRequest request) {
         UserProfile profile = userProfileMapper.selectById(profileId);
         if (profile == null) {
-            throw new IllegalArgumentException("profile not found");
+            throw new IllegalArgumentException("档案不存在");
         }
         fillProfile(profile, request);
         userProfileMapper.updateById(profile);
@@ -232,7 +232,7 @@ public class UserManagementServiceImpl implements UserManagementService {
     @Transactional
     public RoleAdminVO createRole(RoleSaveRequest request) {
         if (request == null || !StringUtils.hasText(request.getRoleCode()) || !StringUtils.hasText(request.getRoleName())) {
-            throw new IllegalArgumentException("roleCode and roleName are required");
+            throw new IllegalArgumentException("roleCode 和 roleName 不能为空");
         }
         SysRole role = new SysRole();
         role.setRoleCode(clean(request.getRoleCode()));
@@ -249,7 +249,7 @@ public class UserManagementServiceImpl implements UserManagementService {
     public RoleAdminVO updateRole(Long roleId, RoleSaveRequest request) {
         SysRole role = roleMapper.selectById(roleId);
         if (role == null) {
-            throw new IllegalArgumentException("role not found");
+            throw new IllegalArgumentException("角色不存在");
         }
         role.setRoleName(valueOrOriginal(request.getRoleName(), role.getRoleName()));
         role.setRoleScope(valueOrOriginal(request.getRoleScope(), role.getRoleScope()));
@@ -263,7 +263,7 @@ public class UserManagementServiceImpl implements UserManagementService {
     public RoleAdminVO assignRolePermissions(Long roleId, RolePermissionAssignRequest request) {
         SysRole role = roleMapper.selectById(roleId);
         if (role == null) {
-            throw new IllegalArgumentException("role not found");
+            throw new IllegalArgumentException("角色不存在");
         }
         rolePermissionMapper.delete(new LambdaQueryWrapper<SysRolePermission>()
                 .eq(SysRolePermission::getRoleId, roleId));
@@ -374,13 +374,13 @@ public class UserManagementServiceImpl implements UserManagementService {
 
     private void validateProfileRequest(UserProfileSaveRequest request) {
         if (request == null || request.getAccountId() == null) {
-            throw new IllegalArgumentException("accountId is required");
+            throw new IllegalArgumentException("accountId 不能为空");
         }
         if (!StringUtils.hasText(request.getProfileType())) {
-            throw new IllegalArgumentException("profileType is required");
+            throw new IllegalArgumentException("profileType 不能为空");
         }
         if (!StringUtils.hasText(request.getRealName())) {
-            throw new IllegalArgumentException("realName is required");
+            throw new IllegalArgumentException("realName 不能为空");
         }
         requireAccount(request.getAccountId());
     }
@@ -454,7 +454,7 @@ public class UserManagementServiceImpl implements UserManagementService {
             ClassInfo clazz = classInfoMapper.selectById(classId);
             if (clazz == null || teacher == null || !Objects.equals(clazz.getSchoolId(), teacher.getSchoolId())
                     || !"active".equalsIgnoreCase(clazz.getStatus())) {
-                throw new IllegalArgumentException("teacher class must be active and in the same school");
+                throw new IllegalArgumentException("教师班级必须启用且属于同一学校");
             }
             ClassTeacher rel = new ClassTeacher();
             rel.setTeacherId(teacherId);
@@ -476,7 +476,7 @@ public class UserManagementServiceImpl implements UserManagementService {
             ClassInfo clazz = classInfoMapper.selectById(classId);
             if (clazz == null || student == null || !Objects.equals(clazz.getSchoolId(), student.getSchoolId())
                     || !"active".equalsIgnoreCase(clazz.getStatus())) {
-                throw new IllegalArgumentException("student class must be active and in the same school");
+                throw new IllegalArgumentException("学生班级必须启用且属于同一学校");
             }
             ClassMember rel = new ClassMember();
             rel.setStudentId(studentId);
@@ -697,11 +697,11 @@ public class UserManagementServiceImpl implements UserManagementService {
 
     private SchoolUserAccount requireAccount(Long accountId) {
         if (accountId == null) {
-            throw new IllegalArgumentException("accountId is required");
+            throw new IllegalArgumentException("accountId 不能为空");
         }
         SchoolUserAccount account = accountService.getById(accountId);
         if (account == null) {
-            throw new IllegalArgumentException("account not found");
+            throw new IllegalArgumentException("账号不存在");
         }
         return account;
     }
@@ -711,7 +711,7 @@ public class UserManagementServiceImpl implements UserManagementService {
                 .eq(SchoolUserAccount::getUsername, clean(username))
                 .ne(exceptAccountId != null, SchoolUserAccount::getAccountId, exceptAccountId);
         if (accountService.count(wrapper) > 0) {
-            throw new IllegalArgumentException("username already exists");
+            throw new IllegalArgumentException("用户名已存在");
         }
     }
 
@@ -722,7 +722,7 @@ public class UserManagementServiceImpl implements UserManagementService {
                 return candidate;
             }
         }
-        throw new IllegalArgumentException("unsupported account status: " + status);
+        throw new IllegalArgumentException("不支持的账号状态：" + status);
     }
 
     private long safePageNum(Long pageNum) {

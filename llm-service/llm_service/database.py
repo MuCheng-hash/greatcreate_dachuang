@@ -23,13 +23,13 @@ SCHEMA_LOCK_KEY = "red-culture-agent-schema-migration-v1"
 
 
 def configure_windows_event_loop_policy() -> None:
-    """Psycopg async connections require a selector loop on Windows."""
+    """Windows 上的 Psycopg 异步连接需要选择器事件循环。"""
     if os.name == "nt" and hasattr(asyncio, "WindowsSelectorEventLoopPolicy"):
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 
 def selector_event_loop_factory() -> asyncio.AbstractEventLoop:
-    """Return the loop required by Psycopg when Uvicorn runs on Windows."""
+    """Uvicorn 在 Windows 上运行时，返回 Psycopg 所需的事件循环。"""
     return asyncio.SelectorEventLoop()
 
 
@@ -86,11 +86,9 @@ class Database:
 
     @asynccontextmanager
     async def connection(self) -> AsyncIterator[AsyncConnection[dict[str, Any]]]:
-        # The pool context also enters the Psycopg connection context. A task
-        # cancelled while a command is active can then attempt rollback before
-        # Psycopg has finished consuming the command. Returning the connection
-        # explicitly lets the pool discard/replace a bad connection without a
-        # second implicit commit/rollback boundary.
+    # 连接池上下文还会进入 Psycopg 连接上下文。命令执行期间若任务被取消，
+    # 可能会在 Psycopg 完成消费命令前尝试回滚。显式归还连接可以让连接池
+    # 丢弃或替换异常连接，避免再次触发隐式提交或回滚边界。
         connection = await self.pool.getconn(
             timeout=self.settings.database_pool_timeout_seconds
         )
@@ -102,10 +100,9 @@ class Database:
 
     @asynccontextmanager
     async def transaction(self) -> AsyncIterator[AsyncConnection[dict[str, Any]]]:
-        # Do not nest ``pool.connection()``'s implicit connection transaction
-        # around Psycopg's explicit transaction context. During task
-        # cancellation both context managers otherwise try to roll back the
-        # same connection, which can return an ACTIVE connection to the pool.
+    # 不要在 Psycopg 的显式事务上下文外再嵌套 ``pool.connection()`` 的隐式
+    # 连接事务。任务取消时，两个上下文管理器可能同时尝试回滚同一个连接，
+    # 从而把仍处于 ACTIVE 状态的连接归还给连接池。
         connection = await self.pool.getconn(
             timeout=self.settings.database_pool_timeout_seconds
         )
@@ -158,7 +155,7 @@ class SchemaMigrator:
         for path in sorted(self.migration_root.glob("*.sql")):
             prefix, separator, name = path.stem.partition("_")
             if not separator or not prefix.isdigit():
-                raise SchemaMigrationError(f"invalid migration filename: {path.name}")
+                raise SchemaMigrationError(f"无效的迁移文件名：{path.name}")
             content = path.read_bytes()
             values.append(
                 MigrationFile(
@@ -169,10 +166,10 @@ class SchemaMigrator:
                 )
             )
         if not values:
-            raise SchemaMigrationError("no schema migrations found")
+            raise SchemaMigrationError("未找到数据库迁移文件")
         versions = [item.version for item in values]
         if versions != list(range(1, len(values) + 1)):
-            raise SchemaMigrationError("schema migration versions must be contiguous")
+            raise SchemaMigrationError("数据库迁移版本必须连续")
         return tuple(values)
 
     @property
@@ -210,7 +207,7 @@ class SchemaMigrator:
                     if previous is not None:
                         if previous[1] != migration.checksum:
                             raise SchemaMigrationError(
-                                f"checksum mismatch for migration {migration.version}"
+                                f"迁移文件校验和不匹配：{migration.version}"
                             )
                         continue
                     await connection.execute(
@@ -235,12 +232,12 @@ class SchemaMigrator:
                 )
             ).fetchone()
             if not exists or exists["relation"] is None:
-                raise SchemaOutOfDateError("database schema is not initialized")
+                raise SchemaOutOfDateError("数据库结构尚未初始化")
             applied = await self._applied(connection)
         expected = {item.version: (item.name, item.checksum) for item in self.migrations}
         if applied != expected:
             raise SchemaOutOfDateError(
-                f"database schema version is not current (expected {self.latest_version})"
+                f"数据库结构版本不是当前版本（期望值：{self.latest_version})"
             )
         return self.latest_version
 

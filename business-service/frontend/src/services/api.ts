@@ -332,7 +332,7 @@ export async function streamRequest(
         const payload = await response.json() as { message?: string };
         message = payload?.message || message;
       } catch {
-        // SSE error responses may not be JSON.
+        // SSE 错误响应不一定是 JSON。
       }
       throw new ApiError(message, response.status);
     }

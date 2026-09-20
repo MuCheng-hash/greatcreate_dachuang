@@ -765,9 +765,9 @@ async function recoverPersistedAssistantMessage(
   assistantMessage: AssistantMessage,
   userText: string,
 ): Promise<AssistantRecoveryOutcome> {
-  // The stream can drop just before the Agent persists its final response.
-  // Keep polling a known running turn long enough for that durable result to
-  // become available instead of immediately presenting a false failure.
+  // 数据流可能在 Agent 持久化最终响应前断开。
+  // 对已知正在运行的轮次保持足够长时间的轮询，等待持久化结果可用，
+  // 避免立即显示错误的失败状态。
   for (const delay of [0, 200, 500, 1000, 2000, 4000]) {
     if (delay) await new Promise<void>((resolve) => window.setTimeout(resolve, delay));
     try {
@@ -816,7 +816,7 @@ async function recoverPersistedAssistantMessage(
       if (recovery.retryable) return "retryable";
       return "none";
     } catch {
-      // A transient recovery-read failure is retried before exposing manual retry.
+      // 临时的恢复读取失败会先重试，再向用户显示手动重试入口。
     }
   }
   return "none";
@@ -978,7 +978,7 @@ function normalizeHistoricalAnswer(value: string): string {
     const parsed = JSON.parse(trimmed) as unknown;
     if (isRecord(parsed) && typeof parsed.answer === "string") return parsed.answer;
   } catch {
-    // Early records may contain unescaped quotation marks inside answer.
+    // 早期记录的 answer 字段中可能包含未转义的引号。
   }
   return extractMalformedLegacyAnswer(value) || value;
 }

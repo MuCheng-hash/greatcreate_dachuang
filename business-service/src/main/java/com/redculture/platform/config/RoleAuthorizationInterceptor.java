@@ -68,7 +68,7 @@ public class RoleAuthorizationInterceptor implements org.springframework.web.ser
             return true;
         }
         if (isMemoryEndpoint(uri) && MEMORY_USER_ROLES.contains(role)) {
-            if (user.getSchoolId() == null) return forbidden(response, "school account is required");
+            if (user.getSchoolId() == null) return forbidden(response, "需要学校账号");
             return true;
         }
         // 学生端需要读取地图、学校公开资源以及问答历史；具体写操作仍由业务层校验。
@@ -83,14 +83,14 @@ public class RoleAuthorizationInterceptor implements org.springframework.web.ser
         if (studentReadEndpoint && user.getSchoolId() != null) return true;
         if (uri.startsWith("/api/teacher/") && !Set.of(PLATFORM_ADMIN, SCHOOL_ADMIN, TEACHER).contains(role)
                 && !(STUDENT.equals(role) && "/api/teacher/resources/nearby".equals(uri))) {
-            return forbidden(response, "teacher access required");
+            return forbidden(response, "需要教师权限");
         }
         boolean teacherAttachmentDownload = uri.startsWith("/api/student/attachments/") && TEACHER.equals(role);
         if (uri.startsWith("/api/student/") && !STUDENT.equals(role) && !teacherAttachmentDownload) {
-            return forbidden(response, "student access required");
+            return forbidden(response, "需要学生权限");
         }
         if (uri.startsWith("/api/teacher/") || uri.startsWith("/api/student/")) {
-            if (user.getSchoolId() == null) return forbidden(response, "school account is required");
+            if (user.getSchoolId() == null) return forbidden(response, "需要学校账号");
             return true;
         }
         if (!COMMON_ROLES.contains(role)) {

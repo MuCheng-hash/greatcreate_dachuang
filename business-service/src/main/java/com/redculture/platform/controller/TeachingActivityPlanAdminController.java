@@ -33,20 +33,20 @@ public class TeachingActivityPlanAdminController {
     //新增教学活动方案
     @PostMapping("/activity-plans")
     public ApiResponse<TeachingActivityPlanAdminVO> create(@RequestBody TeachingActivityPlanCreateRequest request) {
-        throw new ResponseStatusException(HttpStatus.FORBIDDEN, "administrators cannot create teaching activity plans");
+        throw new ResponseStatusException(HttpStatus.FORBIDDEN, "管理员不能创建教学活动方案");
     }
 
     //修改教学活动方案
     @PutMapping("/activity-plans/{planId}")
     public ApiResponse<TeachingActivityPlanAdminVO> update(@PathVariable Long planId,
                                                            @RequestBody TeachingActivityPlanUpdateRequest request) {
-        throw new ResponseStatusException(HttpStatus.FORBIDDEN, "administrators cannot edit teaching activity plans");
+        throw new ResponseStatusException(HttpStatus.FORBIDDEN, "管理员不能编辑教学活动方案");
     }
 
     // 方案归属教师，管理员只能查看，不能删除。
     @DeleteMapping("/activity-plans/{planId}")
     public ApiResponse<Void> delete(@PathVariable Long planId) {
-        throw new ResponseStatusException(HttpStatus.FORBIDDEN, "administrators cannot delete teaching activity plans");
+        throw new ResponseStatusException(HttpStatus.FORBIDDEN, "管理员不能删除教学活动方案");
     }
 
     //查看方案详情
@@ -54,7 +54,7 @@ public class TeachingActivityPlanAdminController {
     public ApiResponse<TeachingActivityPlanAdminVO> detail(@PathVariable Long planId) {
         TeachingActivityPlanAdminVO data = teachingActivityPlanService.getPlanAdminDetail(planId);
         if (data == null) {
-            return ApiResponse.fail("activity plan not found");
+            return ApiResponse.fail("教学活动方案不存在");
         }
         return ApiResponse.success(data);
     }

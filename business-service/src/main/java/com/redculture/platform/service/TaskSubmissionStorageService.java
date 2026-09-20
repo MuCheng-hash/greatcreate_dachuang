@@ -23,24 +23,24 @@ public class TaskSubmissionStorageService {
     public TaskSubmissionStorageService(TaskSubmissionStorageProperties properties) { this.properties = properties; }
 
     public StoredFile store(MultipartFile file) {
-        if (file == null || file.isEmpty()) throw new IllegalArgumentException("attachment is required");
-        if (file.getSize() > MAX_SIZE) throw new IllegalArgumentException("attachment must not exceed 10MB");
+        if (file == null || file.isEmpty()) throw new IllegalArgumentException("附件不能为空");
+        if (file.getSize() > MAX_SIZE) throw new IllegalArgumentException("附件不能超过 10MB");
         String extension = extension(file.getOriginalFilename());
-        if (!EXTENSIONS.contains(extension)) throw new IllegalArgumentException("only images, PDF and DOCX attachments are supported");
+        if (!EXTENSIONS.contains(extension)) throw new IllegalArgumentException("仅支持图片、PDF 和 DOCX 附件");
         try {
             Path root = properties.storagePath(); Files.createDirectories(root);
             String key = UUID.randomUUID() + "." + extension;
             Path target = root.resolve(key).normalize();
-            if (!target.startsWith(root)) throw new IllegalArgumentException("invalid attachment path");
+            if (!target.startsWith(root)) throw new IllegalArgumentException("附件路径无效");
             Files.copy(file.getInputStream(), target, StandardCopyOption.REPLACE_EXISTING);
             return new StoredFile(key, safeName(file.getOriginalFilename()), contentType(file.getContentType(), extension), file.getSize());
-        } catch (IOException exception) { throw new IllegalStateException("failed to store attachment", exception); }
+        } catch (IOException exception) { throw new IllegalStateException("保存附件失败", exception); }
     }
 
     public Resource load(String key) {
-        if (!StringUtils.hasText(key) || key.contains("/") || key.contains("\\")) throw new IllegalArgumentException("invalid attachment key");
+        if (!StringUtils.hasText(key) || key.contains("/") || key.contains("\\")) throw new IllegalArgumentException("附件存储键无效");
         Path file = properties.storagePath().resolve(key).normalize();
-        if (!file.startsWith(properties.storagePath()) || !Files.isRegularFile(file)) throw new IllegalArgumentException("attachment not found");
+        if (!file.startsWith(properties.storagePath()) || !Files.isRegularFile(file)) throw new IllegalArgumentException("附件不存在");
         return new FileSystemResource(file);
     }
 

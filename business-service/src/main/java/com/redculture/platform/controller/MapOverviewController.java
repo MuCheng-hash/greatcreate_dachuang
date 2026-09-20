@@ -57,7 +57,7 @@ public class MapOverviewController {
     @GetMapping("/red-culture/sites/{siteId}")
     public ApiResponse<RedCultureSiteDetailVO> getRedCultureSite(@PathVariable String siteId) {
         RedCultureSiteDetailVO detail = redCultureGraphMapService.getPublishedSite(siteId);
-        return detail == null ? ApiResponse.fail(404, "published red culture site not found") : ApiResponse.success(detail);
+        return detail == null ? ApiResponse.fail(404, "已发布的红色文化地点不存在") : ApiResponse.success(detail);
     }
 
     //返回高德地图前端初始化所需的 Key 和安全密钥。
@@ -74,7 +74,7 @@ public class MapOverviewController {
     public ApiResponse<MapOverviewVO> overview(@RequestParam Long regionId) {
         MapOverviewVO data = mapOverviewService.getOverviewByRegionId(regionId);
         if (data == null) {
-            return ApiResponse.fail("region not found");
+            return ApiResponse.fail("区域不存在");
         }
         return ApiResponse.success(data);
     }
@@ -92,7 +92,7 @@ public class MapOverviewController {
     @PostMapping("/locate-town")
     public ApiResponse<TownLocateResponse> locateTown(@RequestBody TownLocateRequest request) {
         if (request == null || request.getLongitude() == null || request.getLatitude() == null) {
-            return ApiResponse.fail("longitude and latitude are required");
+            return ApiResponse.fail("经度和纬度不能为空");
         }
         return ApiResponse.success(townMapService.locateTown(request.getLongitude(), request.getLatitude()));
     }
@@ -103,11 +103,11 @@ public class MapOverviewController {
         try {
             TownMapDetailVO detailVO = townMapService.getTownMapDetail(regionId);
             if (detailVO == null) {
-                return ApiResponse.fail("town region not found");
+                return ApiResponse.fail("乡镇区域不存在");
             }
             return ApiResponse.success(detailVO);
         } catch (Exception exception) {
-            return ApiResponse.fail("town detail load failed: " + exception.getClass().getSimpleName());
+            return ApiResponse.fail("加载乡镇详情失败：" + exception.getClass().getSimpleName());
         }
     }
 
@@ -116,7 +116,7 @@ public class MapOverviewController {
     public ApiResponse<TownBoundaryVO> getTownBoundary(@PathVariable Long regionId) {
         TownBoundaryVO boundaryVO = townMapService.getTownBoundary(regionId);
         if (boundaryVO == null) {
-            return ApiResponse.fail("town boundary not found");
+            return ApiResponse.fail("乡镇边界不存在");
         }
         return ApiResponse.success(boundaryVO);
     }

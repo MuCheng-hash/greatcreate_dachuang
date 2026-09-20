@@ -77,7 +77,7 @@ async def _import(
 
 def _init_local_env(port: int) -> dict[str, object]:
     if not 1 <= port <= 65535:
-        raise ValueError("port must be between 1 and 65535")
+        raise ValueError("端口必须在 1 到 65535 之间")
     path = SERVICE_ROOT / ".env.local"
     if path.exists():
         return {"status": "unchanged", "path": str(path)}

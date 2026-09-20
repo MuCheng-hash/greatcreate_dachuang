@@ -27,11 +27,11 @@ public class StudentResourceBrowseServiceImpl implements StudentResourceBrowseSe
     @Override @Transactional
     public void record(Long resourceId, AuthCurrentUserVO user) {
         StudentProfile student = student(user);
-        if (resourceId == null) throw new IllegalArgumentException("resourceId is required");
+        if (resourceId == null) throw new IllegalArgumentException("resourceId 不能为空");
         LocalEduResource resource = resourceMapper.selectById(resourceId);
-        if (resource == null || !Boolean.TRUE.equals(resource.getActive()) || resource.getReviewStatus() != ReviewStatus.APPROVED) throw new IllegalArgumentException("resource is unavailable");
+        if (resource == null || !Boolean.TRUE.equals(resource.getActive()) || resource.getReviewStatus() != ReviewStatus.APPROVED) throw new IllegalArgumentException("资源不可用");
         boolean accessible = relationMapper.exists(new LambdaQueryWrapper<SchoolResourceRel>().eq(SchoolResourceRel::getSchoolId, student.getSchoolId()).eq(SchoolResourceRel::getResourceId, resourceId));
-        if (!accessible) throw new IllegalArgumentException("resource is not available to this school");
+        if (!accessible) throw new IllegalArgumentException("该资源不对当前学校开放");
         StudentResourceBrowseHistory item = historyMapper.selectOne(new LambdaQueryWrapper<StudentResourceBrowseHistory>().eq(StudentResourceBrowseHistory::getStudentId, student.getStudentId()).eq(StudentResourceBrowseHistory::getResourceId, resourceId).last("LIMIT 1"));
         if (item == null) { item = new StudentResourceBrowseHistory(); item.setStudentId(student.getStudentId()); item.setResourceId(resourceId); item.setViewCount(1); item.setViewedAt(LocalDateTime.now()); historyMapper.insert(item); }
         else { item.setViewedAt(LocalDateTime.now()); item.setViewCount((item.getViewCount() == null ? 0 : item.getViewCount()) + 1); historyMapper.updateById(item); }
@@ -61,7 +61,7 @@ public class StudentResourceBrowseServiceImpl implements StudentResourceBrowseSe
     @Override @Transactional
     public void remove(Long resourceId, AuthCurrentUserVO user) {
         StudentProfile student = student(user);
-        if (resourceId == null) throw new IllegalArgumentException("resourceId is required");
+        if (resourceId == null) throw new IllegalArgumentException("resourceId 不能为空");
         historyMapper.delete(new LambdaQueryWrapper<StudentResourceBrowseHistory>().eq(StudentResourceBrowseHistory::getStudentId, student.getStudentId()).eq(StudentResourceBrowseHistory::getResourceId, resourceId));
     }
 
@@ -83,8 +83,8 @@ public class StudentResourceBrowseServiceImpl implements StudentResourceBrowseSe
     }
 
     private StudentProfile student(AuthCurrentUserVO user) {
-        if (user == null || !"student".equalsIgnoreCase(user.getRoleCode()) || user.getAccountId() == null) throw new IllegalArgumentException("student account is required");
+        if (user == null || !"student".equalsIgnoreCase(user.getRoleCode()) || user.getAccountId() == null) throw new IllegalArgumentException("需要学生账号");
         StudentProfile student = studentMapper.selectOne(new LambdaQueryWrapper<StudentProfile>().eq(StudentProfile::getAccountId, user.getAccountId()).eq(StudentProfile::getStatus, "active").last("LIMIT 1"));
-        if (student == null) throw new IllegalArgumentException("student profile is unavailable"); return student;
+        if (student == null) throw new IllegalArgumentException("学生档案不可用"); return student;
     }
 }

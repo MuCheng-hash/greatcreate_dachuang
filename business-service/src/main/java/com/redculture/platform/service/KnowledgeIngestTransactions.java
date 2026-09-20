@@ -9,7 +9,7 @@ import org.springframework.transaction.support.TransactionTemplate;
 import java.util.UUID;
 import java.util.function.Supplier;
 
-/** MySQL transaction and document lock shared by retry/delete and the Python worker. */
+/** 重试、删除流程与 Python 工作进程共享的 MySQL 事务和文档锁。 */
 @Service
 public class KnowledgeIngestTransactions {
     private final JdbcTemplate jdbc;
@@ -30,9 +30,9 @@ public class KnowledgeIngestTransactions {
             String key = "knowledge-document:" + documentId;
             Integer acquired = jdbc.queryForObject("SELECT GET_LOCK(?, 0)", Integer.class, key);
             if (!Integer.valueOf(1).equals(acquired)) {
-                throw new IllegalStateException("document ingestion is running; retry later");
+                throw new IllegalStateException("文档入库任务正在执行，请稍后重试");
             }
-            // Release after commit/rollback, while the transaction-bound connection still exists.
+            // 在事务提交或回滚后、事务绑定连接仍存在时释放锁。
             org.springframework.transaction.support.TransactionSynchronizationManager.registerSynchronization(
                 new org.springframework.transaction.support.TransactionSynchronization() {
                     @Override public void afterCompletion(int status) {
