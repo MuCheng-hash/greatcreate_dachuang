@@ -15,7 +15,7 @@ final class InviteCodeHasher {
             for (byte value : bytes) result.append(String.format("%02x", value));
             return result.toString();
         } catch (NoSuchAlgorithmException exception) {
-            throw new IllegalStateException("SHA-256 is unavailable", exception);
+            throw new IllegalStateException("SHA-256 不可用", exception);
         }
     }
 }

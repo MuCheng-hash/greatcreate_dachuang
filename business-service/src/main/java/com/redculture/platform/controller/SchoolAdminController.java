@@ -86,7 +86,7 @@ public class SchoolAdminController {
     public ApiResponse<SchoolAdminVO> detail(@PathVariable Long schoolId) {
         SchoolAdminVO data = schoolService.getSchoolAdminDetail(schoolId);
         if (data == null) {
-            return ApiResponse.fail("school not found");
+            return ApiResponse.fail("学校不存在");
         }
         return ApiResponse.success(data);
     }

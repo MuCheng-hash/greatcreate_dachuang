@@ -126,7 +126,7 @@ public class RagIndexService {
             try {
                 List<float[]> vectors = embeddingClient.embed(batch.stream().map(PreparedChunk::embeddingText).toList());
                 if (vectors == null || vectors.size() != batch.size()) {
-                    throw new IllegalStateException("Embedding provider returned an unexpected vector count");
+                    throw new IllegalStateException("嵌入服务返回了非预期数量的向量");
                 }
                 List<VectorPoint> points = new ArrayList<>(batch.size());
                 for (int i = 0; i < batch.size(); i++) {
@@ -268,7 +268,7 @@ public class RagIndexService {
                     .digest(value.getBytes(StandardCharsets.UTF_8));
             return HexFormat.of().formatHex(digest);
         } catch (NoSuchAlgorithmException exception) {
-            throw new IllegalStateException("SHA-256 is unavailable", exception);
+            throw new IllegalStateException("SHA-256 不可用", exception);
         }
     }
 
@@ -278,7 +278,7 @@ public class RagIndexService {
 
     private void requireEnabled() {
         if (!properties.isEnabled()) {
-            throw new IllegalStateException("RAG is disabled; set RAG_ENABLED=true before rebuilding the index");
+            throw new IllegalStateException("RAG 已禁用；请先设置 RAG_ENABLED=true 再重建索引");
         }
     }
 

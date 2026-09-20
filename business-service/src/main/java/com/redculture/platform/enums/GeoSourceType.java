@@ -61,7 +61,7 @@ public enum GeoSourceType {
                 return item;
             }
         }
-        throw new IllegalArgumentException("unsupported geoSourceType: " + value);
+        throw new IllegalArgumentException("不支持的 geoSourceType：" + value);
     }
 
     /**

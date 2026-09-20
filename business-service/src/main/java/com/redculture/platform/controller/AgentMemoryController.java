@@ -64,7 +64,7 @@ public class AgentMemoryController {
             @RequestBody AgentMemorySettingUpdateRequest request,
             HttpServletRequest servletRequest) {
         if (request == null || request.getEnabled() == null) {
-            throw new IllegalArgumentException("enabled is required");
+            throw new IllegalArgumentException("enabled 不能为空");
         }
         AuthCurrentUserVO user = requireSchoolUser(servletRequest);
         return agentRuntimeClient.updateMemorySetting(
@@ -93,7 +93,7 @@ public class AgentMemoryController {
             @RequestBody AgentMemoryCreateRequest request,
             HttpServletRequest servletRequest) {
         if (request == null) {
-            throw new IllegalArgumentException("memory request is required");
+            throw new IllegalArgumentException("记忆请求不能为空");
         }
         AuthCurrentUserVO user = requireSchoolUser(servletRequest);
         AgentMemoryCreateRequest normalized = new AgentMemoryCreateRequest(
@@ -117,7 +117,7 @@ public class AgentMemoryController {
                 || (request.getMemoryType() == null
                 && request.getFieldKey() == null
                 && request.getContent() == null)) {
-            throw new IllegalArgumentException("at least one memory field is required");
+            throw new IllegalArgumentException("至少需要填写一个记忆字段");
         }
         AuthCurrentUserVO user = requireSchoolUser(servletRequest);
         AgentMemoryUpdateRequest normalized = new AgentMemoryUpdateRequest(
@@ -200,7 +200,7 @@ public class AgentMemoryController {
         if (user == null
                 || user.getSchoolId() == null
                 || !MEMORY_USER_ROLES.contains(user.getRoleCode())) {
-            throw new IllegalArgumentException("school account is required");
+            throw new IllegalArgumentException("需要学校账号");
         }
         return user;
     }
@@ -220,13 +220,13 @@ public class AgentMemoryController {
     private String normalizeMemoryType(String memoryType, boolean required) {
         if (!StringUtils.hasText(memoryType)) {
             if (required) {
-                throw new IllegalArgumentException("memoryType is required");
+                throw new IllegalArgumentException("memoryType 不能为空");
             }
             return null;
         }
         String normalized = memoryType.trim().toUpperCase(Locale.ROOT);
         if (!MEMORY_TYPES.contains(normalized)) {
-            throw new IllegalArgumentException("memoryType must be PROFILE or TASK");
+            throw new IllegalArgumentException("memoryType 必须为 PROFILE 或 TASK");
         }
         return normalized;
     }
@@ -243,7 +243,7 @@ public class AgentMemoryController {
         String normalized = StringUtils.hasText(status)
                 ? status.trim().toLowerCase(Locale.ROOT) : "active";
         if (!MEMORY_STATUSES.contains(normalized)) {
-            throw new IllegalArgumentException("status must be pending, active or deleted");
+            throw new IllegalArgumentException("status 必须为 pending、active 或 deleted");
         }
         return normalized;
     }
@@ -255,7 +255,7 @@ public class AgentMemoryController {
      */
     private String requireContent(String content) {
         if (!StringUtils.hasText(content)) {
-            throw new IllegalArgumentException("content is required");
+            throw new IllegalArgumentException("内容不能为空");
         }
         return content.trim();
     }
@@ -284,7 +284,7 @@ public class AgentMemoryController {
      */
     private String requireMemoryId(String id) {
         if (!StringUtils.hasText(id)) {
-            throw new IllegalArgumentException("memory id is required");
+            throw new IllegalArgumentException("记忆 id 不能为空");
         }
         return id.trim();
     }

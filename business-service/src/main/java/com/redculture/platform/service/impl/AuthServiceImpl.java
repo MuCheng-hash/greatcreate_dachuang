@@ -66,34 +66,34 @@ public class AuthServiceImpl implements AuthService {
     @Override
     @Transactional
     public void registerAccount(AccountRegisterRequest request) {
-        if (request == null) throw new IllegalArgumentException("registration request is required");
+        if (request == null) throw new IllegalArgumentException("registration 请求不能为空");
         String username = clean(request.getUsername());
         String realName = clean(request.getRealName());
         String roleCode = clean(request.getRoleCode());
         if (!StringUtils.hasText(username) || !StringUtils.hasText(request.getPassword()) || !StringUtils.hasText(realName)) {
-            throw new IllegalArgumentException("username, password and realName are required");
+            throw new IllegalArgumentException("用户名、密码和 realName 不能为空");
         }
         if (request.getPassword().length() < 6 || request.getPassword().length() > 128) {
-            throw new IllegalArgumentException("password must be between 6 and 128 characters");
+            throw new IllegalArgumentException("密码长度必须在 6 到 128 个字符之间");
         }
         if (!"student".equals(roleCode) && !"teacher".equals(roleCode)) {
-            throw new IllegalArgumentException("roleCode must be student or teacher");
+            throw new IllegalArgumentException("roleCode 必须为 student 或 teacher");
         }
         School school = request.getSchoolId() == null ? null : schoolService.getById(request.getSchoolId());
         if (school == null || !Boolean.TRUE.equals(school.getActive())) {
-            throw new IllegalArgumentException("selected school is unavailable");
+            throw new IllegalArgumentException("所选学校不可用");
         }
         ensureUsernameAvailable(username);
 
         if ("teacher".equals(roleCode)) {
             String code = clean(request.getTeacherInviteCode());
-            if (!StringUtils.hasText(code)) throw new IllegalArgumentException("teacherInviteCode is required");
+            if (!StringUtils.hasText(code)) throw new IllegalArgumentException("teacherInviteCode 不能为空");
             TeacherRegistrationInvite invite = teacherInviteMapper.selectOne(new LambdaQueryWrapper<TeacherRegistrationInvite>()
                     .eq(TeacherRegistrationInvite::getSchoolId, school.getSchoolId())
                     .eq(TeacherRegistrationInvite::getCodeHash, InviteCodeHasher.hash(code))
                     .last("LIMIT 1"));
             if (invite == null || teacherInviteMapper.consume(invite.getInviteId(), school.getSchoolId()) != 1) {
-                throw new IllegalArgumentException("teacher invite is invalid, expired, or exhausted");
+                throw new IllegalArgumentException("教师邀请码无效、已过期或已用尽");
             }
         }
 
@@ -144,20 +144,20 @@ public class AuthServiceImpl implements AuthService {
     @Override
     public AuthCurrentUserVO login(AuthLoginRequest request) {
         if (request == null || !StringUtils.hasText(request.getUsername()) || !StringUtils.hasText(request.getPassword())) {
-            throw new IllegalArgumentException("username and password are required");
+            throw new IllegalArgumentException("用户名和密码不能为空");
         }
 
         SchoolUserAccount account = schoolUserAccountService.getOne(new LambdaQueryWrapper<SchoolUserAccount>()
                 .eq(SchoolUserAccount::getUsername, request.getUsername().trim())
                 .last("LIMIT 1"));
         if (account == null) {
-            throw new IllegalArgumentException("account not found");
+            throw new IllegalArgumentException("账号不存在");
         }
         if (account.getStatus() != AccountStatus.ACTIVE) {
-            throw new IllegalArgumentException("account is not active");
+            throw new IllegalArgumentException("账号未处于启用状态");
         }
         if (!passwordEncoder.matches(request.getPassword(), account.getPasswordHash())) {
-            throw new IllegalArgumentException("password is incorrect");
+            throw new IllegalArgumentException("密码错误");
         }
 
         account.setLastLoginAt(java.time.LocalDateTime.now());
@@ -178,7 +178,7 @@ public class AuthServiceImpl implements AuthService {
     public AuthCurrentUserVO updateProfile(AuthProfileUpdateRequest request, Long accountId) {
         SchoolUserAccount account = requireCurrentAccount(accountId);
         if (request == null) {
-            throw new IllegalArgumentException("profile request is required");
+            throw new IllegalArgumentException("档案请求不能为空");
         }
         account.setDisplayName(cleanWithLimit(request.getDisplayName(), 120, "displayName"));
         account.setContactName(cleanWithLimit(request.getContactName(), 100, "contactName"));
@@ -192,13 +192,13 @@ public class AuthServiceImpl implements AuthService {
         SchoolUserAccount account = requireCurrentAccount(accountId);
         if (request == null || !StringUtils.hasText(request.getCurrentPassword())
                 || !StringUtils.hasText(request.getNewPassword())) {
-            throw new IllegalArgumentException("currentPassword and newPassword are required");
+            throw new IllegalArgumentException("currentPassword 和 newPassword 不能为空");
         }
         if (!passwordEncoder.matches(request.getCurrentPassword(), account.getPasswordHash())) {
-            throw new IllegalArgumentException("current password is incorrect");
+            throw new IllegalArgumentException("当前密码错误");
         }
         if (request.getNewPassword().length() < 6 || request.getNewPassword().length() > 128) {
-            throw new IllegalArgumentException("new password must be between 6 and 128 characters");
+            throw new IllegalArgumentException("新密码长度必须在 6 到 128 个字符之间");
         }
         account.setPasswordHash(passwordEncoder.encode(request.getNewPassword()));
         schoolUserAccountService.updateById(account);
@@ -221,7 +221,7 @@ public class AuthServiceImpl implements AuthService {
     private SchoolUserAccount requireCurrentAccount(Long accountId) {
         SchoolUserAccount account = findCurrentAccount(accountId);
         if (account == null) {
-            throw new IllegalArgumentException("authentication required");
+            throw new IllegalArgumentException("需要完成身份认证");
         }
         return account;
     }
@@ -234,7 +234,7 @@ public class AuthServiceImpl implements AuthService {
         String cleanUsername = username.trim();
         if (schoolUserAccountService.count(new LambdaQueryWrapper<SchoolUserAccount>()
                 .eq(SchoolUserAccount::getUsername, cleanUsername)) > 0) {
-            throw new IllegalArgumentException("username already exists");
+            throw new IllegalArgumentException("用户名已存在");
         }
     }
 
@@ -245,7 +245,7 @@ public class AuthServiceImpl implements AuthService {
     private String cleanWithLimit(String value, int maxLength, String fieldName) {
         String cleaned = clean(value);
         if (cleaned != null && cleaned.length() > maxLength) {
-            throw new IllegalArgumentException(fieldName + " must not exceed " + maxLength + " characters");
+            throw new IllegalArgumentException(fieldName + " 长度不能超过 " + maxLength + " 个字符");
         }
         return StringUtils.hasText(cleaned) ? cleaned : null;
     }

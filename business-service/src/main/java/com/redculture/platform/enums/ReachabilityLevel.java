@@ -57,7 +57,7 @@ public enum ReachabilityLevel {
                 return level;
             }
         }
-        throw new IllegalArgumentException("unsupported reachabilityLevel: " + value);
+        throw new IllegalArgumentException("不支持的 reachabilityLevel：" + value);
     }
 
     /**

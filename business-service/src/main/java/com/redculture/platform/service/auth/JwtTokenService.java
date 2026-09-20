@@ -57,40 +57,40 @@ public class JwtTokenService {
 
     public AccessTokenPrincipal parseAccessToken(String token) {
         if (!StringUtils.hasText(token)) {
-            throw new AuthTokenException("access token is missing");
+            throw new AuthTokenException("访问令牌缺失");
         }
         String[] parts = token.split("\\.", -1);
         if (parts.length != 3) {
-            throw new AuthTokenException("access token is invalid");
+            throw new AuthTokenException("访问令牌无效");
         }
         try {
             Map<String, Object> header = readJson(parts[0]);
             if (!"HS256".equals(header.get("alg")) || !"JWT".equals(header.get("typ"))) {
-                throw new AuthTokenException("access token algorithm is invalid");
+                throw new AuthTokenException("访问令牌算法无效");
             }
             byte[] expected = sign(parts[0] + "." + parts[1]);
             byte[] actual = Base64.getUrlDecoder().decode(parts[2]);
             if (!MessageDigest.isEqual(expected, actual)) {
-                throw new AuthTokenException("access token signature is invalid");
+                throw new AuthTokenException("访问令牌签名无效");
             }
             Map<String, Object> claims = readJson(parts[1]);
             long expiresAt = numberClaim(claims, "exp");
             if (expiresAt <= Instant.now().getEpochSecond()) {
-                throw new AuthTokenException("access token is expired");
+                throw new AuthTokenException("访问令牌已过期");
             }
             if (!"access".equals(claims.get("tokenType"))) {
-                throw new AuthTokenException("access token type is invalid");
+                throw new AuthTokenException("访问令牌类型无效");
             }
             Long accountId = parseLong(claims.get("sub"));
             String jti = String.valueOf(claims.get("jti"));
             if (accountId == null || !StringUtils.hasText(jti)) {
-                throw new AuthTokenException("access token claims are incomplete");
+                throw new AuthTokenException("访问令牌声明不完整");
             }
             return new AccessTokenPrincipal(accountId, jti, expiresAt);
         } catch (AuthTokenException exception) {
             throw exception;
         } catch (Exception exception) {
-            throw new AuthTokenException("access token is invalid");
+            throw new AuthTokenException("访问令牌无效");
         }
     }
 
@@ -106,7 +106,7 @@ public class JwtTokenService {
                     .digest(refreshToken.getBytes(StandardCharsets.UTF_8));
             return HexFormat.of().formatHex(digest);
         } catch (Exception exception) {
-            throw new IllegalStateException("cannot hash refresh token", exception);
+            throw new IllegalStateException("无法计算刷新令牌摘要", exception);
         }
     }
 
@@ -114,7 +114,7 @@ public class JwtTokenService {
         try {
             byte[] secret = properties.getJwtSecret().getBytes(StandardCharsets.UTF_8);
             if (secret.length < 32) {
-                throw new IllegalStateException("APP_AUTH_JWT_SECRET must contain at least 32 bytes");
+                throw new IllegalStateException("APP_AUTH_JWT_SECRET 至少需要包含 32 个字节");
             }
             Mac mac = Mac.getInstance(HMAC_ALGORITHM);
             mac.init(new SecretKeySpec(secret, HMAC_ALGORITHM));
@@ -122,7 +122,7 @@ public class JwtTokenService {
         } catch (IllegalStateException exception) {
             throw exception;
         } catch (Exception exception) {
-            throw new IllegalStateException("cannot sign access token", exception);
+            throw new IllegalStateException("无法签发访问令牌", exception);
         }
     }
 
@@ -130,7 +130,7 @@ public class JwtTokenService {
         try {
             return encodeBytes(objectMapper.writeValueAsBytes(value));
         } catch (JsonProcessingException exception) {
-            throw new IllegalStateException("cannot encode access token", exception);
+            throw new IllegalStateException("无法编码访问令牌", exception);
         }
     }
 
@@ -143,7 +143,7 @@ public class JwtTokenService {
     private long numberClaim(Map<String, Object> claims, String name) {
         Long value = parseLong(claims.get(name));
         if (value == null) {
-            throw new AuthTokenException("access token claim is invalid: " + name);
+            throw new AuthTokenException("访问令牌声明无效：" + name);
         }
         return value;
     }

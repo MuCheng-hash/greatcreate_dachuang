@@ -60,7 +60,7 @@ public class SchoolMapController {
             schoolAccessService.requireSchoolAccess(schoolId, AuthContext.currentUser(request));
             SchoolMapDetailVO detailVO = schoolMapService.getSchoolDetail(schoolId);
             if (detailVO == null) {
-                return ApiResponse.fail("school not found");
+                return ApiResponse.fail("学校不存在");
             }
             return ApiResponse.success(detailVO);
         } catch (IllegalArgumentException exception) {

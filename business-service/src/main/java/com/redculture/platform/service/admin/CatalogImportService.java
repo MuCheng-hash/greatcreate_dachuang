@@ -557,7 +557,7 @@ public class CatalogImportService {
         for (EntityType type : EntityType.values()) {
             if (type.getValue().equalsIgnoreCase(normalized) || type.name().equalsIgnoreCase(normalized)) return type;
         }
-        throw new IllegalArgumentException("unsupported entity type");
+        throw new IllegalArgumentException("不支持的实体类型");
     }
 
     private Long resolveEntityId(EntityType type, String code, Map<String, Long> importedEntityIds) {

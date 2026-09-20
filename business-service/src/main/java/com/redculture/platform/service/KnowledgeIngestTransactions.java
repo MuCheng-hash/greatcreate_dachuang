@@ -30,7 +30,7 @@ public class KnowledgeIngestTransactions {
             String key = "knowledge-document:" + documentId;
             Integer acquired = jdbc.queryForObject("SELECT GET_LOCK(?, 0)", Integer.class, key);
             if (!Integer.valueOf(1).equals(acquired)) {
-                throw new IllegalStateException("document ingestion is running; retry later");
+                throw new IllegalStateException("文档入库任务正在执行，请稍后重试");
             }
             // 在事务提交或回滚后、事务绑定连接仍存在时释放锁。
             org.springframework.transaction.support.TransactionSynchronizationManager.registerSynchronization(

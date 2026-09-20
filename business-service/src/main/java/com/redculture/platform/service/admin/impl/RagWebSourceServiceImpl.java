@@ -53,7 +53,7 @@ public class RagWebSourceServiceImpl implements RagWebSourceService {
     public RagWebSourceVO update(Long sourceId, RagWebSourceRequest request) {
         RagWebSource source = mapper.selectById(sourceId);
         if (source == null) {
-            throw new IllegalArgumentException("web source not found");
+            throw new IllegalArgumentException("网页来源不存在");
         }
         apply(source, request);
         source.setUpdatedAt(LocalDateTime.now());
@@ -63,14 +63,14 @@ public class RagWebSourceServiceImpl implements RagWebSourceService {
 
     private void apply(RagWebSource source, RagWebSourceRequest request) {
         if (request == null) {
-            throw new IllegalArgumentException("web source request is required");
+            throw new IllegalArgumentException("网页来源请求不能为空");
         }
         String domain = normalizeDomain(request.getDomain());
         Long duplicate = mapper.selectCount(new LambdaQueryWrapper<RagWebSource>()
                 .eq(RagWebSource::getDomain, domain)
                 .ne(source.getSourceId() != null, RagWebSource::getSourceId, source.getSourceId()));
         if (duplicate != null && duplicate > 0) {
-            throw new IllegalArgumentException("web source domain already exists");
+            throw new IllegalArgumentException("网页来源域名已存在");
         }
         source.setDomain(domain);
         source.setDisplayName(StringUtils.hasText(request.getDisplayName()) ? request.getDisplayName().trim() : domain);
@@ -80,7 +80,7 @@ public class RagWebSourceServiceImpl implements RagWebSourceService {
 
     public static String normalizeDomain(String value) {
         if (!StringUtils.hasText(value)) {
-            throw new IllegalArgumentException("web source domain is required");
+            throw new IllegalArgumentException("网页来源域名不能为空");
         }
         String candidate = value.trim().toLowerCase();
         if (!candidate.contains("://")) {
@@ -91,11 +91,11 @@ public class RagWebSourceServiceImpl implements RagWebSourceService {
             String host = uri.getHost();
             if (!"https".equalsIgnoreCase(uri.getScheme()) || !StringUtils.hasText(host)
                     || host.contains("..") || host.contains("/")) {
-                throw new IllegalArgumentException("web source must be a valid HTTPS domain");
+                throw new IllegalArgumentException("网页来源必须是有效的 HTTPS 域名");
             }
             return host.toLowerCase();
         } catch (IllegalArgumentException exception) {
-            throw new IllegalArgumentException("web source must be a valid HTTPS domain");
+            throw new IllegalArgumentException("网页来源必须是有效的 HTTPS 域名");
         }
     }
 

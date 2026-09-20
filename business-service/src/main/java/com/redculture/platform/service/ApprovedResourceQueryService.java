@@ -27,7 +27,7 @@ public class ApprovedResourceQueryService {
         LocalEduResource resource = resourceService.getById(resourceId);
         if (relation == null || resource == null || resource.getReviewStatus() != ReviewStatus.APPROVED
                 || !Boolean.TRUE.equals(resource.getActive())) {
-            throw new IllegalArgumentException("approved resource not found");
+            throw new IllegalArgumentException("已审核资源不存在");
         }
         ApprovedResourceDetailVO vo = new ApprovedResourceDetailVO();
         vo.setResourceId(resource.getResourceId()); vo.setResourceName(resource.getResourceName());

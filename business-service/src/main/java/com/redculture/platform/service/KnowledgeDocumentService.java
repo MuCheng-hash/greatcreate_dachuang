@@ -41,16 +41,16 @@ public class KnowledgeDocumentService {
 
     public KnowledgeDocument upload(Long schoolId, String title, MultipartFile file, AuthCurrentUserVO user) {
         schoolAccessService.requireSchoolAccess(schoolId, user);
-        if (file == null || file.isEmpty() || file.getSize() > storage.getMaxFileSizeBytes()) throw new IllegalArgumentException("invalid file or file exceeds 50 MB");
+        if (file == null || file.isEmpty() || file.getSize() > storage.getMaxFileSizeBytes()) throw new IllegalArgumentException("文件无效或超过 50 MB");
         String filename = file.getOriginalFilename() == null ? "document" : file.getOriginalFilename();
         String extension = filename.contains(".") ? filename.substring(filename.lastIndexOf('.') + 1).toLowerCase(Locale.ROOT) : "";
-        if (!EXTENSIONS.contains(extension)) throw new IllegalArgumentException("only PDF, DOCX, and Markdown files are supported");
+        if (!EXTENSIONS.contains(extension)) throw new IllegalArgumentException("仅支持 PDF、DOCX 和 Markdown 文件");
         String key = "original/" + (schoolId == null ? "public" : schoolId) + "/" + UUID.randomUUID() + "." + extension;
         try (InputStream input = file.getInputStream()) {
             ensureBucket();
             minio.putObject(PutObjectArgs.builder().bucket(storage.getBucket()).object(key).stream(input, file.getSize(), -1)
                     .contentType(file.getContentType() == null ? "application/octet-stream" : file.getContentType()).build());
-        } catch (Exception exception) { throw new IllegalStateException("failed to save uploaded file", exception); }
+        } catch (Exception exception) { throw new IllegalStateException("保存上传文件失败", exception); }
         try {
             return transactions.run(() -> {
                 KnowledgeDocument document = new KnowledgeDocument();
@@ -72,18 +72,18 @@ public class KnowledgeDocumentService {
     public void retry(Long id, String restartFrom, AuthCurrentUserVO user) {
         detail(id, user);
         String node = restartFrom == null || restartFrom.isBlank() ? "VALIDATE" : restartFrom.trim().toUpperCase(Locale.ROOT);
-        if (!List.of("VALIDATE", "CONVERT", "IMAGE_VISION", "CHUNK", "METADATA", "INDEX").contains(node)) throw new IllegalArgumentException("unsupported restart node");
+        if (!List.of("VALIDATE", "CONVERT", "IMAGE_VISION", "CHUNK", "METADATA", "INDEX").contains(node)) throw new IllegalArgumentException("不支持的重试节点");
         transactions.locked(id, () -> {
             KnowledgeDocument document = detail(id, user);
             KnowledgeIngestJob job = jobs.selectOne(new LambdaQueryWrapper<KnowledgeIngestJob>().eq(KnowledgeIngestJob::getDocumentId, id));
-            if (job == null || !("FAILED".equals(document.getStatus()) || "DEGRADED".equals(document.getStatus()))) throw new IllegalStateException("only failed or degraded documents can be retried");
+            if (job == null || !("FAILED".equals(document.getStatus()) || "DEGRADED".equals(document.getStatus()))) throw new IllegalStateException("只有失败或降级的文档可以重试");
             document.setStatus("PENDING"); documents.updateById(document);
             transactions.reset(job.getId());
             transactions.enqueue(job.getId(), id);
             return null;
         });
     }
-    public String markdown(Long id, AuthCurrentUserVO user) { KnowledgeDocument document = detail(id, user); if (document.getMarkdownObjectKey() == null) throw new IllegalStateException("normalized markdown is not available"); try (InputStream input = minio.getObject(GetObjectArgs.builder().bucket(storage.getBucket()).object(document.getMarkdownObjectKey()).build())) { return new String(input.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8); } catch (Exception exception) { throw new IllegalStateException("failed to read normalized markdown", exception); } }
+    public String markdown(Long id, AuthCurrentUserVO user) { KnowledgeDocument document = detail(id, user); if (document.getMarkdownObjectKey() == null) throw new IllegalStateException("规范化 Markdown 不可用"); try (InputStream input = minio.getObject(GetObjectArgs.builder().bucket(storage.getBucket()).object(document.getMarkdownObjectKey()).build())) { return new String(input.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8); } catch (Exception exception) { throw new IllegalStateException("读取规范化 Markdown 失败", exception); } }
     public void delete(Long id, AuthCurrentUserVO user) {
         detail(id, user);
         transactions.locked(id, () -> {
@@ -92,6 +92,6 @@ public class KnowledgeDocumentService {
             documents.deleteById(id); return null;
         });
     }
-    private KnowledgeDocument require(Long id) { KnowledgeDocument document = documents.selectById(id); if (document == null) throw new IllegalArgumentException("knowledge document not found"); return document; }
+    private KnowledgeDocument require(Long id) { KnowledgeDocument document = documents.selectById(id); if (document == null) throw new IllegalArgumentException("知识文档不存在"); return document; }
     private void ensureBucket() throws Exception { if (!minio.bucketExists(BucketExistsArgs.builder().bucket(storage.getBucket()).build())) minio.makeBucket(MakeBucketArgs.builder().bucket(storage.getBucket()).build()); }
 }

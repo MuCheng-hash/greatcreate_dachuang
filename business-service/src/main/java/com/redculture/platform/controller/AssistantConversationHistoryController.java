@@ -104,7 +104,7 @@ public class AssistantConversationHistoryController {
     private String normalizeStatus(String status) {
         String normalized = status == null ? "active" : status.trim().toLowerCase();
         if (!"active".equals(normalized) && !"archived".equals(normalized)) {
-            throw new IllegalArgumentException("status must be active or archived");
+            throw new IllegalArgumentException("status 必须为 active 或 archived");
         }
         return normalized;
     }
@@ -114,7 +114,7 @@ public class AssistantConversationHistoryController {
     private AuthCurrentUserVO requireSchoolUser(HttpServletRequest request) {
         AuthCurrentUserVO user = AuthContext.currentUser(request);
         if (user == null || user.getSchoolId() == null) {
-            throw new IllegalArgumentException("school account is required");
+            throw new IllegalArgumentException("需要学校账号");
         }
         return user;
     }

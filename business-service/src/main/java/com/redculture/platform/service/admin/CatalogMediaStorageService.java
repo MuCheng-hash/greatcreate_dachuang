@@ -26,14 +26,14 @@ public class CatalogMediaStorageService {
 
     public StoredMedia store(MultipartFile file) {
         if (file == null || file.isEmpty()) {
-            throw new IllegalArgumentException("image file is required");
+            throw new IllegalArgumentException("图片文件不能为空");
         }
         if (file.getSize() > MAX_IMAGE_SIZE) {
-            throw new IllegalArgumentException("image file must not exceed 10MB");
+            throw new IllegalArgumentException("图片文件不能超过 10MB");
         }
         String extension = extension(file.getOriginalFilename());
         if (!EXTENSIONS.contains(extension)) {
-            throw new IllegalArgumentException("only JPG, PNG and WebP images are supported");
+            throw new IllegalArgumentException("仅支持 JPG、PNG 和 WebP 图片");
         }
         try {
             Path root = properties.storagePath();
@@ -41,12 +41,12 @@ public class CatalogMediaStorageService {
             String filename = UUID.randomUUID() + "." + extension;
             Path target = root.resolve(filename).normalize();
             if (!target.startsWith(root)) {
-                throw new IllegalArgumentException("invalid image file path");
+                throw new IllegalArgumentException("图片文件路径无效");
             }
             Files.copy(file.getInputStream(), target, StandardCopyOption.REPLACE_EXISTING);
             return new StoredMedia("/uploads/resource-media/" + filename, target, originalTitle(file.getOriginalFilename()));
         } catch (IOException exception) {
-            throw new IllegalStateException("failed to store image file", exception);
+            throw new IllegalStateException("保存图片文件失败", exception);
         }
     }
 
@@ -65,7 +65,7 @@ public class CatalogMediaStorageService {
                 Files.deleteIfExists(target);
             }
         } catch (IOException exception) {
-            throw new IllegalStateException("failed to delete stored image file", exception);
+            throw new IllegalStateException("删除已存储图片文件失败", exception);
         }
     }
 

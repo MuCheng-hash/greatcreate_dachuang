@@ -30,7 +30,7 @@ public class AgentActionOutboxService {
     )
     public void enqueue(String actionId, String eventType, Map<String, Object> payload) {
         if (!StringUtils.hasText(actionId) || !StringUtils.hasText(eventType)) {
-            throw new IllegalArgumentException("actionId and eventType are required");
+            throw new IllegalArgumentException("actionId 和 eventType 不能为空");
         }
         try {
             mapper.insertIfAbsent(
@@ -38,7 +38,7 @@ public class AgentActionOutboxService {
                     objectMapper.writeValueAsString(payload == null ? Map.of() : payload)
             );
         } catch (JsonProcessingException exception) {
-            throw new IllegalArgumentException("outbox payload is not serializable", exception);
+            throw new IllegalArgumentException("发件箱载荷无法序列化", exception);
         }
     }
 
@@ -62,7 +62,7 @@ public class AgentActionOutboxService {
             propagation = Propagation.REQUIRES_NEW)
     public void markPublished(String eventId, String leaseOwner) {
         if (mapper.markPublished(eventId, leaseOwner) != 1) {
-            throw new IllegalStateException("outbox lease was lost before publish commit");
+            throw new IllegalStateException("提交发布前丢失了发件箱租约");
         }
     }
 

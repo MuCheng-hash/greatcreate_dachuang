@@ -41,7 +41,7 @@ public class AgentIdempotentActionExecutor {
                           String operation,
                           Object request,
                           Supplier<Map<String, Object>> mutation) {
-        requireText(actionId, "Idempotency-Key is required");
+        requireText(actionId, "Idempotency-Key 不能为空");
         requireText(turnId, "X-Agent-Turn-Id is required");
         requireText(operation, "operation is required");
         String requestJson = writeJson(request);
@@ -49,13 +49,13 @@ public class AgentIdempotentActionExecutor {
         mapper.insertIfAbsent(actionId, turnId, operation, requestHash, requestJson);
         AgentActionIdempotency record = mapper.selectForUpdate(actionId);
         if (record == null) {
-            throw new IllegalStateException("idempotency record was not created");
+            throw new IllegalStateException("未创建幂等记录");
         }
         if (!operation.equals(record.getOperation())
                 || !requestHash.equals(record.getRequestHash())) {
             throw new IdempotencyConflictException(
                     "idempotency_conflict",
-                    "Idempotency-Key was already used with another request"
+                    "Idempotency-Key 已被其他请求使用"
             );
         }
         if ("SUCCEEDED".equals(record.getStatus())) {
@@ -63,7 +63,7 @@ public class AgentIdempotentActionExecutor {
         }
         if (!"PROCESSING".equals(record.getStatus())) {
             throw new IdempotencyConflictException(
-                    "action_in_progress", "action cannot be executed from current status"
+                    "action_in_progress", "当前状态不允许执行该动作"
             );
         }
         Map<String, Object> body = new LinkedHashMap<>(mutation.get());
@@ -78,7 +78,7 @@ public class AgentIdempotentActionExecutor {
         try {
             return canonicalMapper.writeValueAsString(value == null ? Map.of() : value);
         } catch (JsonProcessingException exception) {
-            throw new IllegalArgumentException("action payload is not serializable", exception);
+            throw new IllegalArgumentException("动作载荷无法序列化", exception);
         }
     }
 
@@ -89,7 +89,7 @@ public class AgentIdempotentActionExecutor {
         try {
             return canonicalMapper.readValue(value, new TypeReference<>() {});
         } catch (JsonProcessingException exception) {
-            throw new IllegalStateException("stored idempotent response is invalid", exception);
+            throw new IllegalStateException("已存储的幂等响应无效", exception);
         }
     }
 
@@ -103,7 +103,7 @@ public class AgentIdempotentActionExecutor {
             }
             return result.toString();
         } catch (NoSuchAlgorithmException exception) {
-            throw new IllegalStateException("SHA-256 is unavailable", exception);
+            throw new IllegalStateException("SHA-256 不可用", exception);
         }
     }
 

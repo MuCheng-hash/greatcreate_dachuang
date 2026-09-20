@@ -550,7 +550,7 @@ public class AgentRuntimeClient {
 
     private void ensureClientTurnId(StatefulAgentRequest request) {
         if (request == null) {
-            throw new IllegalArgumentException("agent request is required");
+            throw new IllegalArgumentException("Agent 请求不能为空");
         }
         if (!StringUtils.hasText(request.getClientTurnId())) {
             request.setClientTurnId(UUID.randomUUID().toString());

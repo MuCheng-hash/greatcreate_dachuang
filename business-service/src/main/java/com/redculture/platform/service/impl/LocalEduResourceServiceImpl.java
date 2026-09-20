@@ -82,18 +82,18 @@ public class LocalEduResourceServiceImpl extends ServiceImpl<LocalEduResourceMap
 
     private LocalEduResource requireResource(Long resourceId) {
         if (resourceId == null) {
-            throw new IllegalArgumentException("resourceId is required");
+            throw new IllegalArgumentException("resourceId 不能为空");
         }
         LocalEduResource resource = getById(resourceId);
         if (resource == null) {
-            throw new IllegalArgumentException("resource not found");
+            throw new IllegalArgumentException("资源不存在");
         }
         return resource;
     }
 
     private void fillResourceForUpdate(LocalEduResource resource, ResourceUpdateRequest request) {
         if (request == null) {
-            throw new IllegalArgumentException("request cannot be null");
+            throw new IllegalArgumentException("请求不能为空");
         }
         resource.setResourceName(valueOrOriginal(request.getResourceName(), resource.getResourceName()));
         resource.setResourceCategory(valueOrOriginal(request.getResourceCategory(), resource.getResourceCategory()));

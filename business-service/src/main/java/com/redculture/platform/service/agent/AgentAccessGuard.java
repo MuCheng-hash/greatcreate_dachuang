@@ -30,7 +30,7 @@ public class AgentAccessGuard {
                                         AuthCurrentUserVO currentUser,
                                         String question) {
         if (currentUser == null) {
-            throw new IllegalArgumentException("school account is required");
+            throw new IllegalArgumentException("需要学校账号");
         }
 
         KnowledgeScopeType requestedType = KnowledgeScopeType.from(scopeType);
@@ -38,19 +38,19 @@ public class AgentAccessGuard {
 
         if (!admin) {
             if (currentUser.getSchoolId() == null) {
-                throw new IllegalArgumentException("school account is required");
+                throw new IllegalArgumentException("需要学校账号");
             }
             if (requestedType != null && requestedType != KnowledgeScopeType.SCHOOL) {
-                throw new IllegalArgumentException("school account can only query its own school");
+                throw new IllegalArgumentException("学校账号只能查询本校数据");
             }
             if (scopeId != null && !scopeId.equals(currentUser.getSchoolId())) {
-                throw new IllegalArgumentException("cannot access another school");
+                throw new IllegalArgumentException("无权访问其他学校");
             }
 
             List<SchoolSummaryVO> mentionedSchools = findMentionedSchools(question);
             if (mentionedSchools.stream().anyMatch(school ->
                     !currentUser.getSchoolId().equals(school.getSchoolId()))) {
-                throw new IllegalArgumentException("cannot access another school");
+                throw new IllegalArgumentException("无权访问其他学校");
             }
             if (mentionedSchools.size() > 1) {
                 return ScopeResolution.clarification(
@@ -86,15 +86,15 @@ public class AgentAccessGuard {
 
     public void assertToolAccess(AgentToolRequest request) {
         if (request == null || request.getActor() == null || request.getScope() == null) {
-            throw new IllegalArgumentException("agent actor and scope are required");
+            throw new IllegalArgumentException("Agent 操作主体和范围不能为空");
         }
         if (request.getActor().getAccountId() == null
                 || !StringUtils.hasText(request.getActor().getRoleCode())) {
-            throw new IllegalArgumentException("agent actor is invalid");
+            throw new IllegalArgumentException("Agent 操作主体无效");
         }
         KnowledgeScopeType scopeType = KnowledgeScopeType.from(request.getScope().getScopeType());
         if (scopeType == null || request.getScope().getScopeId() == null || request.getScope().getScopeId() <= 0) {
-            throw new IllegalArgumentException("agent scope is invalid");
+            throw new IllegalArgumentException("Agent 范围无效");
         }
 
         if ("platform_admin".equals(request.getActor().getRoleCode())) {
@@ -104,7 +104,7 @@ public class AgentAccessGuard {
                 || scopeType != KnowledgeScopeType.SCHOOL
                 || request.getActor().getSchoolId() == null
                 || !request.getActor().getSchoolId().equals(request.getScope().getScopeId())) {
-            throw new IllegalArgumentException("agent actor cannot access this scope");
+            throw new IllegalArgumentException("Agent 操作主体无权访问该范围");
         }
     }
 

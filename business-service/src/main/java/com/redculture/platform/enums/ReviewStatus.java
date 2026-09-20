@@ -57,7 +57,7 @@ public enum ReviewStatus {
                 return status;
             }
         }
-        throw new IllegalArgumentException("unsupported reviewStatus: " + value);
+        throw new IllegalArgumentException("不支持的 reviewStatus：" + value);
     }
 
     /**

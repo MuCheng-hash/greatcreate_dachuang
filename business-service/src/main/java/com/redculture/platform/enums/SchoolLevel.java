@@ -73,7 +73,7 @@ public enum SchoolLevel {
                 return item;
             }
         }
-        throw new IllegalArgumentException("unsupported schoolLevel: " + value);
+        throw new IllegalArgumentException("不支持的 schoolLevel：" + value);
     }
 
     /**

@@ -40,7 +40,7 @@ public final class AuthContext {
     public static AuthCurrentUserVO requireUser(HttpServletRequest request) {
         AuthCurrentUserVO user = currentUser(request);
         if (user == null) {
-            throw new IllegalArgumentException("authentication required");
+            throw new IllegalArgumentException("需要完成身份认证");
         }
         return user;
     }

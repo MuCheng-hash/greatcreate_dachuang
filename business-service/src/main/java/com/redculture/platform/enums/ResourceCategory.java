@@ -81,7 +81,7 @@ public enum ResourceCategory {
                 return category;
             }
         }
-        throw new IllegalArgumentException("unsupported resourceCategory: " + value);
+        throw new IllegalArgumentException("不支持的 resourceCategory：" + value);
     }
 
     /**

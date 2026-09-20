@@ -247,7 +247,7 @@ public class AiTeachingPlanServiceImpl implements AiTeachingPlanService {
         Set<Long> accessibleResourceIds = (detail.getResources() == null ? List.<SchoolResourceItemVO>of() : detail.getResources()).stream()
                 .map(SchoolResourceItemVO::getResourceId).filter(java.util.Objects::nonNull).collect(Collectors.toSet());
         if (!accessibleResourceIds.containsAll(requestedResourceIds)) {
-            throw new IllegalArgumentException("one or more resources are not accessible for this school");
+            throw new IllegalArgumentException("一个或多个资源不在该学校的可访问范围内");
         }
 
         TeachingActivityPlanCreateRequest createRequest = new TeachingActivityPlanCreateRequest();
@@ -306,7 +306,7 @@ public class AiTeachingPlanServiceImpl implements AiTeachingPlanService {
                 : accessible.stream().filter(item -> requestedResourceIds.contains(item.getResourceId())).toList();
         // 资源数量必须完整匹配，不能因部分资源有权限就静默忽略其余越权资源。
         if (!requestedResourceIds.isEmpty() && selected.size() != requestedResourceIds.stream().distinct().count()) {
-            throw new IllegalArgumentException("one or more resources are not accessible for this school");
+            throw new IllegalArgumentException("一个或多个资源不在该学校的可访问范围内");
         }
         context.setResources(buildResourceContexts(accessible));
         context.setSelectedResources(buildResourceContexts(selected));
@@ -880,54 +880,54 @@ public class AiTeachingPlanServiceImpl implements AiTeachingPlanService {
 
     private SchoolMapDetailVO requireApprovedSchool(Long schoolId) {
         if (schoolId == null) {
-            throw new IllegalArgumentException("schoolId is required");
+            throw new IllegalArgumentException("schoolId 不能为空");
         }
         SchoolMapDetailVO detail = schoolMapService.getSchoolDetail(schoolId);
         if (detail == null || detail.getSchool() == null) {
-            throw new IllegalArgumentException("school not found or not approved");
+            throw new IllegalArgumentException("学校不存在或未审核通过");
         }
         return detail;
     }
 
     private void validateGenerateRequest(TeachingPlanGenerateRequest request) {
         if (request == null) {
-            throw new IllegalArgumentException("request cannot be null");
+            throw new IllegalArgumentException("请求不能为空");
         }
         if (request.getSchoolId() == null) {
-            throw new IllegalArgumentException("schoolId is required");
+            throw new IllegalArgumentException("schoolId 不能为空");
         }
         if (!StringUtils.hasText(request.getGrade())) {
-            throw new IllegalArgumentException("grade is required");
+            throw new IllegalArgumentException("grade 不能为空");
         }
         if (!StringUtils.hasText(request.getTheme())) {
-            throw new IllegalArgumentException("theme is required");
+            throw new IllegalArgumentException("主题不能为空");
         }
         if (request.getGrade() != null && request.getGrade().length() > 100) {
-            throw new IllegalArgumentException("grade is too long");
+            throw new IllegalArgumentException("grade 长度过长");
         }
         if (request.getTheme().length() > 200) {
-            throw new IllegalArgumentException("theme is too long");
+            throw new IllegalArgumentException("主题长度过长");
         }
         if (request.getObjectives() != null && request.getObjectives().length() > 2000) {
-            throw new IllegalArgumentException("objectives is too long");
+            throw new IllegalArgumentException("教学目标长度过长");
         }
         if (request.getResourceIds() != null && request.getResourceIds().size() > 20) {
-            throw new IllegalArgumentException("at most 20 resources can be selected");
+            throw new IllegalArgumentException("最多只能选择 20 个资源");
         }
         if (request.getDurationMinutes() != null && request.getDurationMinutes() <= 0) {
-            throw new IllegalArgumentException("durationMinutes must be positive");
+            throw new IllegalArgumentException("durationMinutes 必须为正数");
         }
     }
 
     private void validateSaveRequest(GeneratedTeachingPlanSaveRequest request) {
         if (request == null) {
-            throw new IllegalArgumentException("request cannot be null");
+            throw new IllegalArgumentException("请求不能为空");
         }
         if (request.getSchoolId() == null) {
-            throw new IllegalArgumentException("schoolId is required");
+            throw new IllegalArgumentException("schoolId 不能为空");
         }
         if (!StringUtils.hasText(request.getTheme())) {
-            throw new IllegalArgumentException("theme is required");
+            throw new IllegalArgumentException("主题不能为空");
         }
     }
 

@@ -48,6 +48,6 @@ public enum AgentGenerationStatus {
                 return status;
             }
         }
-        throw new IllegalArgumentException("generationStatus must be completed, degraded or skipped");
+        throw new IllegalArgumentException("generationStatus 必须为 completed、degraded 或 skipped");
     }
 }

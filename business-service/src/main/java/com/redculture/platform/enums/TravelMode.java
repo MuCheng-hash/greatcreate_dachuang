@@ -61,7 +61,7 @@ public enum TravelMode {
                 return mode;
             }
         }
-        throw new IllegalArgumentException("unsupported travelMode: " + value);
+        throw new IllegalArgumentException("不支持的 travelMode：" + value);
     }
 
     /**

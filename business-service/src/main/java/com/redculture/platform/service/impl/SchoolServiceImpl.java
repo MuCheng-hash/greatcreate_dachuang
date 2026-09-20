@@ -149,7 +149,7 @@ public class SchoolServiceImpl extends ServiceImpl<SchoolMapper, School> impleme
     @Transactional
     public SchoolImportResultVO importCsv(SchoolCsvImportRequest request) {
         if (request == null || !StringUtils.hasText(request.getCsvContent())) {
-            throw new IllegalArgumentException("csvContent is required");
+            throw new IllegalArgumentException("csvContent 不能为空");
         }
         SchoolImportResultVO result = new SchoolImportResultVO();
         String[] lines = request.getCsvContent().replace("\r", "").split("\n");
@@ -512,18 +512,18 @@ public class SchoolServiceImpl extends ServiceImpl<SchoolMapper, School> impleme
 
     private School requireSchool(Long schoolId) {
         if (schoolId == null) {
-            throw new IllegalArgumentException("schoolId is required");
+            throw new IllegalArgumentException("schoolId 不能为空");
         }
         School school = getById(schoolId);
         if (school == null) {
-            throw new IllegalArgumentException("school not found");
+            throw new IllegalArgumentException("学校不存在");
         }
         return school;
     }
 
     private void fillSchoolForUpdate(School school, SchoolUpdateRequest request) {
         if (request == null) {
-            throw new IllegalArgumentException("request cannot be null");
+            throw new IllegalArgumentException("请求不能为空");
         }
         school.setSchoolName(valueOrOriginal(request.getSchoolName(), school.getSchoolName()));
         school.setProvinceRegionId(valueOrOriginal(request.getProvinceRegionId(), school.getProvinceRegionId()));

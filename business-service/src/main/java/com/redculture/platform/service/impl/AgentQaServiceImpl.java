@@ -201,7 +201,7 @@ public class AgentQaServiceImpl implements AgentQaService {
     public Mono<AgentQaResponse> ask(AgentQaRequest request, AuthCurrentUserVO currentUser) {
         validateRequest(request);
         if (currentUser == null) {
-            throw new IllegalArgumentException("school account is required");
+            throw new IllegalArgumentException("需要学校账号");
         }
 
         return askWithAgentPipeline(request, currentUser);
@@ -215,13 +215,13 @@ public class AgentQaServiceImpl implements AgentQaService {
     public Mono<AssistantConversationTurnCancellation> cancelTurn(
             String clientTurnId, AuthCurrentUserVO currentUser) {
         if (!StringUtils.hasText(clientTurnId)) {
-            throw new IllegalArgumentException("clientTurnId is required");
+            throw new IllegalArgumentException("clientTurnId 不能为空");
         }
         if (currentUser == null || currentUser.getSchoolId() == null) {
-            throw new IllegalArgumentException("school account is required");
+            throw new IllegalArgumentException("需要学校账号");
         }
         if (agentRuntimeClient == null) {
-            throw new IllegalStateException("stateful agent runtime is unavailable");
+            throw new IllegalStateException("有状态 Agent 运行时不可用");
         }
         return agentRuntimeClient.cancelConversationTurn(
                 clientTurnId,
@@ -258,7 +258,7 @@ public class AgentQaServiceImpl implements AgentQaService {
         validateActionRequest(actionId, currentUser);
         // 决策值只允许终态确认或拒绝，防止将任意文本透传给可能执行副作用的 Agent 动作。
         if (!"approve".equals(decision) && !"reject".equals(decision)) {
-            throw new IllegalArgumentException("decision must be approve or reject");
+            throw new IllegalArgumentException("decision 必须为 approve 或 reject");
         }
         return agentRuntimeClient.decideAction(
                 actionId,
@@ -272,13 +272,13 @@ public class AgentQaServiceImpl implements AgentQaService {
     private void validateActionRequest(String actionId, AuthCurrentUserVO currentUser) {
         // actionId 为空时不访问运行时，避免把参数错误伪装成上游故障。
         if (!StringUtils.hasText(actionId)) {
-            throw new IllegalArgumentException("actionId is required");
+            throw new IllegalArgumentException("actionId 不能为空");
         }
         if (currentUser == null || currentUser.getSchoolId() == null) {
-            throw new IllegalArgumentException("school account is required");
+            throw new IllegalArgumentException("需要学校账号");
         }
         if (agentRuntimeClient == null) {
-            throw new IllegalStateException("stateful agent runtime is unavailable");
+            throw new IllegalStateException("有状态 Agent 运行时不可用");
         }
     }
 
@@ -293,7 +293,7 @@ public class AgentQaServiceImpl implements AgentQaService {
             // 延迟到订阅时校验，确保每次 SSE 重连都重新使用当前认证上下文，而不是复用过期范围。
             validateRequest(request);
             if (currentUser == null) {
-                return Flux.error(new IllegalArgumentException("school account is required"));
+                return Flux.error(new IllegalArgumentException("需要学校账号"));
             }
             return onBlockingScheduler(() -> accessGuard.resolveScope(
                     request.getScopeType(),
@@ -931,22 +931,22 @@ public class AgentQaServiceImpl implements AgentQaService {
 
     private void validateRequest(AgentQaRequest request) {
         if (request == null || !StringUtils.hasText(request.getQuestion())) {
-            throw new IllegalArgumentException("question is required");
+            throw new IllegalArgumentException("问题不能为空");
         }
         if (request.getScopeId() != null && request.getScopeId() <= 0) {
-            throw new IllegalArgumentException("scopeId must be positive");
+            throw new IllegalArgumentException("scopeId 必须为正数");
         }
-        if (request.getResourceId() != null && request.getResourceId() <= 0) throw new IllegalArgumentException("resourceId must be positive");
-        if (request.getTaskId() != null && request.getTaskId() <= 0) throw new IllegalArgumentException("taskId must be positive");
+        if (request.getResourceId() != null && request.getResourceId() <= 0) throw new IllegalArgumentException("resourceId 必须为正数");
+        if (request.getTaskId() != null && request.getTaskId() <= 0) throw new IllegalArgumentException("taskId 必须为正数");
         if (StringUtils.hasText(request.getTheme()) && request.getTheme().trim().length() > 50) {
-            throw new IllegalArgumentException("theme must not exceed 50 characters");
+            throw new IllegalArgumentException("主题长度不能超过 50 个字符");
         }
         if (StringUtils.hasText(request.getResourceCategory())) {
             ResourceCategory.fromValue(request.getResourceCategory());
         }
         if (request.getMaxDistanceMeters() != null
                 && !List.of(1000, 3000, 5000, 10000).contains(request.getMaxDistanceMeters())) {
-            throw new IllegalArgumentException("maxDistanceMeters must be one of 1000, 3000, 5000 or 10000");
+            throw new IllegalArgumentException("maxDistanceMeters 必须为 1000、3000、5000 或 10000 之一");
         }
         if (!StringUtils.hasText(request.getClientTurnId())) {
             request.setClientTurnId(java.util.UUID.randomUUID().toString());
@@ -954,21 +954,21 @@ public class AgentQaServiceImpl implements AgentQaService {
         List<AgentAttachmentRequest> attachments = request.getAttachments() == null
                 ? Collections.emptyList() : request.getAttachments();
         if (attachments.size() > 3) {
-            throw new IllegalArgumentException("at most 3 image attachments are allowed");
+            throw new IllegalArgumentException("最多允许添加 3 个图片附件");
         }
         for (AgentAttachmentRequest attachment : attachments) {
             if (attachment == null || !"image".equals(attachment.getType())
                     || !StringUtils.hasText(attachment.getName())
                     || !StringUtils.hasText(attachment.getMediaType())
                     || !StringUtils.hasText(attachment.getDataUrl())) {
-                throw new IllegalArgumentException("image attachment is invalid");
+                throw new IllegalArgumentException("图片附件无效");
             }
             String prefix = "data:" + attachment.getMediaType() + ";base64,";
             if (!(List.of("image/jpeg", "image/png", "image/webp", "image/gif")
                     .contains(attachment.getMediaType()))
                     || !attachment.getDataUrl().startsWith(prefix)
                     || attachment.getDataUrl().length() > 7_100_000) {
-                throw new IllegalArgumentException("image attachment format or size is invalid");
+                throw new IllegalArgumentException("图片附件格式或大小无效");
             }
         }
     }
@@ -986,17 +986,17 @@ public class AgentQaServiceImpl implements AgentQaService {
 
         if (!admin) {
             if (currentUser.getSchoolId() == null) {
-                throw new IllegalArgumentException("school account is required");
+                throw new IllegalArgumentException("需要学校账号");
             }
             if (requestedType != null && requestedType != KnowledgeScopeType.SCHOOL) {
-                throw new IllegalArgumentException("school account can only query its own school");
+                throw new IllegalArgumentException("学校账号只能查询本校数据");
             }
             if (requestedId != null && !requestedId.equals(currentUser.getSchoolId())) {
-                throw new IllegalArgumentException("cannot access another school");
+                throw new IllegalArgumentException("无权访问其他学校");
             }
             List<SchoolSummaryVO> mentionedSchools = findMentionedSchools(question);
             if (mentionedSchools.stream().anyMatch(school -> !currentUser.getSchoolId().equals(school.getSchoolId()))) {
-                throw new IllegalArgumentException("cannot access another school");
+                throw new IllegalArgumentException("无权访问其他学校");
             }
             if (mentionedSchools.size() > 1) {
                 return ScopeResolution.clarification("问题中匹配到多个学校，请补充完整学校名称。", schoolNames(mentionedSchools));
@@ -1099,14 +1099,14 @@ public class AgentQaServiceImpl implements AgentQaService {
     private void loadBusinessContext(AgentAnswerContext context) {
         if (context.isStudentMode()) {
             if (context.getScopeType() != KnowledgeScopeType.SCHOOL) {
-                throw new IllegalArgumentException("student account can only query its own school");
+                throw new IllegalArgumentException("学生账号只能查询本校数据");
             }
             if (context.getResourceId() != null) {
                 LocalEduResource resource = localEduResourceService.getById(context.getResourceId());
                 if (resource == null || !Boolean.TRUE.equals(resource.getActive()) || resource.getReviewStatus() != ReviewStatus.APPROVED
                         || !schoolResourceRelMapper.exists(new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<SchoolResourceRel>()
                         .eq(SchoolResourceRel::getSchoolId, context.getScopeId()).eq(SchoolResourceRel::getResourceId, context.getResourceId()))) {
-                    throw new IllegalArgumentException("resource is not available to this student");
+                    throw new IllegalArgumentException("该资源不对当前学生开放");
                 }
                 context.setResource(resource);
             }
@@ -1119,7 +1119,7 @@ public class AgentQaServiceImpl implements AgentQaService {
                         .eq(ClassMember::getStudentId, student.getStudentId()).eq(ClassMember::getClassId, task.getClassId()).eq(ClassMember::getStatus, "active"))
                         && studentTaskProgressMapper.exists(new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<StudentTaskProgress>()
                         .eq(StudentTaskProgress::getStudentId, student.getStudentId()).eq(StudentTaskProgress::getTaskId, task.getTaskId()));
-                if (!assigned) throw new IllegalArgumentException("task is not available to this student");
+                if (!assigned) throw new IllegalArgumentException("该任务不对当前学生开放");
                 context.setTaskTitle(task.getTitle()); context.setTaskDescription(task.getDescription());
                 context.setTaskResourceIds(taskResourceRelMapper.selectList(new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<TaskResourceRel>()
                         .eq(TaskResourceRel::getTaskId, task.getTaskId()).orderByAsc(TaskResourceRel::getSortOrder)).stream().map(TaskResourceRel::getResourceId).toList());
@@ -1129,7 +1129,7 @@ public class AgentQaServiceImpl implements AgentQaService {
             case SCHOOL -> {
                 SchoolMapDetailVO detail = schoolMapService.getSchoolDetail(context.getScopeId());
                 if (detail == null) {
-                    throw new IllegalArgumentException("school not found or unavailable");
+                    throw new IllegalArgumentException("学校不存在或不可用");
                 }
                 context.setSchoolDetail(detail);
                 context.setMatchedSchoolResource(findMentionedResource(detail, context.getQuestion()));
@@ -1139,14 +1139,14 @@ public class AgentQaServiceImpl implements AgentQaService {
                     context.setRegionDetail(townMapService.getTownMapDetail(context.getScopeId()));
                 }
                 if (context.getRegionDetail() == null) {
-                    throw new IllegalArgumentException("region not found or unavailable");
+                    throw new IllegalArgumentException("区域不存在或不可用");
                 }
             }
             case RESOURCE -> {
                 LocalEduResource resource = localEduResourceService.getById(context.getScopeId());
                 if (resource == null || !Boolean.TRUE.equals(resource.getActive())
                         || resource.getReviewStatus() != ReviewStatus.APPROVED) {
-                    throw new IllegalArgumentException("resource not found or unavailable");
+                    throw new IllegalArgumentException("资源不存在或不可用");
                 }
                 context.setResource(resource);
             }

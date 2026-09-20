@@ -110,7 +110,7 @@ public class TeachingActivityPlanServiceImpl extends ServiceImpl<TeachingActivit
     /** 更新后台方案；资源列表存在时整体替换关联，空值则表示保持既有关联不变。 */
     public TeachingActivityPlanAdminVO updatePlan(Long planId, TeachingActivityPlanUpdateRequest request) {
         if (request == null) {
-            throw new IllegalArgumentException("request cannot be null");
+            throw new IllegalArgumentException("请求不能为空");
         }
         TeachingActivityPlan plan = requirePlan(planId);
         ensureResourceExistsIfNeeded(request.getResourceId());
@@ -180,7 +180,7 @@ public class TeachingActivityPlanServiceImpl extends ServiceImpl<TeachingActivit
     @Override
     public PageResult<TeachingActivityPlanAdminVO> listBySchoolId(Long schoolId, Long pageNum, Long pageSize) {
         if (schoolId == null) {
-            throw new IllegalArgumentException("schoolId is required");
+            throw new IllegalArgumentException("schoolId 不能为空");
         }
         return pagePlans(schoolId, null, null, null, null, pageNum, pageSize);
     }
@@ -190,7 +190,7 @@ public class TeachingActivityPlanServiceImpl extends ServiceImpl<TeachingActivit
                                                             Long resourceId, LocalDateTime createdFrom,
                                                             LocalDateTime createdTo, Long pageNum, Long pageSize) {
         // “我的方案”同时以账号和学校过滤；仅账号匹配不足以防御账号迁校或脏数据造成的越权展示。
-        if (user == null || user.getAccountId() == null || user.getSchoolId() == null) throw new IllegalArgumentException("authenticated school account is required");
+        if (user == null || user.getAccountId() == null || user.getSchoolId() == null) throw new IllegalArgumentException("需要已认证的学校账号");
         validateFilters(grade, theme, createdFrom, createdTo);
         long safePageNum = pageNum == null || pageNum <= 0 ? DEFAULT_PAGE_NUM : pageNum;
         long safePageSize = pageSize == null || pageSize <= 0 ? 20L : Math.min(pageSize, MAX_PAGE_SIZE);
@@ -212,9 +212,9 @@ public class TeachingActivityPlanServiceImpl extends ServiceImpl<TeachingActivit
     }
 
     private void validateFilters(String grade, String theme, LocalDateTime from, LocalDateTime to) {
-        if (StringUtils.hasText(grade) && grade.trim().length() > 100) throw new IllegalArgumentException("grade is too long");
-        if (StringUtils.hasText(theme) && theme.trim().length() > 200) throw new IllegalArgumentException("theme is too long");
-        if (from != null && to != null && from.isAfter(to)) throw new IllegalArgumentException("createdFrom must not be after createdTo");
+        if (StringUtils.hasText(grade) && grade.trim().length() > 100) throw new IllegalArgumentException("grade 长度过长");
+        if (StringUtils.hasText(theme) && theme.trim().length() > 200) throw new IllegalArgumentException("主题长度过长");
+        if (from != null && to != null && from.isAfter(to)) throw new IllegalArgumentException("createdFrom 不能晚于 createdTo");
     }
 
     @Override
@@ -357,10 +357,10 @@ public class TeachingActivityPlanServiceImpl extends ServiceImpl<TeachingActivit
 
     /** 以账号和学校双重条件确认方案归属，对外统一表现为未找到，避免泄露跨校记录存在性。 */
     private TeachingActivityPlan requireOwned(Long planId, AuthCurrentUserVO user) {
-        if (user == null || user.getAccountId() == null || user.getSchoolId() == null) throw new IllegalArgumentException("authentication required");
+        if (user == null || user.getAccountId() == null || user.getSchoolId() == null) throw new IllegalArgumentException("需要完成身份认证");
         TeachingActivityPlan plan = getById(planId);
         if (plan == null || !user.getAccountId().equals(plan.getOwnerAccountId()) || !user.getSchoolId().equals(plan.getSchoolId())) {
-            throw new IllegalArgumentException("plan not found");
+            throw new IllegalArgumentException("教学方案不存在");
         }
         return plan;
     }
@@ -387,19 +387,19 @@ public class TeachingActivityPlanServiceImpl extends ServiceImpl<TeachingActivit
 
     private void validateCreateRequest(TeachingActivityPlanCreateRequest request) {
         if (request == null) {
-            throw new IllegalArgumentException("request cannot be null");
+            throw new IllegalArgumentException("请求不能为空");
         }
         if (!StringUtils.hasText(request.getPlanCode())) {
-            throw new IllegalArgumentException("planCode is required");
+            throw new IllegalArgumentException("planCode 不能为空");
         }
         if (request.getSchoolId() == null) {
-            throw new IllegalArgumentException("schoolId is required");
+            throw new IllegalArgumentException("schoolId 不能为空");
         }
         if (!StringUtils.hasText(request.getTheme())) {
-            throw new IllegalArgumentException("theme is required");
+            throw new IllegalArgumentException("主题不能为空");
         }
         if (!StringUtils.hasText(request.getActivityContent())) {
-            throw new IllegalArgumentException("activityContent is required");
+            throw new IllegalArgumentException("activityContent 不能为空");
         }
     }
 
@@ -410,29 +410,29 @@ public class TeachingActivityPlanServiceImpl extends ServiceImpl<TeachingActivit
             wrapper.ne(TeachingActivityPlan::getPlanId, excludePlanId);
         }
         if (count(wrapper) > 0) {
-            throw new IllegalArgumentException("planCode already exists");
+            throw new IllegalArgumentException("planCode 已存在");
         }
     }
 
     private void ensureSchoolExists(Long schoolId) {
         if (schoolService.getById(schoolId) == null) {
-            throw new IllegalArgumentException("school not found");
+            throw new IllegalArgumentException("学校不存在");
         }
     }
 
     private void ensureResourceExistsIfNeeded(Long resourceId) {
         if (resourceId != null && localEduResourceService.getById(resourceId) == null) {
-            throw new IllegalArgumentException("resource not found");
+            throw new IllegalArgumentException("资源不存在");
         }
     }
 
     private TeachingActivityPlan requirePlan(Long planId) {
         if (planId == null) {
-            throw new IllegalArgumentException("planId is required");
+            throw new IllegalArgumentException("planId 不能为空");
         }
         TeachingActivityPlan plan = getById(planId);
         if (plan == null) {
-            throw new IllegalArgumentException("plan not found");
+            throw new IllegalArgumentException("教学方案不存在");
         }
         return plan;
     }

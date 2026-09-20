@@ -83,7 +83,7 @@ public class AiTeachingPlanController {
                 ))
                 .onErrorResume(AgentBusyException.class, error -> Mono.just(
                         ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
-                                .body(ApiResponse.fail(503, "agent_busy"))
+                                .body(ApiResponse.fail(503, "Agent 当前繁忙，请稍后重试"))
                 ))
                 .onErrorResume(AgentUpstreamException.class, error -> Mono.just(
                         ResponseEntity.status(HttpStatus.BAD_GATEWAY)
@@ -142,7 +142,7 @@ public class AiTeachingPlanController {
             HttpServletRequest servletRequest) {
         AuthCurrentUserVO user = AuthContext.currentUser(servletRequest);
         if (user == null || user.getSchoolId() == null) {
-            return ResponseEntity.badRequest().body(ApiResponse.fail(400, "school account is required"));
+            return ResponseEntity.badRequest().body(ApiResponse.fail(400, "需要学校账号"));
         }
         try {
             LocalDateTime from = createdFrom == null ? null : createdFrom.atStartOfDay();
@@ -173,7 +173,7 @@ public class AiTeachingPlanController {
         } catch (IllegalArgumentException exception) {
             return ResponseEntity.status(HttpStatus.NOT_FOUND).body(ApiResponse.fail(exception.getMessage()));
         } catch (java.io.IOException exception) {
-            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(ApiResponse.fail("DOCX export failed"));
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(ApiResponse.fail("DOCX 导出失败"));
         }
     }
 
@@ -277,10 +277,10 @@ public class AiTeachingPlanController {
      */
     private void requireSchoolAccess(Long schoolId, AuthCurrentUserVO user) {
         if (user == null || schoolId == null) {
-            throw new IllegalArgumentException("school account is required");
+            throw new IllegalArgumentException("需要学校账号");
         }
         if (!"platform_admin".equals(user.getRoleCode()) && !schoolId.equals(user.getSchoolId())) {
-            throw new IllegalArgumentException("cannot access another school");
+            throw new IllegalArgumentException("无权访问其他学校");
         }
     }
 }

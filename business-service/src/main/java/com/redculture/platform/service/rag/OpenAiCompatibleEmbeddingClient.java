@@ -58,32 +58,32 @@ public class OpenAiCompatibleEmbeddingClient implements EmbeddingClient {
         try {
             JsonNode data = objectMapper.readTree(response).path("data");
             if (!data.isArray()) {
-                throw new IllegalStateException("embedding provider response has no data array");
+                throw new IllegalStateException("嵌入服务响应缺少 data 数组");
             }
             List<IndexedEmbedding> indexed = new ArrayList<>();
             for (JsonNode item : data) {
                 JsonNode vectorNode = item.path("embedding");
                 if (!vectorNode.isArray()) {
-                    throw new IllegalStateException("embedding provider returned an invalid vector");
+                    throw new IllegalStateException("嵌入服务返回了无效向量");
                 }
                 float[] vector = new float[vectorNode.size()];
                 for (int i = 0; i < vectorNode.size(); i++) {
                     vector[i] = (float) vectorNode.get(i).asDouble();
                 }
                 if (vector.length != properties.getEmbeddingDimensions()) {
-                    throw new IllegalStateException("embedding dimension does not match app.rag.embedding-dimensions");
+                    throw new IllegalStateException("嵌入向量维度与 app.rag.embedding-dimensions 不一致");
                 }
                 indexed.add(new IndexedEmbedding(item.path("index").asInt(indexed.size()), vector));
             }
             indexed.sort(Comparator.comparingInt(IndexedEmbedding::index));
             if (indexed.size() != expectedCount) {
-                throw new IllegalStateException("embedding provider returned an unexpected result count");
+                throw new IllegalStateException("嵌入服务返回了非预期数量的结果");
             }
             return indexed.stream().map(IndexedEmbedding::vector).toList();
         } catch (IllegalStateException exception) {
             throw exception;
         } catch (Exception exception) {
-            throw new IllegalStateException("failed to parse embedding provider response", exception);
+            throw new IllegalStateException("解析嵌入服务响应失败", exception);
         }
     }
 

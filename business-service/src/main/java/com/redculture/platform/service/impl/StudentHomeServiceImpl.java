@@ -40,8 +40,8 @@ public class StudentHomeServiceImpl implements StudentHomeService {
     }
 
     private StudentProfile requireStudent(AuthCurrentUserVO user) {
-        if (user == null || !"student".equalsIgnoreCase(user.getRoleCode()) || user.getAccountId() == null) throw new IllegalArgumentException("student account is required");
+        if (user == null || !"student".equalsIgnoreCase(user.getRoleCode()) || user.getAccountId() == null) throw new IllegalArgumentException("需要学生账号");
         StudentProfile student = studentMapper.selectOne(new LambdaQueryWrapper<StudentProfile>().eq(StudentProfile::getAccountId, user.getAccountId()).eq(StudentProfile::getStatus, "active").last("LIMIT 1"));
-        if (student == null) throw new IllegalArgumentException("student profile is unavailable"); return student;
+        if (student == null) throw new IllegalArgumentException("学生档案不可用"); return student;
     }
 }
