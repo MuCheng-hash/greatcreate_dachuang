@@ -1355,7 +1355,9 @@ def test_stream_prefetches_graph_tool_for_trusted_scope(tmp_path: Path):
     calls = []
 
     class FakeBusinessToolClient:
-        async def query_graph_relations(self, payload):
+        configured = True
+
+        async def query_graph_relations(self, payload, *, tool_authorization, client_turn_id):
             calls.append(payload)
             return {
                 "retrievalStatus": "ok",
@@ -1379,6 +1381,7 @@ def test_stream_prefetches_graph_tool_for_trusted_scope(tmp_path: Path):
         context={
             "actor": {"accountId": 1, "roleCode": "school_admin", "schoolId": 1},
             "scope": {"scopeType": "SCHOOL", "scopeId": 1},
+            "toolAuthorization": "signed-context",
         },
     ))
 

@@ -34,6 +34,9 @@ class StructuredOutputModel(BaseModel):
 class TrustedContext(ApiModel):
     actor: dict[str, Any] | None = None
     scope: dict[str, Any] | None = None
+    tool_authorization: str | None = Field(
+        default=None, alias="toolAuthorization", min_length=1, max_length=4096
+    )
     school: dict[str, Any] | None = None
     region: dict[str, Any] | None = None
     resource: dict[str, Any] | None = None
@@ -96,6 +99,18 @@ class AgentMessageRequest(ApiModel):
         if value not in {"SCHOOL", "REGION", "RESOURCE"}:
             raise ValueError("scopeType 必须为 SCHOOL、REGION 或 RESOURCE")
         return value
+
+    @model_validator(mode="after")
+    def validate_trusted_scope(self) -> "AgentMessageRequest":
+        """拒绝顶层范围与 Java 认证后可信范围不一致的请求。"""
+        scope = self.context.scope
+        if scope is None:
+            return self
+        trusted_type = str(scope.get("scopeType") or "").strip().upper()
+        trusted_id = scope.get("scopeId")
+        if trusted_type != self.scope_type or str(trusted_id) != str(self.scope_id):
+            raise ValueError("可信范围与请求范围不一致")
+        return self
 
 
 class ThreadCreateRequest(ApiModel):
