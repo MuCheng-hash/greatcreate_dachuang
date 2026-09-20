@@ -69,11 +69,11 @@ public class WebMvcAuthConfig implements WebMvcConfigurer {
     public void addInterceptors(InterceptorRegistry registry) {
         registry.addInterceptor(authenticatedUserInterceptor)
                 .addPathPatterns("/api/admin/**", "/api/teacher/**", "/api/student/**", "/api/map/**", "/api/school-map/**", "/api/ai/**",
-                        "/api/knowledge-documents/**", "/api/auth/me", "/api/auth/profile", "/api/auth/password")
+                        "/api/auth/me", "/api/auth/profile", "/api/auth/password")
                 .excludePathPatterns("/api/map/client-config");
         registry.addInterceptor(roleAuthorizationInterceptor)
                 .addPathPatterns("/api/admin/**", "/api/teacher/**", "/api/student/**", "/api/map/**", "/api/school-map/**", "/api/ai/**",
-                        "/api/knowledge-documents/**", "/api/auth/me", "/api/auth/profile", "/api/auth/password")
+                        "/api/auth/me", "/api/auth/profile", "/api/auth/password")
                 .excludePathPatterns("/api/map/client-config");
         registry.addInterceptor(adminAccessInterceptor)
                 .addPathPatterns("/api/admin/**");

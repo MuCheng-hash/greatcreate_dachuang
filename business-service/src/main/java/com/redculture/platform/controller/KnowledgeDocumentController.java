@@ -10,6 +10,7 @@ import com.redculture.platform.mapper.KnowledgeDocumentImageMapper;
 import com.redculture.platform.mapper.KnowledgeIngestJobMapper;
 import com.redculture.platform.service.KnowledgeDocumentService;
 import com.redculture.platform.vo.AuthCurrentUserVO;
+import com.redculture.platform.vo.KnowledgeDocumentListItem;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -26,7 +27,7 @@ import java.util.List;
 import java.util.Map;
 
 @RestController
-@RequestMapping("/api/knowledge-documents")
+@RequestMapping("/api/admin/knowledge-documents")
 //知识库文档管理
 public class KnowledgeDocumentController {
     private final KnowledgeDocumentService service;
@@ -41,9 +42,14 @@ public class KnowledgeDocumentController {
                                                   @RequestParam MultipartFile file, HttpServletRequest request) {
         return ApiResponse.success(service.upload(schoolId, title, file, current(request)));
     }
-    //查询指定学校的知识库文档列表。
+    //查询平台管理员可管理的知识库文档及其导入任务摘要。
     @GetMapping
-    public ApiResponse<List<KnowledgeDocument>> list(@RequestParam(required = false) Long schoolId, HttpServletRequest request) { return ApiResponse.success(service.list(schoolId, current(request))); }
+    public ApiResponse<List<KnowledgeDocumentListItem>> list(@RequestParam(defaultValue = "all") String scope,
+                                                              @RequestParam(required = false) Long schoolId,
+                                                              HttpServletRequest request) {
+        current(request);
+        return ApiResponse.success(service.listForAdmin(scope, schoolId));
+    }
     //查询单个文档详情，同时返回对应的导入任务信息
     @GetMapping("/{id}")
     public ApiResponse<Map<String, Object>> detail(@PathVariable Long id, HttpServletRequest request) {
