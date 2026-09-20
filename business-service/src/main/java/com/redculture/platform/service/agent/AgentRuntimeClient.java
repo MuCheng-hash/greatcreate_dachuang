@@ -17,6 +17,7 @@ import com.redculture.platform.vo.ai.AssistantConversationDetail;
 import com.redculture.platform.vo.ai.AssistantConversationSummary;
 import com.redculture.platform.vo.ai.AssistantConversationTurnCancellation;
 import com.redculture.platform.vo.ai.AssistantConversationTurnRecovery;
+import com.redculture.platform.vo.ai.KnowledgeScopeType;
 import com.redculture.platform.vo.ai.LlmModelOption;
 import com.redculture.platform.vo.ai.StatefulAgentRequest;
 import com.redculture.platform.vo.ai.StatefulAgentResponse;
@@ -65,6 +66,7 @@ public class AgentRuntimeClient {
     private final Duration streamIdleTimeout;
     private final ObjectMapper objectMapper;
     private final AppMapProperties appMapProperties;
+    private final AgentToolContextAuthorization toolContextAuthorization;
 
     @Autowired
     public AgentRuntimeClient(AppMapProperties appMapProperties,
@@ -76,6 +78,7 @@ public class AgentRuntimeClient {
         this.streamIdleTimeout = Duration.ofMillis(Math.max(1L, agentProperties.getStreamTimeoutMs()));
         this.objectMapper = objectMapper;
         this.appMapProperties = appMapProperties;
+        this.toolContextAuthorization = new AgentToolContextAuthorization(agentProperties, objectMapper);
     }
 
     /** 兼容不启动 Spring 容器的单元测试，生产运行始终注入共享 WebClient。 */
@@ -488,7 +491,7 @@ public class AgentRuntimeClient {
         body.setResourceCategory(context.getResourceCategory());
         body.setMaxDistanceMeters(context.getMaxDistanceMeters());
         body.setIntent(context.getIntent() == null ? null : context.getIntent().name());
-        body.setContext(trustedContext(context));
+        body.setContext(trustedContext(context, user, body.getClientTurnId()));
         return body;
     }
 
@@ -651,8 +654,16 @@ public class AgentRuntimeClient {
                 ? AgentGenerationStatus.DEGRADED : AgentGenerationStatus.COMPLETED;
     }
 
-    private Map<String, Object> trustedContext(AgentAnswerContext context) {
+    private Map<String, Object> trustedContext(AgentAnswerContext context,
+                                               AuthCurrentUserVO user,
+                                               String clientTurnId) {
         Map<String, Object> trusted = new LinkedHashMap<>();
+        trusted.put("actor", trustedActor(user));
+        trusted.put("scope", trustedScope(context));
+        String toolAuthorization = issueToolAuthorization(context, user, clientTurnId);
+        if (toolAuthorization != null) {
+            trusted.put("toolAuthorization", toolAuthorization);
+        }
         if (context.getSchoolDetail() != null) {
             trusted.put("school", context.getSchoolDetail().getSchool());
             trusted.put("resources", filteredResources(context));
@@ -686,6 +697,53 @@ public class AgentRuntimeClient {
         teachingContext.put("maxDistanceMeters", context.getMaxDistanceMeters());
         trusted.put("teachingContext", teachingContext);
         return trusted;
+    }
+
+    private String issueToolAuthorization(AgentAnswerContext context,
+                                          AuthCurrentUserVO user,
+                                          String clientTurnId) {
+        if (!toolContextAuthorization.configured()) {
+            // 签名密钥未配置时不签发；FastAPI 的动态工具会显式降级，初始 RAG 不受影响。
+            return null;
+        }
+        return toolContextAuthorization.issue(new AgentToolContextAuthorization.Context(
+                user, context.getScopeType(), context.getScopeId(), clientTurnId,
+                List.of("retrieve_knowledge", "query_graph_relations"),
+                context.getTaskId(), context.getResourceId()
+        ));
+    }
+
+    private Map<String, Object> trustedActor(AuthCurrentUserVO user) {
+        Map<String, Object> actor = new LinkedHashMap<>();
+        actor.put("accountId", user.getAccountId());
+        actor.put("roleCode", user.getRoleCode());
+        actor.put("schoolId", user.getSchoolId());
+        return actor;
+    }
+
+    private Map<String, Object> trustedScope(AgentAnswerContext context) {
+        Map<String, Object> scope = new LinkedHashMap<>();
+        KnowledgeScopeType scopeType = context.getScopeType();
+        scope.put("scopeType", scopeType == null ? null : scopeType.name());
+        scope.put("scopeId", context.getScopeId());
+        scope.put("name", trustedScopeName(context));
+        return scope;
+    }
+
+    private String trustedScopeName(AgentAnswerContext context) {
+        KnowledgeScopeType scopeType = context.getScopeType();
+        if (scopeType == null) {
+            return null;
+        }
+        return switch (scopeType) {
+            case SCHOOL -> context.getSchoolDetail() == null
+                    || context.getSchoolDetail().getSchool() == null
+                    ? null : context.getSchoolDetail().getSchool().getSchoolName();
+            case REGION -> context.getRegionDetail() == null
+                    ? null : context.getRegionDetail().getRegionName();
+            case RESOURCE -> context.getResource() == null
+                    ? null : context.getResource().getResourceName();
+        };
     }
 
     private List<?> filteredResources(AgentAnswerContext context) {
