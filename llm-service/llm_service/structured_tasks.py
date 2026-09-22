@@ -356,6 +356,45 @@ class IncrementalJsonStringFieldParser:
         return isinstance(value, (str, list, dict))
 
 
+class MessageScopedJsonAnswerStream:
+    """按模型消息分别合并 JSON 文本，避免工具与最终回答串成非法 JSON。"""
+
+    def __init__(self, field_name: str) -> None:
+        self._field_name = field_name
+        self._buffers: dict[str, str] = {}
+        self._parsers: dict[str, IncrementalJsonStringFieldParser] = {}
+
+    @property
+    def contents(self) -> list[str]:
+        return [content for content in self._buffers.values() if content]
+
+    def feed(self, message_id: str, incoming: str) -> str:
+        key = message_id or "__default__"
+        previous = self._buffers.get(key, "")
+        merged, delta = self._merge_text(previous, incoming)
+        self._buffers[key] = merged
+        parser = self._parsers.setdefault(
+            key, IncrementalJsonStringFieldParser(self._field_name)
+        )
+        return parser.feed(delta)
+
+    def answer(self, message_id: str) -> str:
+        parser = self._parsers.get(message_id or "__default__")
+        return parser.value if parser is not None else ""
+
+    @staticmethod
+    def _merge_text(previous: str, incoming: str) -> tuple[str, str]:
+        if not incoming:
+            return previous, ""
+        if not previous:
+            return incoming, incoming
+        if incoming.startswith(previous):
+            return incoming, incoming[len(previous):]
+        if incoming == previous or previous.endswith(incoming):
+            return previous, ""
+        return previous + incoming, incoming
+
+
 class IncrementalTeachingPlanParser:
     """按完整顶层字段解析严格 JSON，避免把半截 JSON 暴露给浏览器。"""
 

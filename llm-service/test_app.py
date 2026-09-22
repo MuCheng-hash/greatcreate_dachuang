@@ -976,6 +976,26 @@ def test_incremental_answer_parser_decodes_split_escapes_before_json_object_ends
     assert parser.value == "第一行\n第二行：你好，引号\"，反斜杠\\，表情😃"
 
 
+def test_message_scoped_answer_stream_keeps_model_outputs_separate():
+    stream = structured_tasks.MessageScopedJsonAnswerStream("answer")
+    tool_output = '{"tool":"retrieve_knowledge","arguments":{"query":"校史"}}'
+    final_output = (
+        '{"answer":"学校始建于1952年。","intent":"RESOURCE_EXPLANATION",'
+        '"retrievalStatus":"ok","citationIds":["chunk:1"],'
+        '"followUpQuestions":["学校有哪些历史资料？"]}'
+    )
+
+    assert stream.feed("tool-call", tool_output) == ""
+    assert stream.feed("final-call", '{"answer":"学校始建于') == "学校始建于"
+    assert stream.feed("final-call", final_output) == "1952年。"
+    assert stream.contents == [tool_output, final_output]
+
+    parsed = AgentRuntime._parse_model_output(None, {
+        "messages": [AIMessage(content=content) for content in stream.contents],
+    })
+    assert parsed.answer == "学校始建于1952年。"
+
+
 def test_stateful_stream_emits_incremental_answer_from_cumulative_messages_before_final(tmp_path: Path):
     settings = settings_for(tmp_path)
     runtime = started_runtime(settings)

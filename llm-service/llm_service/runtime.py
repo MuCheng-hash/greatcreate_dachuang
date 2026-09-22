@@ -63,8 +63,8 @@ from .user_memory import (
     MemoryValidationError,
 )
 from .structured_tasks import (
-    IncrementalJsonStringFieldParser,
     IncrementalTeachingPlanParser,
+    MessageScopedJsonAnswerStream,
     normalize_resource_discovery,
     normalize_teaching_plan,
     resource_discovery_fallback,
@@ -2183,7 +2183,7 @@ class AgentRuntime:
             runtime.action_id = resume_action.action_id
             graph_input = Command(resume={"decisions": [{"type": decision}]})
         if hasattr(target_agent, "astream"):
-            answer_parser = IncrementalJsonStringFieldParser("answer")
+            streamed_outputs = MessageScopedJsonAnswerStream("answer")
             async for chunk in target_agent.astream(
                 graph_input,
                 config=self._agent_invoke_config(
@@ -2204,15 +2204,15 @@ class AgentRuntime:
                     content = message_text(message.content)
                     if not content:
                         continue
-                    model_buffer, delta = self._merge_stream_text(model_buffer, content)
-                    answer_delta = answer_parser.feed(delta)
+                    message_id = self._stream_message_id(message)
+                    answer_delta = streamed_outputs.feed(message_id, content)
                     if answer_delta:
                         await emit("token", {"delta": answer_delta})
                         if stream_progress is not None:
                             stream_progress.emitted = True
                         if partial_writer is not None:
-                            await partial_writer.update(answer_parser.value)
-            if durable_resume and not model_buffer:
+                            await partial_writer.update(streamed_outputs.answer(message_id))
+            if durable_resume and not streamed_outputs.contents:
                 snapshot = await target_agent.aget_state(
                     self._agent_invoke_config(
                         request,
@@ -2260,7 +2260,12 @@ class AgentRuntime:
                 checkpoint_namespace,
             )
 
-        parse_messages = [AIMessage(content=model_buffer)] if model_buffer else model_messages
+        streamed_contents = streamed_outputs.contents if hasattr(target_agent, "astream") else []
+        parse_messages = (
+            [AIMessage(content=content) for content in streamed_contents]
+            if streamed_contents
+            else [AIMessage(content=model_buffer)] if model_buffer else model_messages
+        )
         response = await self._response_from_model_result(
             {"messages": parse_messages}, trusted, thread.thread_id, compacted,
             runtime.executions, runtime.degraded_reasons, request.message,
@@ -2712,17 +2717,8 @@ class AgentRuntime:
         return ""
 
     @staticmethod
-    def _merge_stream_text(previous: str, incoming: str) -> tuple[str, str]:
-        """同时接受增量分片和累计式 LangGraph 消息。"""
-        if not incoming:
-            return previous, ""
-        if not previous:
-            return incoming, incoming
-        if incoming.startswith(previous):
-            return incoming, incoming[len(previous):]
-        if incoming == previous or previous.endswith(incoming):
-            return previous, ""
-        return previous + incoming, incoming
+    def _stream_message_id(message: AIMessage | AIMessageChunk) -> str:
+        return str(getattr(message, "id", "") or "__default__")
 
     async def _emit_answer_chunks(self, answer: str, emit: EventSink, size: int = 24) -> None:
         """将最终或降级回答按固定大小拆分，避免单个 SSE 事件阻塞客户端刷新。"""
