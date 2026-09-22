@@ -116,6 +116,30 @@ class Settings(BaseSettings):
     embedding_model: str = "text-embedding-v3"
     embedding_dimensions: int = 1024
     vision_model: str = ""
+    agent_history_retrieval_enabled: bool = False
+    agent_history_qdrant_url: str = ""
+    agent_history_qdrant_api_key: str = ""
+    agent_history_vector_collection: str = "agent_conversation_messages"
+    agent_history_retrieval_limit: int = Field(default=4, ge=1, le=12)
+    agent_history_retrieval_character_limit: int = Field(default=1800, gt=0)
+    agent_history_retrieval_min_score: float = Field(default=0.55, ge=0, le=1)
+    agent_history_index_batch_size: int = Field(default=16, ge=1, le=256)
+    agent_history_index_poll_seconds: int = Field(
+        default=5,
+        gt=0,
+        validation_alias=AliasChoices(
+            "agent_history_index_poll_seconds", "agent_history_poll_seconds"
+        ),
+    )
+    agent_history_index_max_attempts: int = Field(
+        default=8,
+        ge=1,
+        le=64,
+        validation_alias=AliasChoices(
+            "agent_history_index_max_attempts", "agent_history_max_attempts"
+        ),
+    )
+    agent_history_summary_item_limit: int = Field(default=24, ge=1, le=256)
 
     agent_primary_provider: str = ""
     agent_primary_model: str = ""
@@ -310,6 +334,14 @@ class Settings(BaseSettings):
     @property
     def model_configured(self) -> bool:
         return any(target.configured for target in self.model_chain)
+
+    @property
+    def history_retrieval_configured(self) -> bool:
+        return bool(
+            self.agent_history_retrieval_enabled
+            and self.agent_history_qdrant_url.strip()
+            and self.embedding_api_url.strip()
+        )
 
     @property
     def model_chain(self) -> tuple[LlmModelTarget, ...]:
