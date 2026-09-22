@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 
 def estimate_tokens(text: str) -> int:
@@ -14,6 +15,7 @@ class ContextWindow:
     summary: str
     compacted: bool
     summary_through_message_id: int
+    summary_state: dict[str, Any] | None = None
 
 
 class ContextWindowManager:

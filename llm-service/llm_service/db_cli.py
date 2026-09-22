@@ -13,6 +13,7 @@ from pydantic import ValidationError
 
 from .checkpointing import CheckpointManager, CheckpointSchemaError
 from .database import Database, SchemaMigrationError, SchemaMigrator
+from .history_index import HistoryIndexRepository
 from .settings import Settings, load_settings
 from .sqlite_import import SqliteImportError, SqliteImporter
 
@@ -38,6 +39,16 @@ def _parser() -> argparse.ArgumentParser:
         "init-local-env", help="create ignored local PostgreSQL credentials"
     )
     local.add_argument("--port", type=int, default=5433)
+    requeue = commands.add_parser(
+        "history-requeue",
+        help="requeue failed derived conversation-history jobs",
+    )
+    requeue.add_argument(
+        "--all",
+        dest="rebuild_all",
+        action="store_true",
+        help="rebuild all message index jobs from PostgreSQL",
+    )
     return parser
 
 
@@ -71,6 +82,36 @@ async def _import(
             if apply
             else await importer.dry_run(source)
         )
+    finally:
+        await database.close()
+
+
+async def _history_requeue(
+    settings: Settings, rebuild_all: bool
+) -> dict[str, object]:
+    """Recover only derived jobs; PostgreSQL messages remain the source of truth."""
+    database = Database(settings)
+    migrator = SchemaMigrator(database, settings.migration_dsn)
+    await database.open()
+    try:
+        await migrator.validate()
+        repository = HistoryIndexRepository(database)
+        if rebuild_all:
+            affected = await repository.rebuild_all_jobs()
+            return {
+                "status": "queued",
+                "mode": "all",
+                "affectedJobs": affected,
+            }
+        index_jobs = await repository.requeue_failed_jobs()
+        cleanup_jobs = await repository.requeue_failed_cleanup_jobs()
+        return {
+            "status": "queued",
+            "mode": "failed",
+            "affectedJobs": index_jobs + cleanup_jobs,
+            "indexJobs": index_jobs,
+            "cleanupJobs": cleanup_jobs,
+        }
     finally:
         await database.close()
 
@@ -118,6 +159,10 @@ def main(argv: list[str] | None = None) -> int:
             settings = load_settings()
             if args.command == "migrate":
                 result = asyncio.run(_migrate(settings))
+            elif args.command == "history-requeue":
+                result = asyncio.run(
+                    _history_requeue(settings, bool(args.rebuild_all))
+                )
             else:
                 result = asyncio.run(
                     _import(settings, args.source, bool(args.apply))

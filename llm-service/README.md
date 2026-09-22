@@ -63,6 +63,17 @@ business service, set the same environment variable before starting this service
 | `AGENT_INTERNAL_SERVICE_TOKEN` | empty | Required internal token for Agent thread/message APIs; missing configuration returns `503` |
 | `ALLOWED_ORIGINS` | empty | Comma-separated browser origins; empty means no CORS middleware |
 | `AGENT_CONTEXT_TOKEN_BUDGET` | `6000` | Approximate input budget |
+| `AGENT_HISTORY_RETRIEVAL_ENABLED` | `false` | Enables optional derived conversation-history indexing and retrieval only when its endpoints are also configured |
+| `AGENT_HISTORY_QDRANT_URL` | empty | Qdrant endpoint for the isolated conversation-history collection |
+| `AGENT_HISTORY_QDRANT_API_KEY` | empty | Optional Qdrant credential; keep it outside the repository |
+| `AGENT_HISTORY_VECTOR_COLLECTION` | `agent_conversation_messages` | Dedicated collection for derived conversation-message vectors |
+| `AGENT_HISTORY_RETRIEVAL_LIMIT` | `4` | Maximum hydrated old-message candidates injected into one request |
+| `AGENT_HISTORY_RETRIEVAL_CHARACTER_LIMIT` | `1800` | Total character cap for hydrated historical records |
+| `AGENT_HISTORY_RETRIEVAL_MIN_SCORE` | `0.55` | Qdrant score threshold, from `0` to `1` |
+| `AGENT_HISTORY_INDEX_BATCH_SIZE` | `16` | Maximum index jobs claimed per worker pass |
+| `AGENT_HISTORY_INDEX_POLL_SECONDS` | `5` | Interval for the optional background index worker |
+| `AGENT_HISTORY_INDEX_MAX_ATTEMPTS` | `8` | Retry limit before a derived job becomes observable as failed |
+| `AGENT_HISTORY_SUMMARY_ITEM_LIMIT` | `24` | Maximum durable structured-summary items |
 | `AGENT_MAX_TOOL_ROUNDS` | `6` | Maximum model/tool loop rounds |
 | `INTERNAL_BUSINESS_BASE_URL` | `http://127.0.0.1:8080` | Java business-service address |
 | `AGENT_INTERNAL_SERVICE_TOKEN` | empty | Credential for internal tools and health checks |
@@ -171,6 +182,38 @@ the active history list. 取消或失败轮次的用户问题与部分回答仍�
 `run.started`、`response.reset`、`model.started`、`tool.started`、`tool.completed`、`token`、`final`、`error`、`done`。
 `run.started` 会返回 `clientTurnId`、`resumed` 和 `attempt`；恢复需要重跑模型节点时，客户端收到 `response.reset` 后必须先清空已有部分文本。主动停止调用 `POST /agent/turns/{clientTurnId}/cancel`；Java 对外提供 `POST /api/ai/qa/turns/{clientTurnId}/cancel`。
 调用 Agent 接口时应携带 `X-Agent-Service-Token`；服务端不会信任外部请求伪造的 `ownerId` 或学校范围。
+
+### 上下文压缩与可选历史检索
+
+PostgreSQL 中的原始 `agent_message`、线程 owner/scope、结构化摘要状态和索引作业是唯一事实源。`agent_thread.summary` 仍是既有 API 返回的人类可读兼容摘要；`summary_state_json` 额外保存带 `sourceMessageIds` 的目标、硬约束、决策、待确认问题和事实。摘要模型不可用、返回无效 JSON 或摘要游标发生竞争时，服务会改用确定性的来源关联摘录继续处理请求。
+
+历史向量功能默认关闭。只有同时配置 `AGENT_HISTORY_RETRIEVAL_ENABLED=true`、非空 `AGENT_HISTORY_QDRANT_URL` 和非空 `EMBEDDING_API_URL` 时，FastAPI lifespan 才会在迁移后执行一次补偿并启动 `agent-history-index` 后台任务：
+
+```powershell
+$env:AGENT_HISTORY_RETRIEVAL_ENABLED = "true"
+$env:AGENT_HISTORY_QDRANT_URL = "http://127.0.0.1:6333"
+$env:EMBEDDING_API_URL = "https://your-embedding-endpoint/v1"
+$env:EMBEDDING_MODEL = "your-embedding-model"
+```
+
+向量仅写入隔离集合 `agent_conversation_messages`。其 payload 只含消息、线程和轮次标识、角色、时间戳与内容哈希，绝不含聊天正文。检索始终先限制当前 `threadId` 和摘要游标，再从 PostgreSQL 按 owner、scope 和已完成轮次重新水合正文；embedding、Qdrant、分数阈值或水合失败时仅省略历史检索，正常聊天继续执行。
+
+索引和删除清理均由 PostgreSQL 租约作业队列驱动。可在不读取正文的前提下检查失败状态：
+
+```sql
+SELECT status, COUNT(*) FROM agent_history_index_job GROUP BY status;
+SELECT status, COUNT(*) FROM agent_history_vector_cleanup_job GROUP BY status;
+SELECT status, COUNT(*) FROM agent_history_message_cleanup_job GROUP BY status;
+```
+
+默认维护命令只重新入队失败的索引和清理作业；`--all` 从 PostgreSQL 原始消息重建全部消息索引作业。两种命令都不输出消息正文或凭据：
+
+```powershell
+python -m llm_service.db_cli history-requeue
+python -m llm_service.db_cli history-requeue --all
+```
+
+Qdrant 是可重建的派生索引，不可作为备份或恢复会话的来源。消息物理删除后会排队按 point ID 清理，线程硬删除后会排队按 `thread_id` 清理；在清理完成前，PostgreSQL 水合边界仍会拒绝孤立 point。上下文保留的手写评测用例位于 `tests/fixtures/conversation_context_eval.json`，覆盖预算、禁止条件、冲突更新、语义候选、跨线程候选、故障降级和低优先级驱逐。
 
 ## Unified task workflows
 
