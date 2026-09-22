@@ -75,32 +75,71 @@ import java.util.function.Consumer;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+/**
+ * 智能问答服务的业务编排实现。
+ *
+ * <p>该类不直接承担模型推理或向量检索实现，而是将一次问答请求收敛为受控的执行链路：
+ * 校验输入和附件，按当前账号解析允许访问的知识范围，装配学校、区域、资源及学生任务上下文，
+ * 调用 {@link KnowledgeRetriever} 获取可引用证据，最后交由有状态 Agent 运行时或本地生成器产出回答。</p>
+ *
+ * <p>非流式 {@link #ask(AgentQaRequest, AuthCurrentUserVO)} 优先使用远程 Agent；
+ * 流式 {@link #stream(AgentQaRequest, AuthCurrentUserVO)} 以 SSE 输出运行阶段、增量文本、最终响应和结束事件。
+ * 当远程运行时未配置时，两条路径都会保留相同的权限、检索和引用校验语义，并降级到本地生成管线。</p>
+ *
+ * <p>安全边界由本类保持：调用方提供的范围不能突破认证账号范围，远程运行时返回的松散数据不能直接
+ * 作为业务响应，引用、范围、意图及业务上下文均需在本服务内重新校验或注入。</p>
+ */
 @Service
 public class AgentQaServiceImpl implements AgentQaService {
 
+    /** 未传入有效召回数量时使用的默认知识片段数。 */
     private static final int DEFAULT_TOP_K = 5;
+    /** 单次请求允许的最大知识片段数，防止过大的上下文扩大模型输入和检索负载。 */
     private static final int MAX_TOP_K = 8;
+    /** 从自然语言问题中识别年级信息的模式，显式请求参数优先于该推断结果。 */
     private static final Pattern GRADE_PATTERN = Pattern.compile("(低年级|中年级|高年级|[一二三四五六七八九十0-9]+年级)");
 
+    /** 查询学校详情、学校资源及学校名称的地图业务服务。 */
     private final SchoolMapService schoolMapService;
+    /** 查询区域地图与区域标记信息的业务服务。 */
     private final TownMapService townMapService;
+    /** 读取教育资源实体，并校验资源启用、审核状态的服务。 */
     private final LocalEduResourceService localEduResourceService;
+    /** 混合知识检索入口，负责返回文本片段、图谱事实及候选引用。 */
     private final KnowledgeRetriever knowledgeRetriever;
+    /** 将用户问题归类为资源解释、活动设计、关系查询等可处理意图的识别器。 */
     private final IntentRecognizer intentRecognizer;
+    /** 远程 Agent 不可用或未返回有效答案时使用的本地回答生成器。 */
     private final AnswerGenerator answerGenerator;
+    /** 根据检索结果过滤模型声明的引用，防止未检索到的标识透传给前端。 */
     private final CitationValidator citationValidator;
+    /** 统一解析请求范围并依据认证账号执行访问控制的守卫。 */
     private final AgentAccessGuard accessGuard;
+    /** 对接 Python 有状态 Agent 运行时；为 null 时进入本地降级路径。 */
     private final AgentRuntimeClient agentRuntimeClient;
+    /** Agent 运行时开关及相关配置，保留给依赖注入和兼容构造路径。 */
     private final AgentProperties agentProperties;
+    /** 隔离数据库、检索等阻塞操作的专用 Reactor 调度器。 */
     private final Scheduler agentBlockingScheduler;
 
+    /** 学生档案查询，用于确认当前账号对应的有效学生身份。 */
     @Autowired private StudentProfileMapper studentProfileMapper;
+    /** 学生任务进度查询，用于确认任务已分配给当前学生。 */
     @Autowired private StudentTaskProgressMapper studentTaskProgressMapper;
+    /** 班级学习任务查询。 */
     @Autowired private ClassLearningTaskMapper classLearningTaskMapper;
+    /** 班级成员关系查询，用于核验学生是否属于任务所在班级。 */
     @Autowired private ClassMemberMapper classMemberMapper;
+    /** 任务与资源关联查询，用于限定任务问答可检索的资源集合。 */
     @Autowired private TaskResourceRelMapper taskResourceRelMapper;
+    /** 学校与资源关联查询，用于限制学生访问本校已关联的资源。 */
     @Autowired private SchoolResourceRelMapper schoolResourceRelMapper;
 
+    /**
+     * Spring 生产环境使用的完整构造方法。
+     *
+     * <p>显式注入专用调度器，避免同步数据库和检索调用占用 WebFlux 事件循环线程。</p>
+     */
     @Autowired
     public AgentQaServiceImpl(SchoolMapService schoolMapService,
                               TownMapService townMapService,
@@ -126,6 +165,10 @@ public class AgentQaServiceImpl implements AgentQaService {
         this.agentBlockingScheduler = agentBlockingScheduler;
     }
 
+    /**
+     * 供单元测试或未提供专用调度器的装配路径使用。
+     * 使用 {@link Schedulers#immediate()}，调用方需要自行保证不会在事件循环中执行阻塞操作。
+     */
     public AgentQaServiceImpl(SchoolMapService schoolMapService,
                               TownMapService townMapService,
                               LocalEduResourceService localEduResourceService,
@@ -151,6 +194,10 @@ public class AgentQaServiceImpl implements AgentQaService {
         );
     }
 
+    /**
+     * 供不需要显式 {@link AgentProperties} 的兼容装配路径使用。
+     * 默认配置不会替代实际远程运行时客户端的可用性判断。
+     */
     public AgentQaServiceImpl(SchoolMapService schoolMapService,
                               TownMapService townMapService,
                               LocalEduResourceService localEduResourceService,
@@ -165,6 +212,10 @@ public class AgentQaServiceImpl implements AgentQaService {
                 agentRuntimeClient, new AgentProperties(), Schedulers.immediate());
     }
 
+    /**
+     * 仅使用本地生成器的兼容构造方法。
+     * Agent 运行时客户端为空时，问答与流式接口会自动走本地回退路径。
+     */
     public AgentQaServiceImpl(SchoolMapService schoolMapService,
                               TownMapService townMapService,
                               LocalEduResourceService localEduResourceService,
@@ -178,7 +229,10 @@ public class AgentQaServiceImpl implements AgentQaService {
                 Schedulers.immediate());
     }
 
-    /** 面向有状态运行时路径的兼容构造方法。 */
+    /**
+     * 面向有状态运行时路径的兼容构造方法。
+     * 自动创建范围守卫和默认配置，主要用于不由 Spring 完整托管的测试或历史调用点。
+     */
     public AgentQaServiceImpl(SchoolMapService schoolMapService,
                               TownMapService townMapService,
                               LocalEduResourceService localEduResourceService,
@@ -193,11 +247,17 @@ public class AgentQaServiceImpl implements AgentQaService {
                 Schedulers.immediate());
     }
 
-    @Override
     /**
-     * 非流式问答入口：先验证请求和认证账号，再在阻塞调度器中构建受限上下文。
-     * 是否调用远程 Agent 由运行时配置决定，回退结果仍沿用同一份权限范围与引用规则。
+     * 执行一次非流式问答。
+     *
+     * <p>先同步校验请求，随后在阻塞调度器中解析访问范围、准备检索上下文；有远程 Agent 时优先调用它，
+     * 否则或远程返回空结果时以本地生成器完成回答。两种结果都会附带校验后的引用和实际生效的业务范围。</p>
+     *
+     * @param request 包含问题、可选范围、资源/任务限定、附件和会话标识的请求
+     * @param currentUser 经认证拦截器解析出的当前账号，不能为空
+     * @return 异步的统一问答响应；参数错误在订阅前抛出，运行时错误通过 {@code Mono} 传播
      */
+    @Override
     public Mono<AgentQaResponse> ask(AgentQaRequest request, AuthCurrentUserVO currentUser) {
         validateRequest(request);
         if (currentUser == null) {
@@ -207,11 +267,17 @@ public class AgentQaServiceImpl implements AgentQaService {
         return askWithAgentPipeline(request, currentUser);
     }
 
-    @Override
     /**
-     * 取消指定会话轮次，并以账号、学校和角色限制取消权限。
-     * 取消请求交给状态存储处理，从而使重复请求不会重新触发已经停止的上游执行。
+     * 请求取消指定的会话轮次。
+     *
+     * <p>将账号所有者、固定学校范围一并传至有状态运行时，避免仅凭 {@code clientTurnId} 取消其他账号的任务。
+     * 最终取消状态及重复取消的幂等语义由运行时状态存储维护。</p>
+     *
+     * @param clientTurnId 前端为本轮生成的稳定标识
+     * @param currentUser 当前学校账号
+     * @return 运行时返回的取消结果
      */
+    @Override
     public Mono<AssistantConversationTurnCancellation> cancelTurn(
             String clientTurnId, AuthCurrentUserVO currentUser) {
         if (!StringUtils.hasText(clientTurnId)) {
@@ -231,11 +297,16 @@ public class AgentQaServiceImpl implements AgentQaService {
         );
     }
 
-    @Override
     /**
-     * 读取待确认动作的当前状态。
-     * actionId 必须同时属于认证账号和其学校范围；状态存储未命中与越权均由上游按统一业务错误处理。
+     * 查询待确认 Agent 动作的当前状态。
+     *
+     * <p>动作标识必须属于当前账号且位于其学校范围内；未命中和越权由有状态运行时按统一业务错误处理。</p>
+     *
+     * @param actionId 待查询动作标识
+     * @param currentUser 当前学校账号
+     * @return 当前动作及其状态
      */
+    @Override
     public Mono<com.redculture.platform.vo.ai.AgentActionVO> getAction(
             String actionId, AuthCurrentUserVO currentUser) {
         // 先验证身份、学校和运行时可用性，再把同一所有者范围传给状态服务，避免仅凭 actionId 越权查询。
@@ -248,11 +319,18 @@ public class AgentQaServiceImpl implements AgentQaService {
         );
     }
 
-    @Override
     /**
-     * 确认或拒绝待执行动作，并将身份范围随决策一并传给有状态运行时。
-     * 同一动作的重复决策由运行时状态机幂等处理，本层仅拦截非法决策枚举。
+     * 对待确认动作提交批准或拒绝决策。
+     *
+     * <p>本层仅接受 {@code approve} 与 {@code reject}，并携带当前账号的所有者和学校范围；
+     * 重复决策及状态迁移由有状态运行时的动作状态机保证幂等。</p>
+     *
+     * @param actionId 待决策动作标识
+     * @param decision {@code approve} 或 {@code reject}
+     * @param currentUser 当前学校账号
+     * @return 决策后的动作状态
      */
+    @Override
     public Mono<com.redculture.platform.vo.ai.AgentActionVO> decideAction(
             String actionId, String decision, AuthCurrentUserVO currentUser) {
         validateActionRequest(actionId, currentUser);
@@ -269,6 +347,12 @@ public class AgentQaServiceImpl implements AgentQaService {
         );
     }
 
+    /**
+     * 校验动作查询和决策共用的前置条件。
+     *
+     * <p>该校验同时保证标识非空、调用者具备学校归属且远程运行时已装配，避免将本地参数或配置错误
+     * 错误地包装成上游服务故障。</p>
+     */
     private void validateActionRequest(String actionId, AuthCurrentUserVO currentUser) {
         // actionId 为空时不访问运行时，避免把参数错误伪装成上游故障。
         if (!StringUtils.hasText(actionId)) {
@@ -282,11 +366,18 @@ public class AgentQaServiceImpl implements AgentQaService {
         }
     }
 
-    @Override
     /**
-     * 建立带阶段事件的 SSE 问答流。远程运行时不可用时采用本地管线，
-     * 两条路径都先完成认证范围解析和可信知识检索，避免流式接口绕过鉴权。
+     * 建立包含执行阶段和最终结果的 SSE 问答流。
+     *
+     * <p>每次订阅都会重新校验请求并解析认证范围。远程运行时可用时转发其流事件，同时修正最终响应；
+     * 不可用时以本地完整答案模拟 token 事件。无论路径如何，流以 {@code done} 事件结束，错误则先发送
+     * {@code error} 再发送 {@code done}，便于前端稳定释放加载状态。</p>
+     *
+     * @param request 问答请求
+     * @param currentUser 当前认证账号
+     * @return SSE 事件流，事件名包括阶段事件、token、final、error 和 done
      */
+    @Override
     public Flux<ServerSentEvent<Map<String, Object>>> stream(
             AgentQaRequest request, AuthCurrentUserVO currentUser) {
         return Flux.defer(() -> {
@@ -306,6 +397,10 @@ public class AgentQaServiceImpl implements AgentQaService {
         }).onErrorResume(error -> streamFailure(request, error));
     }
 
+    /**
+     * 在访问范围已由 {@link AgentAccessGuard} 解析后选择远程或本地流式管线。
+     * 范围不唯一时仅发送澄清响应，避免在未确定知识对象的情况下检索或调用模型。
+     */
     private Flux<ServerSentEvent<Map<String, Object>>> streamResolvedScope(
             AgentQaRequest request,
             AuthCurrentUserVO currentUser,
@@ -349,6 +444,12 @@ public class AgentQaServiceImpl implements AgentQaService {
         );
     }
 
+    /**
+     * 转发远程有状态 Agent 的 SSE 流，并规范化其 {@code final} 事件。
+     *
+     * <p>上游遗漏 {@code done} 时由本层补发；若最终回答已输出后连接断开，则保留该回答并追加
+     * 可识别的错误与结束事件，而不会再以降级答案覆盖用户已看到的内容。</p>
+     */
     private Flux<ServerSentEvent<Map<String, Object>>> upstreamStream(
             AgentQaRequest request,
             AuthCurrentUserVO currentUser,
@@ -385,6 +486,12 @@ public class AgentQaServiceImpl implements AgentQaService {
                 });
     }
 
+    /**
+     * 在远程运行时未配置时构造与上游兼容的本地 SSE 流。
+     *
+     * <p>本地生成器只能一次性返回完整文本，因此该方法按八个字符切分为短 token 并依次推送。
+     * 这只是协议兼容的展示方式，并不代表本地模型具备真实的增量生成能力。</p>
+     */
     private Flux<ServerSentEvent<Map<String, Object>>> localFallbackStream(
             AgentQaRequest request,
             AuthCurrentUserVO currentUser) {
@@ -454,6 +561,14 @@ public class AgentQaServiceImpl implements AgentQaService {
         });
     }
 
+    /**
+     * 将远程运行时的松散最终事件转换为本服务的可信 {@link AgentQaResponse}。
+     *
+     * <p>远程返回仅提取允许展示的文本、模型信息、工具和记忆字段；意图、范围、已应用上下文及引用
+     * 始终以本地预先计算的 {@code context} 为准。由此防止上游响应篡改学校范围或伪造引用。</p>
+     *
+     * @return 保留原始事件其他字段、但以规范化 {@code response} 替换最终响应的事件数据
+     */
     private Map<String, Object> normalizeStatefulFinalEvent(Map<String, Object> eventData,
                                                              AgentQaRequest request,
                                                              AgentAnswerContext context) {
@@ -516,6 +631,10 @@ public class AgentQaServiceImpl implements AgentQaService {
         return normalized;
     }
 
+    /**
+     * 从运行时的引用字段中提取引用标识。
+     * 兼容字符串数组及包含 {@code citationId} 的对象数组，忽略空值和未知结构。
+     */
     private List<String> citationIds(Object value) {
         if (!(value instanceof List<?> values)) {
             return new ArrayList<>();
@@ -534,6 +653,10 @@ public class AgentQaServiceImpl implements AgentQaService {
         return ids;
     }
 
+    /**
+     * 从运行时工具执行列表中提取可展示的工具名称。
+     * 同时兼容 {@code name}、{@code toolName} 和纯字符串三种上游表示。
+     */
     private List<String> toolNames(Object value) {
         if (!(value instanceof List<?> values)) {
             return new ArrayList<>();
@@ -552,6 +675,8 @@ public class AgentQaServiceImpl implements AgentQaService {
         return names;
     }
 
+    /**
+     * 将上游列表安全转换为非空文本列表，非列表输入按空列表处理。 */
     private List<String> textList(Object value) {
         if (!(value instanceof List<?> values)) {
             return new ArrayList<>();
@@ -562,6 +687,10 @@ public class AgentQaServiceImpl implements AgentQaService {
                 .toList();
     }
 
+    /**
+     * 将远程记忆候选对象映射为前端响应对象。
+     * 仅复制已定义字段，结构不合法的元素直接跳过，以隔离动态 Map 边界。
+     */
     private List<AgentMemoryItem> memoryItems(Object value) {
         if (!(value instanceof List<?> values)) {
             return new ArrayList<>();
@@ -590,6 +719,8 @@ public class AgentQaServiceImpl implements AgentQaService {
         return items;
     }
 
+    /**
+     * 解析本轮实际应用的记忆摘要；上游未返回对象时不虚构记忆应用结果。 */
     private AgentMemoryApplied memoryApplied(Object value) {
         if (!(value instanceof Map<?, ?> map)) {
             return null;
@@ -603,6 +734,8 @@ public class AgentQaServiceImpl implements AgentQaService {
         return applied;
     }
 
+    /**
+     * 尽力将上游数值或数值字符串转换为 {@link Double}，非法文本返回 {@code null}。 */
     private Double doubleValue(Object value) {
         if (value instanceof Number number) {
             return number.doubleValue();
@@ -617,11 +750,13 @@ public class AgentQaServiceImpl implements AgentQaService {
         return null;
     }
 
+    /** 返回首个非空文本值，用于处理不同版本运行时返回的同义字段。 */
     private String firstText(Object first, Object fallback) {
         String value = textValue(first);
         return StringUtils.hasText(value) ? value : textValue(fallback);
     }
 
+    /** 将非空动态值转为文本，不对空白文本作额外处理。 */
     private String textValue(Object value) {
         return value == null ? null : String.valueOf(value);
     }
@@ -654,6 +789,10 @@ public class AgentQaServiceImpl implements AgentQaService {
         return context;
     }
 
+    /**
+     * 创建检索阶段完成事件。
+     * 调试开关开启时才返回检索轨迹，避免常规 SSE 响应泄露召回分数、通道和内部实体范围。
+     */
     private Map<String, Object> retrievalCompletedEvent(AgentQaRequest request,
                                                         AgentAnswerContext context,
                                                         String runId) {
@@ -671,6 +810,7 @@ public class AgentQaServiceImpl implements AgentQaService {
         return event;
     }
 
+    /** 统一构造携带 Map 数据的 SSE 事件，确保所有分支使用相同的事件封装方式。 */
     private ServerSentEvent<Map<String, Object>> sse(
             String eventName, Map<String, Object> data) {
         return ServerSentEvent.<Map<String, Object>>builder()
@@ -679,6 +819,10 @@ public class AgentQaServiceImpl implements AgentQaService {
                 .build();
     }
 
+    /**
+     * 将流式执行异常分类为客户端可理解的错误事件。
+     * 可重试性决定前端是否可沿用同一 {@code clientTurnId} 恢复当前轮次。
+     */
     private Flux<ServerSentEvent<Map<String, Object>>> streamFailure(
             AgentQaRequest request, Throwable error) {
         Throwable unwrapped = Exceptions.unwrap(error);
@@ -715,6 +859,10 @@ public class AgentQaServiceImpl implements AgentQaService {
         );
     }
 
+    /**
+     * 输出标准错误和结束事件。
+     * 无论错误是否可重试，均追加 {@code done}，使前端不会因异常分支永久等待。
+     */
     private Flux<ServerSentEvent<Map<String, Object>>> errorEvents(
             AgentQaRequest request,
             String code,
@@ -732,6 +880,10 @@ public class AgentQaServiceImpl implements AgentQaService {
         return Flux.just(sse("error", error), sse("done", done));
     }
 
+    /**
+     * 在 Agent 专用阻塞调度器中执行同步工作。
+     * 调度器拒绝任务时转换为 {@link AgentBusyException}，使调用方得到可重试的业务错误而非 Reactor 原始异常。
+     */
     private <T> Mono<T> onBlockingScheduler(Callable<T> callable) {
         // 映射专用调度器拒绝为可识别的繁忙错误，避免 Reactor 线程上的阻塞操作拖慢其他请求。
         return Mono.fromCallable(callable)
@@ -740,6 +892,10 @@ public class AgentQaServiceImpl implements AgentQaService {
                         AgentBusyException::new);
     }
 
+    /**
+     * 执行远程优先的非流式问答编排。
+     * 早期澄清结果不会触发模型调用；远程返回空响应时回退本地生成，远程异常则保留其错误语义给上层处理。
+     */
     private Mono<AgentQaResponse> askWithAgentPipeline(
             AgentQaRequest request, AuthCurrentUserVO currentUser) {
         return onBlockingScheduler(() -> prepareAnswer(
@@ -764,12 +920,19 @@ public class AgentQaServiceImpl implements AgentQaService {
         });
     }
 
+    /**
+     * 强制执行不依赖远程 Agent 的同步回退管线。
+     * 保留该方法作为本地调用入口，实际公共流式降级由 {@link #localFallbackStream} 使用带上下文回调的重载。
+     */
     private AgentQaResponse askWithLocalFallbackPipeline(AgentQaRequest request,
                                                           AuthCurrentUserVO currentUser) {
         return askWithPipeline(request, currentUser, false);
     }
 
-    /** 按统一管线完成上下文、检索、生成和引用校验，供同步问答与本地流式降级共用。 */
+    /**
+     * 按统一管线完成范围解析、业务上下文装配、检索、生成和引用校验。
+     * 供同步问答与本地流式降级共用，{@code allowRemoteAgent} 用于决定未知意图是否允许继续交给远程 Agent。
+     */
     private AgentQaResponse askWithPipeline(AgentQaRequest request,
                                              AuthCurrentUserVO currentUser,
                                              boolean allowRemoteAgent) {
@@ -777,6 +940,10 @@ public class AgentQaServiceImpl implements AgentQaService {
         });
     }
 
+    /**
+     * 统一同步问答管线的底层重载。
+     * 上下文准备完成后通过 {@code contextConsumer} 暴露给流式事件构造；出现澄清结果时不会调用生成器。
+     */
     private AgentQaResponse askWithPipeline(AgentQaRequest request,
                                              AuthCurrentUserVO currentUser,
                                              boolean allowRemoteAgent,
@@ -789,6 +956,12 @@ public class AgentQaServiceImpl implements AgentQaService {
                 : prepared.earlyResponse();
     }
 
+    /**
+     * 在调用生成器之前完成意图识别、范围解析、业务授权和知识检索。
+     *
+     * <p>未知意图的本地回退请求会直接返回引导性回答；范围缺失或歧义则返回澄清响应。其余情形才创建
+     * {@link AgentAnswerContext}，从而保证模型不会参与决定用户可访问的学校、资源或区域。</p>
+     */
     private AnswerPreparation prepareAnswer(
             AgentQaRequest request,
             AuthCurrentUserVO currentUser,
@@ -836,6 +1009,12 @@ public class AgentQaServiceImpl implements AgentQaService {
         return new AnswerPreparation(null, intent, scope, context, retrieval);
     }
 
+    /**
+     * 将已准备的上下文与远程或本地生成结果组装为最终响应。
+     *
+     * <p>远程结果优先；远程未提供答案时调用本地生成器，生成异常则转换为可展示的降级回答。
+     * 不论生成来源如何，引用均由 {@link CitationValidator} 根据本轮检索结果再次过滤。</p>
+     */
     private AgentQaResponse completeAnswer(
             AgentQaRequest request,
             AnswerPreparation prepared,
@@ -903,6 +1082,10 @@ public class AgentQaServiceImpl implements AgentQaService {
         return response;
     }
 
+    /**
+     * 导出本轮实际生效的上下文摘要，供前端展示和排障。
+     * 该摘要只包含已解析的范围、筛选条件和任务信息，不包含检索正文或账号敏感数据。
+     */
     private Map<String, Object> appliedContext(AgentAnswerContext context) {
         Map<String, Object> applied = new LinkedHashMap<>();
         applied.put("schoolId", context.getScopeType() == KnowledgeScopeType.SCHOOL ? context.getScopeId() : null);
@@ -919,6 +1102,10 @@ public class AgentQaServiceImpl implements AgentQaService {
         return applied;
     }
 
+    /**
+     * 为学生模式生成后续探索入口。
+     * 教师和管理员不返回该引导项，避免在其工作流中加入面向学生的资源浏览入口。
+     */
     private List<Map<String, Object>> exploreSuggestions(AgentAnswerContext context) {
         if (!context.isStudentMode()) return new ArrayList<>();
         List<Map<String, Object>> suggestions = new ArrayList<>();
@@ -929,6 +1116,12 @@ public class AgentQaServiceImpl implements AgentQaService {
         return suggestions;
     }
 
+    /**
+     * 校验问答请求并补全本轮 {@code clientTurnId}。
+     *
+     * <p>除问题、范围和筛选条件外，还限制图片附件数量、MIME 类型、Data URL 前缀和最大长度。
+     * 该方法不做权限判断，权限必须在获得 {@link AuthCurrentUserVO} 后由范围解析阶段处理。</p>
+     */
     private void validateRequest(AgentQaRequest request) {
         if (request == null || !StringUtils.hasText(request.getQuestion())) {
             throw new IllegalArgumentException("问题不能为空");
@@ -973,10 +1166,17 @@ public class AgentQaServiceImpl implements AgentQaService {
         }
     }
 
+    /** 判断请求是否携带已通过格式校验的图片附件，用于直接选择资源解释意图。 */
     private boolean hasImageAttachments(AgentQaRequest request) {
         return request != null && request.getAttachments() != null && !request.getAttachments().isEmpty();
     }
 
+    /**
+     * 根据认证角色、显式范围及问题中提及的学校解析最终知识范围。
+     *
+     * <p>学校账号只能查询本校，且问题文本中不得包含其他学校；平台管理员可显式指定学校、区域或资源范围，
+     * 未指定时仅在问题唯一命中学校时继续。范围缺失或学校名称歧义以澄清结果返回，绝不由模型猜测。</p>
+     */
     private ScopeResolution resolveScope(AgentQaRequest request,
                                          AuthCurrentUserVO currentUser,
                                          String question) {
@@ -1024,6 +1224,10 @@ public class AgentQaServiceImpl implements AgentQaService {
         return ScopeResolution.clarification("请补充具体学校名称，或传入学校 scopeId。", Collections.emptyList());
     }
 
+    /**
+     * 在问题文本中匹配已登记学校名称。
+     * 匹配前会去除空白、常见中英文标点并转小写，以降低自然语言输入格式差异造成的漏匹配。
+     */
     private List<SchoolSummaryVO> findMentionedSchools(String question) {
         if (!StringUtils.hasText(question)) {
             return Collections.emptyList();
@@ -1046,6 +1250,7 @@ public class AgentQaServiceImpl implements AgentQaService {
         return matches;
     }
 
+    /** 将学校摘要集合提取为非空名称列表，用作范围澄清时的候选项。 */
     private List<String> schoolNames(List<SchoolSummaryVO> schools) {
         return schools.stream()
                 .map(SchoolSummaryVO::getSchoolName)
@@ -1053,6 +1258,7 @@ public class AgentQaServiceImpl implements AgentQaService {
                 .toList();
     }
 
+    /** 规范化学校名称匹配文本，不改变原始业务字段或最终回答文本。 */
     private String normalizeForMatch(String value) {
         return value == null ? "" : value
                 .replaceAll("\\s+", "")
@@ -1060,6 +1266,10 @@ public class AgentQaServiceImpl implements AgentQaService {
                 .toLowerCase(Locale.ROOT);
     }
 
+    /**
+     * 解析年级筛选条件。
+     * 显式请求值优先；未传入时才从问题文本中按 {@link #GRADE_PATTERN} 推断。
+     */
     private String resolveGrade(String requestedGrade, String question) {
         String explicitGrade = clean(requestedGrade);
         if (explicitGrade != null) {
@@ -1069,6 +1279,10 @@ public class AgentQaServiceImpl implements AgentQaService {
         return matcher.find() ? matcher.group(1) : null;
     }
 
+    /**
+     * 构造无需生成和检索的范围澄清响应。
+     * 响应明确标记 {@code clarificationRequired}，使前端可以展示候选范围而不是将文本视为普通答案。
+     */
     private AgentQaResponse clarificationResponse(AgentIntent intent,
                                                   String message,
                                                   List<String> options) {
@@ -1083,6 +1297,10 @@ public class AgentQaServiceImpl implements AgentQaService {
         return response;
     }
 
+    /**
+     * 构造因未知意图等原因跳过检索和生成的响应。
+     * 若范围已经确定，仍将其写入响应，避免调用方误以为请求未完成范围解析。
+     */
     private AgentQaResponse skippedResponse(AgentIntent intent, String message, Scope scope) {
         AgentQaResponse response = new AgentQaResponse();
         response.setAnswer(message);
@@ -1096,6 +1314,12 @@ public class AgentQaServiceImpl implements AgentQaService {
         return response;
     }
 
+    /**
+     * 装配并校验与当前范围相关的业务实体。
+     *
+     * <p>学生模式额外验证资源已审核且归属本校，以及任务已发布、学生属于对应班级并具有任务进度记录；
+     * 之后按学校、区域或资源范围填充地图详情和资源信息。这些校验先于检索执行，防止检索成为越权入口。</p>
+     */
     private void loadBusinessContext(AgentAnswerContext context) {
         if (context.isStudentMode()) {
             if (context.getScopeType() != KnowledgeScopeType.SCHOOL) {
@@ -1153,11 +1377,16 @@ public class AgentQaServiceImpl implements AgentQaService {
         }
     }
 
+    /** 返回上下文已绑定的认证账号标识，供学生任务授权查询使用。 */
     private Long currentAccountId(AgentAnswerContext context) {
         // 学生归属已经由认证范围确定；prepareAnswer 中还会使用账号进一步约束任务查询。
         return context.getAccountId();
     }
 
+    /**
+     * 基于受限业务上下文发起知识检索。
+     * 未识别意图不检索；检索实现异常被隔离为 {@link KnowledgeRetrievalStatus#DEGRADED}，以便回答链路仍可返回降级结果。
+     */
     private KnowledgeRetrieveResult retrieve(AgentAnswerContext context, Integer requestedTopK) {
         if (context.getIntent() == AgentIntent.UNKNOWN) {
             return KnowledgeRetrieveResult.empty();
@@ -1186,6 +1415,10 @@ public class AgentQaServiceImpl implements AgentQaService {
         }
     }
 
+    /**
+     * 规范化检索器返回值，消除可选集合和状态字段的空值。
+     * 当检索器未给出状态时，依据是否存在任何证据推导 {@code OK} 或 {@code EMPTY}，并刷新召回方法摘要。
+     */
     private KnowledgeRetrieveResult normalizeResult(KnowledgeRetrieveResult result) {
         if (result == null) {
             return KnowledgeRetrieveResult.degraded();
@@ -1209,6 +1442,10 @@ public class AgentQaServiceImpl implements AgentQaService {
         return result;
     }
 
+    /**
+     * 汇集与当前回答相关的资源名称。
+     * 依次保留当前资源、学校资源和区域标记名称，去重且每个来源最多补充八项，避免响应无限膨胀。
+     */
     private List<String> relatedResources(AgentAnswerContext context) {
         List<String> names = new ArrayList<>();
         if (context.getResource() != null && StringUtils.hasText(context.getResource().getResourceName())) {
@@ -1235,6 +1472,10 @@ public class AgentQaServiceImpl implements AgentQaService {
         return names;
     }
 
+    /**
+     * 校验回答声明的引用，并在模型没有声明任何有效引用时尝试选取最多五条检索候选引用。
+     * 所有返回引用均通过 {@link CitationValidator}，不会直接信任模型或远程运行时提供的标识。
+     */
     private List<AgentCitationVO> validatedCitations(GeneratedAnswer generated,
                                                      KnowledgeRetrieveResult retrieval) {
         List<AgentCitationVO> citations = citationValidator.filter(
@@ -1251,6 +1492,7 @@ public class AgentQaServiceImpl implements AgentQaService {
         return citationValidator.filter(fallbackIds, retrieval);
     }
 
+    /** 在学校详情的资源列表中找到问题文本明确提及的第一个资源，用于丰富学校范围上下文。 */
     private LocalEduResourceSummaryVO findMentionedResource(SchoolMapDetailVO detail, String question) {
         if (detail == null || detail.getResources() == null || question == null) {
             return null;
@@ -1263,6 +1505,7 @@ public class AgentQaServiceImpl implements AgentQaService {
                 .orElse(null);
     }
 
+    /** 将客户端请求的召回数量限制到 {@link #DEFAULT_TOP_K} 至 {@link #MAX_TOP_K} 的有效区间。 */
     private Integer normalizeTopK(Integer topK) {
         if (topK == null || topK <= 0) {
             return DEFAULT_TOP_K;
@@ -1270,17 +1513,24 @@ public class AgentQaServiceImpl implements AgentQaService {
         return Math.min(topK, MAX_TOP_K);
     }
 
+    /** 将可能为空的文本列表转换为可安全序列化的空列表。 */
     private List<String> nonNullList(List<String> values) {
         return values == null ? new ArrayList<>() : values;
     }
 
+    /** 去除可选文本字段首尾空白；空白或空值统一视为未提供。 */
     private String clean(String value) {
         return StringUtils.hasText(value) ? value.trim() : null;
     }
 
+    /** 已解析且可访问的知识范围，由范围类型和对应业务主键组成。 */
     private record Scope(KnowledgeScopeType type, Long id) {
     }
 
+    /**
+     * 生成前准备阶段的不可变结果。
+     * {@code earlyResponse} 非空表示需要澄清或跳过，后续字段可为空且不得继续调用生成器。
+     */
     private record AnswerPreparation(
             AgentQaResponse earlyResponse,
             AgentIntent intent,
@@ -1289,20 +1539,28 @@ public class AgentQaServiceImpl implements AgentQaService {
             KnowledgeRetrieveResult retrieval) {
     }
 
+    /** 本地流式降级所需的完整响应及其原始上下文，以便补充检索阶段事件。 */
     private record LocalFallbackResult(
             AgentQaResponse response, AgentAnswerContext context) {
     }
 
+    /**
+     * 旧同步范围解析器的结果载体。
+     * {@code scope} 为空表示调用方需要依据 {@code message} 和 {@code options} 补充或消除范围歧义。
+     */
     private record ScopeResolution(Scope scope, String message, List<String> options) {
 
+        /** 创建已成功解析的范围结果。 */
         private static ScopeResolution resolved(Scope scope) {
             return new ScopeResolution(scope, null, Collections.emptyList());
         }
 
+        /** 创建需要用户澄清范围的结果，并携带可展示的候选项。 */
         private static ScopeResolution clarification(String message, List<String> options) {
             return new ScopeResolution(null, message, options);
         }
 
+        /** 通过范围是否为空判断后续流程是否必须停止并返回澄清响应。 */
         private boolean requiresClarification() {
             return scope == null;
         }

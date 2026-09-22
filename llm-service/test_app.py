@@ -18,6 +18,7 @@ from llm_service.conversation_context import (
     SummaryItem,
 )
 from llm_service.container import build_container
+import llm_service.structured_tasks as structured_tasks
 from llm_service.history_index import RetrievedHistoryMessage
 from llm_service.planner import AgentPlan
 from llm_service.runtime import AgentRuntime
@@ -551,7 +552,7 @@ def test_stateful_stream_emits_events_and_persists_final_response(tmp_path: Path
         assert response.headers["content-type"].startswith("text/event-stream")
         assert "event: run.started" in response.text
         assert "event: model.failed" in response.text
-        assert "event: token" in response.text
+        assert "event: token" not in response.text
         assert "event: final" in response.text
         assert "event: done" in response.text
 
@@ -860,10 +861,12 @@ def test_stateful_runtime_uses_configured_fallback_model(tmp_path: Path):
         primary_model="qwen-plus",
         primary_base_url="https://dashscope.example/v1",
         primary_api_key="primary-key",
+        agent_primary_supports_json_object=True,
         fallback_provider="ollama",
         fallback_model="qwen3:8b",
         fallback_base_url="http://127.0.0.1:11434/v1",
         fallback_api_key="ollama",
+        agent_fallback_supports_json_object=True,
     )
     runtime = started_runtime(settings)
 
@@ -876,7 +879,11 @@ def test_stateful_runtime_uses_configured_fallback_model(tmp_path: Path):
 
     agent_for = lambda config: {
         "qwen-plus": FakeAgent("阿里云无效响应"),
-        "qwen3:8b": FakeAgent('{"answer":"Ollama回答","citationIds":[]}'),
+        "qwen3:8b": FakeAgent(
+            '{"answer":"Ollama回答","intent":"NEARBY_RESOURCE",'
+            '"retrievalStatus":"ok","citationIds":["chunk:1"],'
+            '"followUpQuestions":["请介绍该资源的教育价值。"]}'
+        ),
     }[config.model]
 
     async def create_agent_for(config, _checkpoint_namespace):
@@ -903,9 +910,11 @@ def test_stateful_stream_reports_primary_failure_and_fallback_success(tmp_path: 
         primary_provider="bailian",
         primary_model="qwen-plus",
         primary_api_key="primary-key",
+        agent_primary_supports_json_object=True,
         fallback_provider="ollama",
         fallback_model="qwen3:8b",
         fallback_api_key="ollama",
+        agent_fallback_supports_json_object=True,
     )
     runtime = started_runtime(settings)
 
@@ -918,7 +927,11 @@ def test_stateful_stream_reports_primary_failure_and_fallback_success(tmp_path: 
 
     agent_for = lambda config: {
         "qwen-plus": FakeAgent("阿里云无效响应"),
-        "qwen3:8b": FakeAgent('{"answer":"Ollama流式回答","citationIds":[]}'),
+        "qwen3:8b": FakeAgent(
+            '{"answer":"Ollama流式回答","intent":"NEARBY_RESOURCE",'
+            '"retrievalStatus":"ok","citationIds":["chunk:1"],'
+            '"followUpQuestions":["请介绍该资源的教育价值。"]}'
+        ),
     }[config.model]
 
     async def create_agent_for(config, _checkpoint_namespace):
@@ -937,21 +950,61 @@ def test_stateful_stream_reports_primary_failure_and_fallback_success(tmp_path: 
     names = [event.split("\n", 1)[0].removeprefix("event: ") for event in events]
     assert names.count("model.started") == 2
     assert "model.failed" in names
+    assert "response.reset" in names
     assert "model.completed" in names
+    assert "token" not in names
+    assert names.index("model.failed") < names.index("response.reset") < names.index("model.completed")
     final_block = next(event for event in events if event.startswith("event: final"))
     final_data = json.loads(final_block.split("data: ", 1)[1])
     assert final_data["response"]["provider"] == "ollama"
     assert final_data["response"]["fallbackLevel"] == 1
 
 
-def test_stateful_stream_deduplicates_cumulative_langgraph_messages_before_final(tmp_path: Path):
-    settings = settings_for(
-        tmp_path,
-        primary_provider="test",
-        primary_model="stream-model",
-        primary_base_url="http://test.invalid/v1",
-        primary_api_key="stream-key",
+def test_incremental_answer_parser_decodes_split_escapes_before_json_object_ends():
+    parser = structured_tasks.IncrementalJsonStringFieldParser("answer")
+
+    deltas = [
+        parser.feed(r'{"answer":"第一行\n第'),
+        parser.feed(r'二行：\u4'),
+        parser.feed(r'f60\u597'),
+        parser.feed(r'd，引号\"，反斜杠\\，表情\uD83D\uD'),
+        parser.feed(r'E03'),
+    ]
+
+    assert deltas == [
+        "第一行\n第",
+        "二行：",
+        "你",
+        '好，引号"，反斜杠\\，表情',
+        "😃",
+    ]
+    assert parser.feed('","intent":"NEARBY_RESOURCE"}') == ""
+    assert parser.feed("不应再写入 answer") == ""
+    assert parser.value == "第一行\n第二行：你好，引号\"，反斜杠\\，表情😃"
+
+
+def test_message_scoped_answer_stream_keeps_model_outputs_separate():
+    stream = structured_tasks.MessageScopedJsonAnswerStream("answer")
+    tool_output = '{"tool":"retrieve_knowledge","arguments":{"query":"校史"}}'
+    final_output = (
+        '{"answer":"学校始建于1952年。","intent":"RESOURCE_EXPLANATION",'
+        '"retrievalStatus":"ok","citationIds":["chunk:1"],'
+        '"followUpQuestions":["学校有哪些历史资料？"]}'
     )
+
+    assert stream.feed("tool-call", tool_output) == ""
+    assert stream.feed("final-call", '{"answer":"学校始建于') == "学校始建于"
+    assert stream.feed("final-call", final_output) == "1952年。"
+    assert stream.contents == [tool_output, final_output]
+
+    parsed = AgentRuntime._parse_model_output(None, {
+        "messages": [AIMessage(content=content) for content in stream.contents],
+    })
+    assert parsed.answer == "学校始建于1952年。"
+
+
+def test_stateful_stream_emits_incremental_answer_from_cumulative_messages_before_final(tmp_path: Path):
+    settings = settings_for(tmp_path)
     runtime = started_runtime(settings)
 
     class StreamingAgent:
@@ -959,14 +1012,15 @@ def test_stateful_stream_deduplicates_cumulative_langgraph_messages_before_final
             for content in (
                 '{"answer":"第一',
                 '{"answer":"第一段',
-                '{"answer":"第一段回答","citationIds":[]}',
+                (
+                    '{"answer":"第一段回答","intent":"NEARBY_RESOURCE",'
+                    '"retrievalStatus":"ok","citationIds":["chunk:1"],'
+                    '"followUpQuestions":["请介绍该资源的教育价值。"]}'
+                ),
             ):
                 yield {"data": (AIMessageChunk(content=content), {"langgraph_node": "agent"})}
 
-    async def create_agent_for(_config, _checkpoint_namespace):
-        return StreamingAgent()
-
-    runtime._create_agent_for = create_agent_for
+    runtime._agent = StreamingAgent()
 
     async def collect_events():
         return [event async for event in runtime.stream_events(
@@ -980,10 +1034,75 @@ def test_stateful_stream_deduplicates_cumulative_langgraph_messages_before_final
     ]
     final_event = next(event for event in events if event.startswith("event: final"))
     final_data = json.loads(final_event.split("data: ", 1)[1])
+    names = [event.split("\n", 1)[0].removeprefix("event: ") for event in events]
 
     assert token_values == ["第一", "段", "回答"]
-    assert "event: final" in events[-2]
+    assert names.index("token") < names.index("final")
     assert final_data["response"]["answer"] == "第一段回答"
+
+
+def test_stateful_stream_sends_non_streaming_model_answer_only_in_final(tmp_path: Path):
+    runtime = started_runtime(settings_for(tmp_path))
+
+    class NonStreamingAgent:
+        async def ainvoke(self, _input, config=None):
+            return {"messages": [AIMessage(content=(
+                '{"answer":"非流式模型回答","intent":"NEARBY_RESOURCE",'
+                '"retrievalStatus":"ok","citationIds":["chunk:1"],'
+                '"followUpQuestions":["请介绍该资源的教育价值。"]}'
+            ))]}
+
+    runtime._agent = NonStreamingAgent()
+
+    async def collect_events():
+        return [event async for event in runtime.stream_events(
+            AgentMessageRequest.model_validate(message_payload(message="测试非流式模型"))
+        )]
+
+    events = run_async(collect_events())
+    names = [event.split("\n", 1)[0].removeprefix("event: ") for event in events]
+    final_event = next(event for event in events if event.startswith("event: final"))
+    final_data = json.loads(final_event.split("data: ", 1)[1])
+
+    assert "token" not in names
+    assert final_data["response"]["answer"] == "非流式模型回答"
+
+
+def test_stateful_stream_resets_partial_answer_before_degraded_final(tmp_path: Path):
+    runtime = started_runtime(settings_for(tmp_path))
+
+    class FailingStreamingAgent:
+        async def astream(self, _input, config=None, stream_mode=None, version=None):
+            yield {
+                "data": (
+                    AIMessageChunk(content='{"answer":"暂定'),
+                    {"langgraph_node": "agent"},
+                )
+            }
+            raise RuntimeError("stream disconnected")
+
+    runtime._agent = FailingStreamingAgent()
+
+    async def collect_events():
+        return [event async for event in runtime.stream_events(
+            AgentMessageRequest.model_validate(message_payload(message="测试流中断"))
+        )]
+
+    events = run_async(collect_events())
+    names = [event.split("\n", 1)[0].removeprefix("event: ") for event in events]
+    reset_index = names.index("response.reset")
+    final_index = names.index("final")
+    token_values = [
+        json.loads(event.split("data: ", 1)[1])["delta"]
+        for event in events if event.startswith("event: token")
+    ]
+    final_event = next(event for event in events if event.startswith("event: final"))
+    final_data = json.loads(final_event.split("data: ", 1)[1])
+
+    assert token_values == ["暂定"]
+    assert names.index("token") < reset_index < final_index
+    assert "token" not in names[reset_index + 1:]
+    assert final_data["response"]["generationStatus"] == "degraded"
 
 
 def test_stream_merge_helpers_accept_delta_and_cumulative_provider_shapes():

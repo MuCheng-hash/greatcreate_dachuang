@@ -72,6 +72,7 @@ from .user_memory import (
 )
 from .structured_tasks import (
     IncrementalTeachingPlanParser,
+    MessageScopedJsonAnswerStream,
     normalize_resource_discovery,
     normalize_teaching_plan,
     resource_discovery_fallback,
@@ -130,6 +131,13 @@ class PreparedTurn:
     summary_state: ConversationSummary
     retrieved_history: tuple[RetrievedHistoryMessage, ...]
     system_prompt: str
+
+
+@dataclass(slots=True)
+class StreamedAnswerProgress:
+    """记录当前模型尝试是否已向浏览器展示暂定回答。"""
+
+    emitted: bool = False
 
 
 class PartialAnswerWriter:
@@ -1455,6 +1463,7 @@ class AgentRuntime:
                 },
             )
         resume_namespace = registration.turn.checkpoint_namespace
+        last_stream_progress: StreamedAnswerProgress | None = None
         for attempt_index, (config, injected_agent) in enumerate(model_attempts):
             checkpoint_namespace = f"chat-v1/model-attempt-{attempt_index + 1}"
             if (
@@ -1499,6 +1508,8 @@ class AgentRuntime:
                 degraded_reasons=list(prefetched_reasons),
             )
             token = bind_tool_runtime(runtime)
+            stream_progress = StreamedAnswerProgress()
+            last_stream_progress = stream_progress
             prompt_run_id = await self._start_agent_prompt_run(request, thread, memory_context, config)
             await emit(
                 "model.started",
@@ -1535,6 +1546,7 @@ class AgentRuntime:
                     checkpoint_namespace=checkpoint_namespace,
                     resumed=registration.resumed,
                     partial_writer=partial_writer,
+                    stream_progress=stream_progress,
                     summary_state=summary_state,
                     retrieved_history=retrieved_history,
                     system_prompt=system_prompt,
@@ -1593,10 +1605,18 @@ class AgentRuntime:
                 ),
                 [{"status": "not_configured"}],
             )
+        if last_stream_progress is not None and last_stream_progress.emitted:
+            await emit(
+                "response.reset",
+                {
+                    "clientTurnId": request.client_turn_id,
+                    "reason": "model_exhausted",
+                },
+            )
+            await partial_writer.reset()
         result = self._degraded_answer(
             request, request.context, thread.thread_id, compacted, executions, status="degraded"
         )
-        await self._emit_answer_chunks(result.answer, emit)
         return result
 
     async def _prefetch_planned_tools(
@@ -2430,6 +2450,7 @@ class AgentRuntime:
         checkpoint_namespace: str | None = None,
         resumed: bool = False,
         partial_writer: PartialAnswerWriter | None = None,
+        stream_progress: StreamedAnswerProgress | None = None,
         summary_state: ConversationSummary | None = None,
         retrieved_history: tuple[RetrievedHistoryMessage, ...] = (),
         system_prompt: str = "",
@@ -2448,7 +2469,6 @@ class AgentRuntime:
         )
         model_messages: list[Any] = []
         model_buffer = ""
-        emitted_answer_length = 0
         target_agent = agent or self._agent
         if target_agent is None:
             raise RuntimeError("model_unavailable")
@@ -2485,6 +2505,7 @@ class AgentRuntime:
             runtime.action_id = resume_action.action_id
             graph_input = Command(resume={"decisions": [{"type": decision}]})
         if hasattr(target_agent, "astream"):
+            streamed_outputs = MessageScopedJsonAnswerStream("answer")
             async for chunk in target_agent.astream(
                 graph_input,
                 config=self._agent_invoke_config(
@@ -2506,14 +2527,15 @@ class AgentRuntime:
                     content = message_text(message.content)
                     if not content:
                         continue
-                    model_buffer, delta = self._merge_stream_text(model_buffer, content)
-                    partial_answer = self._partial_answer(model_buffer)
-                    if delta and partial_answer and len(partial_answer) > emitted_answer_length:
-                        await emit("token", {"delta": partial_answer[emitted_answer_length:]})
-                        emitted_answer_length = len(partial_answer)
+                    message_id = self._stream_message_id(message)
+                    answer_delta = streamed_outputs.feed(message_id, content)
+                    if answer_delta:
+                        await emit("token", {"delta": answer_delta})
+                        if stream_progress is not None:
+                            stream_progress.emitted = True
                         if partial_writer is not None:
-                            await partial_writer.update(partial_answer)
-            if durable_resume and not model_buffer:
+                            await partial_writer.update(streamed_outputs.answer(message_id))
+            if durable_resume and not streamed_outputs.contents:
                 snapshot = await target_agent.aget_state(
                     self._agent_invoke_config(
                         request,
@@ -2562,15 +2584,18 @@ class AgentRuntime:
                 checkpoint_namespace,
             )
 
-        parse_messages = [AIMessage(content=model_buffer)] if model_buffer else model_messages
+        streamed_contents = streamed_outputs.contents if hasattr(target_agent, "astream") else []
+        parse_messages = (
+            [AIMessage(content=content) for content in streamed_contents]
+            if streamed_contents
+            else [AIMessage(content=model_buffer)] if model_buffer else model_messages
+        )
         response = await self._response_from_model_result(
             {"messages": parse_messages}, trusted, thread.thread_id, compacted,
             runtime.executions, runtime.degraded_reasons, request.message,
             request.grade, request.theme, memory_context, request,
             turn.turn_id if turn else None,
         )
-        if emitted_answer_length < len(response.answer):
-            await self._emit_answer_chunks(response.answer[emitted_answer_length:], emit)
         if partial_writer is not None:
             await partial_writer.update(response.answer, force=True)
         await self._finalize_resumed_action(resume_action, runtime.executions, emit)
@@ -3084,16 +3109,6 @@ class AgentRuntime:
             raise ValueError("invalid_model_output")
         return parsed
 
-    def _partial_answer(self, content: str) -> str:
-        """从尚未完成的 JSON 流中提取当前可验证的 ``answer``，无法验证时保持静默。"""
-        payload = ModelGateway.parse_json(content)
-        if payload is None:
-            return ""
-        try:
-            return AgentModelOutput.model_validate(payload).answer
-        except (ValueError, TypeError):
-            return ""
-
     @staticmethod
     def _plain_text_answer(content: str) -> str:
         normalized = content.strip()
@@ -3144,17 +3159,8 @@ class AgentRuntime:
         return ""
 
     @staticmethod
-    def _merge_stream_text(previous: str, incoming: str) -> tuple[str, str]:
-        """同时接受增量分片和累计式 LangGraph 消息。"""
-        if not incoming:
-            return previous, ""
-        if not previous:
-            return incoming, incoming
-        if incoming.startswith(previous):
-            return incoming, incoming[len(previous):]
-        if incoming == previous or previous.endswith(incoming):
-            return previous, ""
-        return previous + incoming, incoming
+    def _stream_message_id(message: AIMessage | AIMessageChunk) -> str:
+        return str(getattr(message, "id", "") or "__default__")
 
     async def _emit_answer_chunks(self, answer: str, emit: EventSink, size: int = 24) -> None:
         """将最终或降级回答按固定大小拆分，避免单个 SSE 事件阻塞客户端刷新。"""

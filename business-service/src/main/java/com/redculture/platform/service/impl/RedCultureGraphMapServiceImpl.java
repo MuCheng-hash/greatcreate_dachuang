@@ -3,6 +3,7 @@ package com.redculture.platform.service.impl;
 import com.redculture.platform.service.RedCultureGraphMapService;
 import com.redculture.platform.vo.RedCultureSiteDetailVO;
 import com.redculture.platform.vo.RedCultureSiteMarkerVO;
+import org.springframework.dao.DataAccessException;
 import org.springframework.data.neo4j.core.Neo4jClient;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
@@ -27,8 +28,12 @@ public class RedCultureGraphMapServiceImpl implements RedCultureGraphMapService 
                 + "RETURN site.id AS id, site.name AS name, site.category AS category, site.address AS address, "
                 + "site.district AS district, site.longitude AS longitude, site.latitude AS latitude, site.intro AS summary "
                 + "ORDER BY site.name";
-        return neo4jClient.query(cypher).bind(StringUtils.hasText(district) ? district.trim() : "").to("district")
-                .fetch().all().stream().map(this::toMarker).toList();
+        try {
+            return neo4jClient.query(cypher).bind(StringUtils.hasText(district) ? district.trim() : "").to("district")
+                    .fetch().all().stream().map(this::toMarker).toList();
+        } catch (DataAccessException exception) {
+            return List.of();
+        }
     }
 
     @Override

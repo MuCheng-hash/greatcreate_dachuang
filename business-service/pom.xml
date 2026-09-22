@@ -112,6 +112,9 @@
                 <configuration>
                     <workingDirectory>frontend</workingDirectory>
                     <installDirectory>${project.build.directory}/frontend</installDirectory>
+                    <environmentVariables>
+                        <NPM_CONFIG_CACHE>${project.build.directory}/npm-cache</NPM_CONFIG_CACHE>
+                    </environmentVariables>
                 </configuration>
                 <executions>
                     <execution>
