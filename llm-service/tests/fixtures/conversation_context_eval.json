@@ -1,0 +1,80 @@
+[
+  {
+    "id": "early-numeric-budget",
+    "currentThreadId": "thread-budget",
+    "history": [
+      {"id": 11, "threadId": "thread-budget", "role": "user", "content": "本次活动总预算不超过3000元。", "compressed": true}
+    ],
+    "query": "请重新推荐适合的校外资源。",
+    "requiredMessageIds": [11],
+    "requiredSummaryTexts": ["预算不超过3000元"],
+    "forbiddenThreadIds": [],
+    "maximumEstimatedTokens": 4
+  },
+  {
+    "id": "explicit-prohibition",
+    "currentThreadId": "thread-prohibition",
+    "history": [
+      {"id": 14, "threadId": "thread-prohibition", "role": "user", "content": "禁止安排需要夜间出行的活动。", "compressed": true}
+    ],
+    "query": "能否安排本周的实践路线？",
+    "requiredMessageIds": [14],
+    "requiredSummaryTexts": ["禁止安排需要夜间出行"],
+    "forbiddenThreadIds": [],
+    "maximumEstimatedTokens": 4
+  },
+  {
+    "id": "later-conflicting-update",
+    "currentThreadId": "thread-update",
+    "history": [
+      {"id": 21, "threadId": "thread-update", "role": "user", "content": "原先预算不超过2000元。", "compressed": true},
+      {"id": 22, "threadId": "thread-update", "role": "user", "content": "后续确认预算调整为不超过3000元。", "compressed": true}
+    ],
+    "query": "按最新要求给出资源建议。",
+    "requiredMessageIds": [22],
+    "requiredSummaryTexts": ["预算调整为不超过3000元"],
+    "forbiddenThreadIds": [],
+    "maximumEstimatedTokens": 4
+  },
+  {
+    "id": "semantic-recall-with-cross-thread-candidate",
+    "currentThreadId": "thread-semantic",
+    "history": [
+      {"id": 31, "threadId": "thread-semantic", "role": "user", "content": "上次要求优先推荐校内资源。", "compressed": true, "vectorCandidate": true},
+      {"id": 32, "threadId": "thread-other", "role": "user", "content": "其他会话中的私有预算。", "compressed": true, "vectorCandidate": true}
+    ],
+    "query": "能否再次给出学校内部可用的场地？",
+    "requiredMessageIds": [31],
+    "requiredSummaryTexts": ["优先推荐校内资源"],
+    "forbiddenThreadIds": ["thread-other"],
+    "maximumEstimatedTokens": 5
+  },
+  {
+    "id": "embedding-failure-fallback",
+    "currentThreadId": "thread-fallback",
+    "embeddingAvailable": false,
+    "history": [
+      {"id": 41, "threadId": "thread-fallback", "role": "user", "content": "预算不超过1500元。", "compressed": true, "embeddingAvailable": false},
+      {"id": 42, "threadId": "thread-fallback", "role": "assistant", "content": "这条只能靠向量命中的旧说明。", "compressed": true, "vectorCandidate": true}
+    ],
+    "query": "请继续给出低预算方案。",
+    "requiredMessageIds": [41],
+    "requiredSummaryTexts": ["预算不超过1500元"],
+    "forbiddenThreadIds": [],
+    "maximumEstimatedTokens": 4
+  },
+  {
+    "id": "over-budget-evicts-low-priority-evidence",
+    "currentThreadId": "thread-eviction",
+    "history": [
+      {"id": 51, "threadId": "thread-eviction", "role": "user", "content": "必须由老师全程陪同。", "compressed": true, "prefetchedEvidence": "低优先级证据片段"},
+      {"id": 52, "threadId": "thread-eviction", "role": "assistant", "content": "普通背景事实。", "compressed": true}
+    ],
+    "query": "请生成活动建议。",
+    "requiredMessageIds": [51],
+    "requiredSummaryTexts": ["必须由老师全程陪同"],
+    "forbiddenThreadIds": [],
+    "maximumEstimatedTokens": 4,
+    "expectedEvictedComponents": ["summary_facts", "prefetched_evidence"]
+  }
+]

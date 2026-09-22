@@ -38,6 +38,7 @@ class ThreadRecord:
     scope_id: str
     status: str
     summary: str
+    summary_state: dict[str, Any]
     summary_through_message_id: int
     created_at: str
     updated_at: str
@@ -77,6 +78,15 @@ class ConversationRepository:
             scope_id=str(scope_id),
             status="active",
             summary="",
+            summary_state={
+                "schemaVersion": 1,
+                "goals": [],
+                "hardConstraints": [],
+                "decisions": [],
+                "openQuestions": [],
+                "facts": [],
+                "legacyNotes": [],
+            },
             summary_through_message_id=0,
             created_at=_iso(now),
             updated_at=_iso(now),
@@ -301,6 +311,80 @@ class ConversationRepository:
             for row in rows
         ]
 
+    async def hydrate_history_messages(
+        self,
+        message_ids: list[int],
+        thread_id: str,
+        owner_id: str,
+        scope_type: str,
+        scope_id: str | int,
+        max_message_id: int,
+    ) -> list[Any]:
+        """按当前认证边界从 PostgreSQL 水合向量候选，并按轮次去重。
+
+        Qdrant 返回的 payload 只用于定位。正文、角色和轮次状态均重新从事实库读取；
+        无权访问或越过摘要游标的候选会静默丢弃，避免泄露记录是否存在。
+        """
+        normalized_ids = list(dict.fromkeys(
+            int(value) for value in message_ids if int(value) > 0
+        ))
+        if not normalized_ids or int(max_message_id) <= 0:
+            return []
+        async with self.database.connection() as connection:
+            rows = await (
+                await connection.execute(
+                    """
+                    SELECT m.id, m.thread_id, m.turn_id, m.role, m.content
+                    FROM agent_message m
+                    INNER JOIN agent_thread t ON t.thread_id = m.thread_id
+                    INNER JOIN agent_turn tr ON tr.turn_id = m.turn_id
+                    WHERE m.id = ANY(%s)
+                      AND m.id <= %s
+                      AND m.thread_id = %s
+                      AND t.owner_id = %s
+                      AND t.scope_type = %s
+                      AND t.scope_id = %s
+                      AND tr.status = 'completed'
+                    """,
+                    (
+                        normalized_ids,
+                        int(max_message_id),
+                        thread_id,
+                        owner_id,
+                        scope_type,
+                        str(scope_id),
+                    ),
+                )
+            ).fetchall()
+        by_id = {int(row["id"]): row for row in rows}
+        seen_turns: set[str] = set()
+        hydrated: list[Any] = []
+        # Import lazily to keep the repository module independent from optional
+        # history HTTP clients during disabled/default application startup.
+        from .history_index import RetrievedHistoryMessage
+
+        for message_id in normalized_ids:
+            row = by_id.get(message_id)
+            if row is None:
+                continue
+            turn_key = (
+                str(row["turn_id"])
+                if row.get("turn_id") is not None
+                else f"message:{message_id}"
+            )
+            if turn_key in seen_turns:
+                continue
+            seen_turns.add(turn_key)
+            hydrated.append(RetrievedHistoryMessage(
+                message_id=message_id,
+                thread_id=str(row["thread_id"]),
+                turn_id=(str(row["turn_id"]) if row.get("turn_id") else None),
+                role=str(row["role"]),
+                content=str(row["content"]),
+                score=0.0,
+            ))
+        return hydrated
+
     async def list_messages_for_turn(
         self, turn_id: str
     ) -> list[dict[str, Any]]:
@@ -404,6 +488,43 @@ class ConversationRepository:
                     """,
                     (
                         summary,
+                        new_cursor,
+                        utc_now(),
+                        thread_id,
+                        expected_cursor,
+                        new_cursor,
+                    ),
+                )
+            ).fetchone()
+        return row is not None
+
+    async def update_summary_state(
+        self,
+        thread_id: str,
+        summary: str,
+        summary_state: dict[str, Any],
+        *,
+        expected_cursor: int = 0,
+        new_cursor: int = 0,
+    ) -> bool:
+        """原子提交兼容文本摘要、结构化状态和单调递增游标。"""
+        async with self.database.transaction() as connection:
+            row = await (
+                await connection.execute(
+                    """
+                    UPDATE agent_thread
+                    SET summary = %s,
+                        summary_state_json = %s,
+                        summary_through_message_id = %s,
+                        updated_at = %s
+                    WHERE thread_id = %s
+                      AND summary_through_message_id = %s
+                      AND %s >= summary_through_message_id
+                    RETURNING thread_id
+                    """,
+                    (
+                        summary,
+                        Jsonb(summary_state),
                         new_cursor,
                         utc_now(),
                         thread_id,
@@ -632,6 +753,7 @@ class ConversationRepository:
             scope_id=str(row["scope_id"]),
             status=str(row["status"]),
             summary=str(row["summary"]),
+            summary_state=dict(row.get("summary_state_json") or {}),
             summary_through_message_id=int(
                 row.get("summary_through_message_id") or 0
             ),

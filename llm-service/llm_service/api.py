@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import hmac
 import logging
@@ -192,6 +193,7 @@ def create_app(
     checkpoints = container.checkpoints
     turn_repository = container.turn_repository
     action_repository = container.action_repository
+    history_worker = container.history_worker
 
     def action_response(action: AgentActionRecord) -> AgentActionResponse:
         """生成待确认写操作的公开视图，仅返回已脱敏参数和状态机允许的字段。"""
@@ -274,12 +276,41 @@ def create_app(
             except Exception:
                 LOGGER.exception("agent_action_cleanup_failed")
 
+    async def history_index_once() -> None:
+        if history_worker is None:
+            return
+        result = await history_worker.run_once()
+        LOGGER.info(
+            "agent_history_index_run",
+            extra={
+                "completed": int(getattr(result, "completed", 0)),
+                "skipped": int(getattr(result, "skipped", 0)),
+                "retried": int(getattr(result, "retried", 0)),
+                "failed": int(getattr(result, "failed", 0)),
+                "leaseLost": int(getattr(result, "lease_lost", 0)),
+                "threadCleaned": int(getattr(result, "thread_cleaned", 0)),
+                "messageCleaned": int(getattr(result, "message_cleaned", 0)),
+            },
+        )
+
+    async def history_index_loop() -> None:
+        while True:
+            await asyncio.sleep(settings.agent_history_index_poll_seconds)
+            try:
+                await history_index_once()
+            except Exception as exc:
+                LOGGER.warning(
+                    "agent_history_index_failed",
+                    extra={"errorType": type(exc).__name__},
+                )
+
     @asynccontextmanager
     async def lifespan(application: FastAPI):
         """管理数据库、检查点和后台清理任务的启动顺序与有序关闭。"""
         cleanup_task: asyncio.Task[None] | None = None
         checkpoint_cleanup_task: asyncio.Task[None] | None = None
         action_cleanup_task: asyncio.Task[None] | None = None
+        history_index_task: asyncio.Task[None] | None = None
         database_open = False
         try:
             await database.open()
@@ -296,6 +327,23 @@ def create_app(
             await memory_repository.cleanup_expired()
             await checkpoint_cleanup_once()
             await action_cleanup_once()
+            if settings.history_retrieval_configured and history_worker is not None:
+                try:
+                    ensure_collection = getattr(history_worker, "ensure_collection", None)
+                    if ensure_collection is not None:
+                        await ensure_collection(settings.embedding_dimensions)
+                    await history_index_once()
+                except Exception as exc:
+                    # Conversation history is derived and optional; an outage
+                    # must not prevent regular chat or database startup.
+                    LOGGER.warning(
+                        "agent_history_index_catchup_failed",
+                        extra={"errorType": type(exc).__name__},
+                    )
+                history_index_task = asyncio.create_task(
+                    history_index_loop(), name="agent-history-index"
+                )
+                application.state.history_index_task = history_index_task
             cleanup_task = asyncio.create_task(
                 memory_cleanup_loop(), name="agent-memory-cleanup"
             )
@@ -311,6 +359,10 @@ def create_app(
             yield
         finally:
             # 先停止产生数据库写入的后台任务，再关闭依赖连接，避免关闭期间的新事务。
+            if history_index_task is not None:
+                history_index_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await history_index_task
             if action_cleanup_task is not None:
                 action_cleanup_task.cancel()
                 with suppress(asyncio.CancelledError):
@@ -323,6 +375,17 @@ def create_app(
                 cleanup_task.cancel()
                 with suppress(asyncio.CancelledError):
                     await cleanup_task
+            closed_history_dependencies: set[int] = set()
+            for dependency in (history_worker, *container.history_closeables):
+                if dependency is None or id(dependency) in closed_history_dependencies:
+                    continue
+                closed_history_dependencies.add(id(dependency))
+                close = getattr(dependency, "close", None)
+                if close is not None:
+                    with suppress(Exception):
+                        result = close()
+                        if inspect.isawaitable(result):
+                            await result
             await container.business_tool_client.aclose()
             await alerts.close()
             if database_open:

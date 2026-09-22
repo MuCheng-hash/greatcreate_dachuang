@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -20,6 +21,8 @@ from llm_service.api import create_app
 from llm_service.actions import AgentActionRepository, ActionConflictError
 from llm_service.checkpointing import CheckpointManager, NamespaceCheckpointSaver
 from llm_service.database import SchemaMigrator
+from llm_service.db_cli import _history_requeue
+from llm_service.history_index import HistoryCleanupJob, HistoryIndexRepository
 from llm_service.repository import ConversationRepository
 from llm_service.runtime import ActionConfirmationRequired, AgentRuntime
 from llm_service.schemas import AgentMessageRequest, TrustedContext
@@ -40,6 +43,47 @@ from postgres_test_support import (
 
 
 NOW = "2026-08-10T00:00:00+00:00"
+
+
+async def _insert_completed_history_message(
+    database,
+    thread_id: str,
+    content: str,
+    *,
+    role: str = "user",
+    turn_id: str | None = None,
+) -> tuple[int, str]:
+    """Seed a completed turn without exposing incomplete test rows to history."""
+    completed_turn_id = turn_id or str(uuid.uuid4())
+    async with database.transaction() as connection:
+        if turn_id is None:
+            await connection.execute(
+                """
+                INSERT INTO agent_turn(
+                    turn_id, client_turn_id, thread_id, task_type, request_hash,
+                    status, finished_at, created_at, updated_at
+                ) VALUES (%s, %s, %s, 'CHAT', %s, 'completed',
+                          CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                """,
+                (
+                    completed_turn_id,
+                    f"history-index-{completed_turn_id}",
+                    thread_id,
+                    "a" * 64,
+                ),
+            )
+        row = await (
+            await connection.execute(
+                """
+                INSERT INTO agent_message(
+                    thread_id, turn_id, role, content, metadata_json, created_at
+                ) VALUES (%s, %s, %s, %s, '{}'::jsonb, CURRENT_TIMESTAMP)
+                RETURNING id
+                """,
+                (thread_id, completed_turn_id, role, content),
+            )
+        ).fetchone()
+    return int((row or {})["id"]), completed_turn_id
 
 
 def _sqlite_type(table: str, column: str) -> str:
@@ -216,9 +260,9 @@ def test_empty_schema_migration_is_repeatable_and_uses_postgresql_types(
 
     async def exercise() -> None:
         assert await migrator.current_version() == 0
-        assert await migrator.migrate() == 3
-        assert await migrator.migrate() == 3
-        assert await migrator.validate() == 3
+        assert await migrator.migrate() == 5
+        assert await migrator.migrate() == 5
+        assert await migrator.validate() == 5
         async with database.connection() as connection:
             rows = await (
                 await connection.execute(
@@ -248,6 +292,259 @@ def test_empty_schema_migration_is_repeatable_and_uses_postgresql_types(
             types[("agent_thread", "created_at")][0]
             == "timestamp with time zone"
         )
+
+    run_async(exercise())
+
+
+def test_context_migration_preserves_summary_state_and_creates_index_job(
+    tmp_path: Path,
+) -> None:
+    settings = settings_for_database(tmp_path)
+    database = open_database(settings)
+    repository = ConversationRepository(database)
+
+    async def exercise() -> None:
+        thread = await repository.create_thread("account:1", "SCHOOL", "1")
+        summary_state = {
+            "schemaVersion": 1,
+            "legacyNotes": ["旧摘要"],
+        }
+        assert await repository.update_summary_state(
+            thread.thread_id,
+            "## 旧摘要\n- 原有约束",
+            summary_state,
+            expected_cursor=0,
+            new_cursor=0,
+        )
+        message_id = await repository.append_message(
+            thread.thread_id,
+            "user",
+            "预算不超过3000元",
+        )
+        restored = await repository.get_thread(thread.thread_id, "account:1")
+        async with database.connection() as connection:
+            job = await (
+                await connection.execute(
+                    "SELECT message_id, status FROM agent_history_index_job WHERE message_id = %s",
+                    (message_id,),
+                )
+            ).fetchone()
+
+        assert restored.summary_state == summary_state
+        assert job == {"message_id": message_id, "status": "pending"}
+
+    run_async(exercise())
+
+
+def test_deleted_message_enqueues_vector_cleanup_without_blocking_delete(
+    tmp_path: Path,
+) -> None:
+    settings = settings_for_database(tmp_path)
+    database = open_database(settings)
+    repository = ConversationRepository(database)
+
+    async def exercise() -> None:
+        thread = await repository.create_thread("account:1", "SCHOOL", "1")
+        message_id = await repository.append_message(
+            thread.thread_id, "user", "需要在删除后清理向量"
+        )
+        async with database.transaction() as connection:
+            await connection.execute(
+                "DELETE FROM agent_message WHERE id = %s", (message_id,)
+            )
+        async with database.connection() as connection:
+            cleanup = await (
+                await connection.execute(
+                    """
+                    SELECT message_id, status
+                    FROM agent_history_message_cleanup_job
+                    WHERE message_id = %s
+                    """,
+                    (message_id,),
+                )
+            ).fetchone()
+        assert cleanup == {"message_id": message_id, "status": "pending"}
+
+    run_async(exercise())
+
+
+def test_history_hydration_rechecks_owner_scope_thread_and_summary_cursor(
+    tmp_path: Path,
+) -> None:
+    settings = settings_for_database(tmp_path)
+    database = open_database(settings)
+    repository = ConversationRepository(database)
+
+    async def exercise() -> None:
+        current = await repository.create_thread("account:1", "SCHOOL", "1")
+        unrelated = await repository.create_thread("account:2", "SCHOOL", "2")
+        legacy_id = await repository.append_message(
+            current.thread_id, "user", "没有完成轮次的旧消息"
+        )
+        allowed_id, _ = await _insert_completed_history_message(
+            database, current.thread_id, "预算不超过3000元"
+        )
+        too_new_id, _ = await _insert_completed_history_message(
+            database, current.thread_id, "这是游标之后的消息", role="assistant"
+        )
+        other_thread_id, _ = await _insert_completed_history_message(
+            database, unrelated.thread_id, "另一个会话的秘密"
+        )
+
+        hydrated = await repository.hydrate_history_messages(
+            [other_thread_id, too_new_id, legacy_id, allowed_id],
+            current.thread_id,
+            "account:1",
+            "SCHOOL",
+            "1",
+            allowed_id,
+        )
+        unauthorized = await repository.hydrate_history_messages(
+            [allowed_id],
+            current.thread_id,
+            "account:2",
+            "SCHOOL",
+            "1",
+            allowed_id,
+        )
+
+        assert [item.message_id for item in hydrated] == [allowed_id]
+        assert [item.content for item in hydrated] == ["预算不超过3000元"]
+        assert unauthorized == []
+
+    run_async(exercise())
+
+
+def test_history_index_claims_are_leased_and_failed_jobs_require_requeue(
+    tmp_path: Path,
+) -> None:
+    settings = settings_for_database(
+        tmp_path, database_pool_min_size=1, database_pool_max_size=4
+    )
+    database = open_database(settings)
+    conversations = ConversationRepository(database)
+    jobs = HistoryIndexRepository(database)
+
+    async def exercise() -> None:
+        thread = await conversations.create_thread("account:1", "SCHOOL", "1")
+        first_id, _ = await _insert_completed_history_message(
+            database, thread.thread_id, "第一条完整轮次"
+        )
+        second_id, _ = await _insert_completed_history_message(
+            database, thread.thread_id, "第二条完整轮次", role="assistant"
+        )
+        legacy_id = await conversations.append_message(
+            thread.thread_id, "user", "不允许进入派生索引的未完成消息"
+        )
+
+        first_claim, second_claim = await asyncio.gather(
+            jobs.claim_ready("worker-a", 2),
+            jobs.claim_ready("worker-b", 2),
+        )
+        claimed = [*first_claim, *second_claim]
+        claimed_ids = {job.message_id for job in claimed}
+        assert {first_id, second_id, legacy_id} <= claimed_ids
+        assert len(claimed_ids) == len(claimed)
+        assert {job.lease_owner for job in claimed} <= {"worker-a", "worker-b"}
+        assert await jobs.indexable_message(legacy_id) is None
+
+        target = next(job for job in claimed if job.message_id == first_id)
+        assert not await jobs.mark_completed(first_id, "a" * 64, "stale-worker")
+        assert await jobs.mark_failed(
+            first_id, "embedding_unavailable", target.lease_owner
+        )
+        assert await jobs.claim_ready("worker-c", 4) == []
+        assert await jobs.requeue_failed_jobs() == 1
+
+        requeued = await jobs.claim_ready("worker-c", 4)
+        restored = next(job for job in requeued if job.message_id == first_id)
+        assert restored.attempt_count == 1
+        assert restored.lease_owner == "worker-c"
+
+    run_async(exercise())
+
+
+def test_history_cleanup_jobs_honor_lease_and_terminal_failure(
+    tmp_path: Path,
+) -> None:
+    settings = settings_for_database(tmp_path)
+    database = open_database(settings)
+    conversations = ConversationRepository(database)
+    jobs = HistoryIndexRepository(database)
+
+    async def exercise() -> None:
+        thread = await conversations.create_thread("account:1", "SCHOOL", "1")
+        message_id = await conversations.append_message(
+            thread.thread_id, "user", "删除后需要清理的向量"
+        )
+        async with database.transaction() as connection:
+            await connection.execute("DELETE FROM agent_message WHERE id = %s", (message_id,))
+
+        cleanup = await jobs.claim_message_cleanup_ready("worker-a", 1)
+        assert len(cleanup) == 1
+        claimed = cleanup[0]
+        assert claimed.identifier == str(message_id)
+        assert not await jobs.finish_cleanup(
+            HistoryCleanupJob(
+                claimed.kind,
+                claimed.identifier,
+                claimed.attempt_count,
+                "stale-worker",
+            ),
+            deleted=True,
+        )
+        assert await jobs.finish_cleanup(
+            claimed,
+            deleted=False,
+            terminal=True,
+            error_code="vector_store_unavailable",
+        )
+        assert await jobs.claim_message_cleanup_ready("worker-b", 1) == []
+        assert await jobs.requeue_failed_cleanup_jobs() == 1
+
+        requeued = await jobs.claim_message_cleanup_ready("worker-b", 1)
+        assert len(requeued) == 1
+        assert requeued[0].attempt_count == 1
+        assert requeued[0].lease_owner == "worker-b"
+
+    run_async(exercise())
+
+
+def test_history_requeue_recovers_failed_jobs_and_rebuilds_from_postgresql(
+    tmp_path: Path,
+) -> None:
+    settings = settings_for_database(tmp_path)
+    database = open_database(settings)
+    conversations = ConversationRepository(database)
+    jobs = HistoryIndexRepository(database)
+
+    async def exercise() -> None:
+        thread = await conversations.create_thread("account:1", "SCHOOL", "1")
+        message_id, _ = await _insert_completed_history_message(
+            database, thread.thread_id, "可从 PostgreSQL 重建的历史消息"
+        )
+        claimed = (await jobs.claim_ready("worker-a", 1))[0]
+        assert claimed.message_id == message_id
+        assert await jobs.mark_failed(
+            message_id, "embedding_unavailable", claimed.lease_owner
+        )
+
+        failed_result = await _history_requeue(settings, rebuild_all=False)
+        assert failed_result == {
+            "status": "queued",
+            "mode": "failed",
+            "affectedJobs": 1,
+            "indexJobs": 1,
+            "cleanupJobs": 0,
+        }
+        output = str(failed_result)
+        assert "可从 PostgreSQL 重建的历史消息" not in output
+        assert settings.database_dsn not in output
+
+        rebuilt_result = await _history_requeue(settings, rebuild_all=True)
+        assert rebuilt_result["status"] == "queued"
+        assert rebuilt_result["mode"] == "all"
+        assert int(rebuilt_result["affectedJobs"]) >= 1
 
     run_async(exercise())
 

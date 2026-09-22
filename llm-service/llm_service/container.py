@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import uuid
 from dataclasses import dataclass
 
 from fastapi import Request
@@ -9,6 +10,13 @@ from .actions import AgentActionRepository
 from .checkpointing import CheckpointManager
 from .database import Database, SchemaMigrator
 from .health import HealthService
+from .history_index import (
+    ConversationHistoryRetriever,
+    ConversationHistoryWorker,
+    ConversationVectorStore,
+    HistoryEmbeddingClient,
+    HistoryIndexRepository,
+)
 from .model_gateway import ModelGateway
 from .observability import FallbackAlertManager, LlmObservability
 from .prompt_manager import PromptManager
@@ -36,12 +44,17 @@ class AppContainer:
     runtime: AgentRuntime
     health: HealthService
     business_tool_client: BusinessToolClient
+    history_worker: ConversationHistoryWorker | None
+    history_retriever: ConversationHistoryRetriever | None
+    history_closeables: tuple[object, ...]
 
 
 def build_container(
     settings: Settings,
     observability: LlmObservability | None = None,
     alerts: FallbackAlertManager | None = None,
+    history_worker: ConversationHistoryWorker | None = None,
+    history_retriever: ConversationHistoryRetriever | None = None,
 ) -> AppContainer:
     database = Database(settings)
     migrator = SchemaMigrator(database, settings.migration_dsn)
@@ -74,6 +87,43 @@ def build_container(
         settings.agent_tool_timeout_seconds,
         write_tools_enabled=settings.agent_write_tools_enabled,
     )
+    history_closeables: tuple[object, ...] = ()
+    if settings.history_retrieval_configured:
+        # When a test injects both services no outbound client is needed.  If it
+        # injects only the worker, the default retriever owns the extra clients.
+        if history_worker is None or history_retriever is None:
+            embedding_client = HistoryEmbeddingClient(
+                settings.embedding_api_url,
+                settings.embedding_api_key,
+                settings.embedding_model,
+                settings.embedding_dimensions,
+            )
+            vector_store = ConversationVectorStore(
+                settings.agent_history_qdrant_url,
+                settings.agent_history_qdrant_api_key,
+                settings.agent_history_vector_collection,
+            )
+            if history_worker is None:
+                history_worker = ConversationHistoryWorker(
+                    HistoryIndexRepository(database),
+                    embedding_client,
+                    vector_store,
+                    f"agent-history-index:{uuid.uuid4().hex}",
+                    batch_size=settings.agent_history_index_batch_size,
+                    max_attempts=settings.agent_history_index_max_attempts,
+                )
+            else:
+                history_closeables = (embedding_client, vector_store)
+            if history_retriever is None:
+                history_retriever = ConversationHistoryRetriever(
+                    repository,
+                    embedding_client,
+                    vector_store,
+                    enabled=True,
+                    limit=settings.agent_history_retrieval_limit,
+                    character_limit=settings.agent_history_retrieval_character_limit,
+                    min_score=settings.agent_history_retrieval_min_score,
+                )
     runtime = AgentRuntime(
         settings,
         repository,
@@ -86,6 +136,7 @@ def build_container(
         turn_repository,
         checkpoints,
         action_repository,
+        history_retriever,
     )
     health = HealthService(
         settings,
@@ -111,6 +162,9 @@ def build_container(
         runtime=runtime,
         health=health,
         business_tool_client=business_tool_client,
+        history_worker=history_worker,
+        history_retriever=history_retriever,
+        history_closeables=history_closeables,
     )
 
 
