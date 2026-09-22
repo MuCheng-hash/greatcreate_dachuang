@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 import uuid
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
@@ -11,7 +12,13 @@ from langchain_core.messages import AIMessage, AIMessageChunk
 import pytest
 
 from llm_service.api import DisconnectAwareStreamingResponse, create_app
+from llm_service.conversation_context import (
+    ContextBudgeter,
+    ConversationSummary,
+    SummaryItem,
+)
 from llm_service.container import build_container
+from llm_service.history_index import RetrievedHistoryMessage
 from llm_service.planner import AgentPlan
 from llm_service.runtime import AgentRuntime
 from llm_service.model_gateway import ModelGateway
@@ -1430,3 +1437,401 @@ def test_model_output_accepts_wrapped_json_and_plain_text(
 
     assert response.status == "completed"
     assert response.answer == expected
+
+def test_runtime_injects_only_relevant_history_from_current_thread(tmp_path: Path):
+    settings = settings_for(
+        tmp_path,
+        agent_context_token_budget=12_000,
+        agent_recent_message_count=1,
+        agent_history_retrieval_enabled=True,
+        agent_history_qdrant_url="http://qdrant.test",
+        embedding_api_url="http://embedding.test/v1",
+    )
+    runtime = started_runtime(settings)
+
+    async def exercise():
+        thread = await runtime.create_thread("school-user:1", "SCHOOL", "1")
+        old_message_id = await runtime.repository.append_message(
+            thread.thread_id, "user", "预算不超过3000元"
+        )
+        await runtime.repository.append_message(
+            thread.thread_id, "assistant", "稍后的普通说明"
+        )
+
+        class FakeHistoryRetriever:
+            async def retrieve(self, *_args):
+                return [
+                    RetrievedHistoryMessage(
+                        old_message_id, thread.thread_id, "turn-1", "user",
+                        "预算不超过3000元", 0.92,
+                    ),
+                    RetrievedHistoryMessage(
+                        999, "other-thread", "turn-2", "user",
+                        "不应跨线程出现", 0.99,
+                    ),
+                ]
+
+        runtime.history_retriever = FakeHistoryRetriever()
+        request = AgentMessageRequest.model_validate(message_payload(
+            threadId=thread.thread_id, message="请重新推荐资源"
+        ))
+        prepared = await runtime._prepare_turn(request)
+        rendered = "\n".join(
+            str(message.content)
+            for message in runtime._build_messages(
+                prepared.messages,
+                prepared.window.summary,
+                prepared.plan,
+                request,
+                prepared.memory_context,
+                summary_state=prepared.summary_state,
+                retrieved_history=prepared.retrieved_history,
+                system_prompt=prepared.system_prompt,
+            )
+        )
+        return prepared, rendered
+
+    prepared, rendered = run_async(exercise())
+
+    assert [item.message_id for item in prepared.retrieved_history] == [1]
+    assert "与当前问题相关的较早对话原文" in rendered
+    assert "预算不超过3000元" in rendered
+    assert "不应跨线程出现" not in rendered
+
+
+def test_runtime_continues_when_history_retrieval_fails(tmp_path: Path):
+    settings = settings_for(
+        tmp_path,
+        agent_context_token_budget=12_000,
+        agent_recent_message_count=1,
+        agent_history_retrieval_enabled=True,
+        agent_history_qdrant_url="http://qdrant.test",
+        embedding_api_url="http://embedding.test/v1",
+    )
+    runtime = started_runtime(settings)
+
+    class FailingHistoryRetriever:
+        async def retrieve(self, *_args):
+            raise RuntimeError("embedding backend unavailable")
+
+    class FakeAgent:
+        async def ainvoke(self, _input, config=None):
+            return {"messages": [AIMessage(content=json.dumps({
+                "answer": "可继续回答", "intent": "UNKNOWN",
+                "retrievalStatus": "empty", "citationIds": [],
+                "relatedResources": [], "followUpQuestions": [],
+            }, ensure_ascii=False))]}
+
+    async def exercise():
+        thread = await runtime.create_thread("school-user:1", "SCHOOL", "1")
+        await runtime.repository.append_message(thread.thread_id, "user", "旧约束")
+        await runtime.repository.append_message(thread.thread_id, "assistant", "旧回答")
+        runtime.history_retriever = FailingHistoryRetriever()
+        runtime._agent = FakeAgent()
+        return await runtime.handle(AgentMessageRequest.model_validate(
+            message_payload(threadId=thread.thread_id)
+        ))
+
+    response = run_async(exercise())
+
+    assert response.status == "completed"
+    assert response.answer == "可继续回答"
+
+
+def test_runtime_does_not_call_an_injected_history_retriever_when_disabled(
+    tmp_path: Path,
+):
+    settings = settings_for(tmp_path)
+    repository = conversation_repository(settings)
+    runtime = AgentRuntime(settings, repository.async_target)
+    thread = repository.create_thread("school-user:1", "SCHOOL", 1)
+    request = AgentMessageRequest.model_validate(message_payload())
+
+    class UnexpectedRetriever:
+        called = False
+
+        async def retrieve(self, *_args):
+            self.called = True
+            return []
+
+    retriever = UnexpectedRetriever()
+    runtime.history_retriever = retriever
+
+    result = run_async(runtime._retrieve_history(thread, request, 11))
+
+    assert result == ()
+    assert retriever.called is False
+
+
+def test_final_budget_keeps_hard_constraint_and_trace_excludes_content(tmp_path: Path):
+    class FixedCounter:
+        def count(self, _text: str) -> int:
+            return 1
+
+    settings = settings_for(tmp_path, agent_context_token_budget=5)
+    runtime = started_runtime(settings)
+    runtime.context_budgeter = ContextBudgeter(FixedCounter(), per_message_framing_tokens=0)
+    request = AgentMessageRequest.model_validate(message_payload(message="当前问题"))
+    summary = ConversationSummary(
+        hard_constraints=(SummaryItem("预算不超过3000元", (11,)),),
+        facts=(SummaryItem("低优先级私有事实", (12,)),),
+    )
+    metadata: dict[str, object] = {}
+
+    built = runtime._build_messages(
+        [{"role": "user", "content": request.message}],
+        summary.render(500),
+        AgentPlan(request.message, tuple(), 1),
+        request,
+        summary_state=summary,
+        system_prompt="系统安全提示",
+        budget_metadata=metadata,
+    )
+    rendered = "\n".join(str(message.content) for message in built)
+    serialized_metadata = json.dumps(metadata, ensure_ascii=False)
+
+    assert "预算不超过3000元" in rendered
+    assert "低优先级私有事实" not in rendered
+    assert metadata["estimatedTokens"] <= 5
+    assert "summary_facts" in metadata["evictedComponents"]
+    assert metadata["componentTokens"]["summary_hard_constraints"] == 1
+    assert "低优先级私有事实" not in serialized_metadata
+
+
+def test_final_budget_evicts_summary_items_atomically_not_as_one_category(tmp_path: Path):
+    class FixedCounter:
+        def count(self, _text: str) -> int:
+            return 1
+
+    settings = settings_for(tmp_path, agent_context_token_budget=3)
+    repository = conversation_repository(settings)
+    runtime = AgentRuntime(settings, repository.async_target)
+    runtime.context_budgeter = ContextBudgeter(FixedCounter(), per_message_framing_tokens=0)
+    request = AgentMessageRequest.model_validate(message_payload(message="当前问题"))
+    summary = ConversationSummary(
+        hard_constraints=(
+            SummaryItem("第一条硬约束", (11,)),
+            SummaryItem("第二条硬约束", (12,)),
+        ),
+    )
+
+    built = runtime._build_messages(
+        [{"role": "user", "content": request.message}],
+        "",
+        AgentPlan(request.message, tuple(), 1),
+        request,
+        summary_state=summary,
+    )
+    rendered = "\n".join(str(message.content) for message in built)
+
+    assert "第一条硬约束" in rendered
+    assert "第二条硬约束" not in rendered
+    assert "本轮策略计划" not in rendered
+
+
+def test_structured_summary_trace_contains_counts_without_message_content(tmp_path: Path):
+    settings = settings_for(tmp_path)
+    repository = conversation_repository(settings)
+    runtime = AgentRuntime(settings, repository.async_target)
+    thread = repository.create_thread("school-user:1", "SCHOOL", 1)
+    captured: dict[str, object] = {}
+
+    class FakeModel:
+        async def generate_json(self, _prompt, trace_context=None, validator=None, **_kwargs):
+            captured["trace"] = trace_context
+            value = {
+                "schemaVersion": 1,
+                "hardConstraints": [{
+                    "text": "预算不超过3000元",
+                    "sourceMessageIds": [11],
+                }],
+                "goals": [],
+                "decisions": [],
+                "openQuestions": [],
+                "facts": [],
+                "legacyNotes": [],
+            }
+            assert validator is not None and validator(value)
+            return value
+
+    runtime.model = FakeModel()
+    merged = run_async(runtime._merge_structured_summary(thread, [{
+        "id": 11,
+        "role": "user",
+        "content": "预算不超过3000元，且不要把正文写入 trace。",
+    }]))
+
+    trace = captured["trace"]
+    assert getattr(trace, "feature") == "conversation-summary"
+    metadata = getattr(trace, "metadata")
+    assert metadata == {"sourceMessageCount": 1, "summaryCursor": 0}
+    assert "不要把正文写入 trace" not in json.dumps(metadata, ensure_ascii=False)
+    assert merged.hard_constraints[0].source_message_ids == (11,)
+
+
+def test_structured_summary_replaces_a_fully_superseded_constraint(tmp_path: Path):
+    settings = settings_for(tmp_path)
+    repository = conversation_repository(settings)
+    runtime = AgentRuntime(settings, repository.async_target)
+    thread = repository.create_thread("school-user:1", "SCHOOL", 1)
+    thread.summary_state = ConversationSummary(
+        hard_constraints=(SummaryItem("预算不超过2000元", (11,)),),
+    ).to_dict()
+    captured: dict[str, object] = {}
+
+    class FakeModel:
+        async def generate_json(self, prompt, validator=None, **_kwargs):
+            captured["prompt"] = prompt
+            value = {
+                "schemaVersion": 1,
+                "goals": [],
+                "hardConstraints": [{
+                    "text": "预算不超过3000元",
+                    "sourceMessageIds": [12],
+                }],
+                "decisions": [],
+                "openQuestions": [],
+                "facts": [],
+                "legacyNotes": [],
+                "supersededSourceMessageIds": [11],
+            }
+            assert validator is not None and validator(value)
+            return value
+
+    runtime.model = FakeModel()
+    merged = run_async(runtime._merge_structured_summary(thread, [{
+        "id": 12,
+        "role": "user",
+        "content": "预算调整为不超过3000元。",
+    }]))
+
+    assert "预算不超过2000元" in str(captured["prompt"])
+    assert [item.text for item in merged.hard_constraints] == ["预算不超过3000元"]
+
+
+def test_structured_summary_rejects_model_generated_legacy_notes(tmp_path: Path):
+    settings = settings_for(tmp_path)
+    repository = conversation_repository(settings)
+    runtime = AgentRuntime(settings, repository.async_target)
+    thread = repository.create_thread("school-user:1", "SCHOOL", 1)
+    captured: dict[str, object] = {}
+
+    class FakeModel:
+        async def generate_json(self, _prompt, validator=None, **_kwargs):
+            value = {
+                "schemaVersion": 1,
+                "goals": [],
+                "hardConstraints": [{
+                    "text": "预算不超过3000元",
+                    "sourceMessageIds": [11],
+                }],
+                "decisions": [],
+                "openQuestions": [],
+                "facts": [],
+                "legacyNotes": ["模型编造的无来源备注"],
+            }
+            captured["valid"] = validator(value) if validator else None
+            return value
+
+    runtime.model = FakeModel()
+    merged = run_async(runtime._merge_structured_summary(thread, [{
+        "id": 11,
+        "role": "user",
+        "content": "预算不超过3000元。",
+    }]))
+
+    assert captured["valid"] is False
+    assert merged.legacy_notes == ()
+    assert [item.text for item in merged.hard_constraints] == ["预算不超过3000元。"]
+
+
+def test_lifespan_starts_and_closes_history_worker_only_when_configured(tmp_path: Path):
+    class FakeHistoryWorker:
+        def __init__(self) -> None:
+            self.started = threading.Event()
+            self.closed = threading.Event()
+
+        async def run_once(self):
+            self.started.set()
+            return type("Run", (), {
+                "completed": 0, "skipped": 0, "retried": 0, "failed": 0,
+                "thread_cleaned": 0, "message_cleaned": 0,
+            })()
+
+        async def close(self) -> None:
+            self.closed.set()
+
+    enabled_settings = settings_for(
+        tmp_path,
+        agent_history_retrieval_enabled=True,
+        agent_history_qdrant_url="http://qdrant.test",
+        embedding_api_url="http://embedding.test/v1",
+    )
+    enabled_worker = FakeHistoryWorker()
+    with TestClient(create_app(container=build_container(
+        enabled_settings, history_worker=enabled_worker
+    ))):
+        assert enabled_worker.started.wait(timeout=1)
+    assert enabled_worker.closed.is_set()
+
+    disabled_settings = settings_for(tmp_path)
+    disabled_worker = FakeHistoryWorker()
+    with TestClient(create_app(container=build_container(
+        disabled_settings, history_worker=disabled_worker
+    ))):
+        assert not disabled_worker.started.wait(timeout=0.05)
+    assert disabled_worker.closed.is_set()
+
+
+def test_lifespan_closes_history_clients_owned_by_an_injected_worker_setup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    class FakeHistoryWorker:
+        async def run_once(self):
+            return type("Run", (), {
+                "completed": 0, "skipped": 0, "retried": 0, "failed": 0,
+                "lease_lost": 0, "thread_cleaned": 0, "message_cleaned": 0,
+            })()
+
+        async def close(self) -> None:
+            return None
+
+    class CloseableEmbedding:
+        instances: list["CloseableEmbedding"] = []
+
+        def __init__(self, *_args) -> None:
+            self.closed = False
+            self.instances.append(self)
+
+        async def close(self) -> None:
+            self.closed = True
+
+    class CloseableVectorStore:
+        instances: list["CloseableVectorStore"] = []
+
+        def __init__(self, *_args) -> None:
+            self.closed = False
+            self.instances.append(self)
+
+        async def close(self) -> None:
+            self.closed = True
+
+    monkeypatch.setattr(
+        "llm_service.container.HistoryEmbeddingClient", CloseableEmbedding
+    )
+    monkeypatch.setattr(
+        "llm_service.container.ConversationVectorStore", CloseableVectorStore
+    )
+    settings = settings_for(
+        tmp_path,
+        agent_history_retrieval_enabled=True,
+        agent_history_qdrant_url="http://qdrant.test",
+        embedding_api_url="http://embedding.test/v1",
+    )
+    container = build_container(settings, history_worker=FakeHistoryWorker())
+
+    assert len(container.history_closeables) == 2
+    with TestClient(create_app(container=container)):
+        pass
+    assert all(item.closed for item in CloseableEmbedding.instances)
+    assert all(item.closed for item in CloseableVectorStore.instances)
