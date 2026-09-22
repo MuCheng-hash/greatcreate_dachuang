@@ -1,7 +1,19 @@
 import { describe, expect, it } from "vitest";
-import router, { resolveRouteAccess } from "@/router";
+import router, { resolveRouteAccess, shouldReloadForDynamicImportError } from "@/router";
 
 describe("portal route access", () => {
+  it("retries one stale lazy-route module load after a frontend deployment", () => {
+    expect(shouldReloadForDynamicImportError(
+      new TypeError("Failed to fetch dynamically imported module"),
+      false,
+    )).toBe(true);
+    expect(shouldReloadForDynamicImportError(
+      new TypeError("Failed to fetch dynamically imported module"),
+      true,
+    )).toBe(false);
+    expect(shouldReloadForDynamicImportError(new Error("权限不足"), false)).toBe(false);
+  });
+
   it("redirects unauthenticated users to login with the requested route", () => {
     const result = resolveRouteAccess({ meta: {}, fullPath: "/assistant" }, { isAdmin: false, isAuthenticated: false });
     expect(result).toEqual({ path: "/login", query: { redirect: "/assistant" } });

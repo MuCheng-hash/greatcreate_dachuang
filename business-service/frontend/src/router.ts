@@ -64,6 +64,21 @@ const router = createRouter({
   scrollBehavior: () => ({ top: 0 })
 });
 
+const LAZY_ROUTE_RELOAD_KEY = "portal:lazy-route-reload";
+const LAZY_IMPORT_ERROR = /failed to fetch dynamically imported module|error loading dynamically imported module|importing a module script failed/i;
+
+export function shouldReloadForDynamicImportError(error: unknown, alreadyRetried: boolean): boolean {
+  return !alreadyRetried && LAZY_IMPORT_ERROR.test(String(error));
+}
+
+function recoverStaleLazyRoute(error: unknown): void {
+  const locationKey = `${window.location.pathname}${window.location.search}`;
+  const alreadyRetried = window.sessionStorage.getItem(LAZY_ROUTE_RELOAD_KEY) === locationKey;
+  if (!shouldReloadForDynamicImportError(error, alreadyRetried)) return;
+  window.sessionStorage.setItem(LAZY_ROUTE_RELOAD_KEY, locationKey);
+  window.location.reload();
+}
+
 interface RouteAuthState {
   isAdmin: boolean;
   isAuthenticated: boolean;
@@ -104,6 +119,15 @@ router.beforeEach(async (to) => {
   if (access !== true) return access;
   document.title = to.meta.title ? `${String(to.meta.title)} | 乡村学校思政资源工作台` : "乡村学校思政资源工作台";
   return true;
+});
+
+router.onError((error) => {
+  // 已打开的页面仍引用旧构建的哈希文件时，重新加载当前入口而非留下空白 RouterView。
+  recoverStaleLazyRoute(error);
+});
+
+router.afterEach(() => {
+  window.sessionStorage.removeItem(LAZY_ROUTE_RELOAD_KEY);
 });
 
 window.addEventListener("portal:unauthorized", () => {
