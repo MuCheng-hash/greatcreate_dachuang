@@ -49,7 +49,7 @@ def test_multimodal_request_builds_image_message(tmp_path: Path):
             "dataUrl": "data:image/png;base64,aGVsbG8taGVsbG8taGVsbG8=",
         }],
     ))
-    settings = settings_for(tmp_path)
+    settings = settings_for(tmp_path, agent_context_token_budget=6_000)
     repository = conversation_repository(settings)
     runtime = AgentRuntime(settings, repository.async_target)
     messages = runtime._build_messages(
@@ -584,7 +584,7 @@ def test_stateful_stream_keeps_worker_running_after_client_disconnect(tmp_path: 
     cancelled = asyncio.Event()
     reached_wait = asyncio.Event()
 
-    async def fake_stream_turn(*args):
+    async def fake_stream_turn(*args, **_kwargs):
         emit = args[8]
         try:
             progress.append("before-first")
