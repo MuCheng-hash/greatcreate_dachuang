@@ -176,6 +176,186 @@ def normalize_teaching_plan_patch(value: dict[str, Any]) -> dict[str, Any]:
     return patch
 
 
+class IncrementalJsonStringFieldParser:
+    """从严格 JSON 流中增量读取一个顶层字符串字段。"""
+
+    _SIMPLE_ESCAPES = {
+        '"': '"',
+        "\\": "\\",
+        "/": "/",
+        "b": "\b",
+        "f": "\f",
+        "n": "\n",
+        "r": "\r",
+        "t": "\t",
+    }
+
+    def __init__(self, field_name: str) -> None:
+        self._field_name = field_name
+        self._buffer = ""
+        self._index = 0
+        self._started = False
+        self._finished = False
+        self._field_started = False
+        self._invalid = False
+        self._value = ""
+        self._decoder = json.JSONDecoder()
+        self._escape_started = False
+        self._unicode_digits: str | None = None
+        self._pending_high_surrogate: int | None = None
+
+    @property
+    def value(self) -> str:
+        return self._value
+
+    def feed(self, delta: str) -> str:
+        """接收 JSON 增量，并返回本次新解码出的目标字段文本。"""
+        if not delta or self._finished or self._invalid:
+            return ""
+        self._buffer += delta
+        if not self._field_started:
+            self._seek_field()
+        if not self._field_started or self._finished or self._invalid:
+            return ""
+        return self._consume_string()
+
+    def _seek_field(self) -> None:
+        while not self._finished and not self._invalid:
+            if not self._started:
+                start = self._buffer.find("{")
+                if start < 0:
+                    return
+                self._started = True
+                self._index = start + 1
+
+            self._index = self._skip_whitespace(self._index)
+            if self._index >= len(self._buffer):
+                return
+            if self._buffer[self._index] == "}":
+                self._finished = True
+                return
+            if self._buffer[self._index] == ",":
+                self._index += 1
+                continue
+
+            try:
+                key, key_end = self._decoder.raw_decode(self._buffer, self._index)
+            except json.JSONDecodeError:
+                return
+            if not isinstance(key, str):
+                self._invalid = True
+                return
+
+            value_start = self._skip_whitespace(key_end)
+            if value_start >= len(self._buffer):
+                return
+            if self._buffer[value_start] != ":":
+                self._invalid = True
+                return
+            value_start = self._skip_whitespace(value_start + 1)
+            if value_start >= len(self._buffer):
+                return
+
+            if key == self._field_name:
+                if self._buffer[value_start] != '"':
+                    self._invalid = True
+                    return
+                self._field_started = True
+                self._index = value_start + 1
+                return
+
+            try:
+                value, value_end = self._decoder.raw_decode(self._buffer, value_start)
+            except json.JSONDecodeError:
+                return
+            if not self._value_boundary_complete(value, value_end):
+                return
+            self._index = value_end
+
+    def _consume_string(self) -> str:
+        emitted: list[str] = []
+        while self._index < len(self._buffer):
+            char = self._buffer[self._index]
+            if self._unicode_digits is not None:
+                if char not in "0123456789abcdefABCDEF":
+                    self._invalid = True
+                    return "".join(emitted)
+                self._unicode_digits += char
+                self._index += 1
+                if len(self._unicode_digits) == 4:
+                    self._append_unicode_escape(emitted)
+                    self._unicode_digits = None
+                    if self._invalid:
+                        return "".join(emitted)
+                continue
+
+            if self._escape_started:
+                self._index += 1
+                self._escape_started = False
+                if char == "u":
+                    self._unicode_digits = ""
+                    continue
+                decoded = self._SIMPLE_ESCAPES.get(char)
+                if decoded is None or self._pending_high_surrogate is not None:
+                    self._invalid = True
+                    return "".join(emitted)
+                self._append(decoded, emitted)
+                continue
+
+            if char == '"':
+                self._index += 1
+                if self._pending_high_surrogate is None:
+                    self._finished = True
+                else:
+                    self._invalid = True
+                return "".join(emitted)
+            if char == "\\":
+                self._index += 1
+                self._escape_started = True
+                continue
+            if ord(char) < 0x20 or self._pending_high_surrogate is not None:
+                self._invalid = True
+                return "".join(emitted)
+            self._index += 1
+            self._append(char, emitted)
+        return "".join(emitted)
+
+    def _append_unicode_escape(self, emitted: list[str]) -> None:
+        code_unit = int(self._unicode_digits or "", 16)
+        if self._pending_high_surrogate is not None:
+            if not 0xDC00 <= code_unit <= 0xDFFF:
+                self._invalid = True
+                return
+            code_point = 0x10000 + (
+                (self._pending_high_surrogate - 0xD800) << 10
+            ) + (code_unit - 0xDC00)
+            self._pending_high_surrogate = None
+            self._append(chr(code_point), emitted)
+            return
+        if 0xD800 <= code_unit <= 0xDBFF:
+            self._pending_high_surrogate = code_unit
+            return
+        if 0xDC00 <= code_unit <= 0xDFFF:
+            self._invalid = True
+            return
+        self._append(chr(code_unit), emitted)
+
+    def _append(self, text: str, emitted: list[str]) -> None:
+        self._value += text
+        emitted.append(text)
+
+    def _skip_whitespace(self, index: int) -> int:
+        while index < len(self._buffer) and self._buffer[index].isspace():
+            index += 1
+        return index
+
+    def _value_boundary_complete(self, value: Any, value_end: int) -> bool:
+        next_index = self._skip_whitespace(value_end)
+        if next_index < len(self._buffer):
+            return self._buffer[next_index] in ",}"
+        return isinstance(value, (str, list, dict))
+
+
 class IncrementalTeachingPlanParser:
     """按完整顶层字段解析严格 JSON，避免把半截 JSON 暴露给浏览器。"""
 

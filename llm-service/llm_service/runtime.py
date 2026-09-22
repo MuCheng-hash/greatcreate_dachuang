@@ -63,6 +63,7 @@ from .user_memory import (
     MemoryValidationError,
 )
 from .structured_tasks import (
+    IncrementalJsonStringFieldParser,
     IncrementalTeachingPlanParser,
     normalize_resource_discovery,
     normalize_teaching_plan,
@@ -107,6 +108,13 @@ class PreparedTurn:
     messages: list[dict[str, str]]
     plan: AgentPlan
     memory_context: MemoryContext
+
+
+@dataclass(slots=True)
+class StreamedAnswerProgress:
+    """记录当前模型尝试是否已向浏览器展示暂定回答。"""
+
+    emitted: bool = False
 
 
 class PartialAnswerWriter:
@@ -1161,6 +1169,7 @@ class AgentRuntime:
                 },
             )
         resume_namespace = registration.turn.checkpoint_namespace
+        last_stream_progress: StreamedAnswerProgress | None = None
         for attempt_index, (config, injected_agent) in enumerate(model_attempts):
             checkpoint_namespace = f"chat-v1/model-attempt-{attempt_index + 1}"
             if (
@@ -1205,6 +1214,8 @@ class AgentRuntime:
                 degraded_reasons=list(prefetched_reasons),
             )
             token = bind_tool_runtime(runtime)
+            stream_progress = StreamedAnswerProgress()
+            last_stream_progress = stream_progress
             prompt_run_id = await self._start_agent_prompt_run(request, thread, memory_context, config)
             await emit(
                 "model.started",
@@ -1241,6 +1252,7 @@ class AgentRuntime:
                     checkpoint_namespace=checkpoint_namespace,
                     resumed=registration.resumed,
                     partial_writer=partial_writer,
+                    stream_progress=stream_progress,
                 )
                 result = self._with_model_metadata(result, config)
                 await self._finish_structured_prompt(prompt_run_id, "completed", 0, {"answer": result.answer}, "")
@@ -1296,10 +1308,18 @@ class AgentRuntime:
                 ),
                 [{"status": "not_configured"}],
             )
+        if last_stream_progress is not None and last_stream_progress.emitted:
+            await emit(
+                "response.reset",
+                {
+                    "clientTurnId": request.client_turn_id,
+                    "reason": "model_exhausted",
+                },
+            )
+            await partial_writer.reset()
         result = self._degraded_answer(
             request, request.context, thread.thread_id, compacted, executions, status="degraded"
         )
-        await self._emit_answer_chunks(result.answer, emit)
         return result
 
     async def _prefetch_planned_tools(
@@ -2120,13 +2140,13 @@ class AgentRuntime:
         checkpoint_namespace: str | None = None,
         resumed: bool = False,
         partial_writer: PartialAnswerWriter | None = None,
+        stream_progress: StreamedAnswerProgress | None = None,
     ) -> AgentMessageResponse:
         lc_messages = self._build_messages(
             messages, summary, plan, request, memory_context
         )
         model_messages: list[Any] = []
         model_buffer = ""
-        emitted_answer_length = 0
         target_agent = agent or self._agent
         if target_agent is None:
             raise RuntimeError("model_unavailable")
@@ -2163,6 +2183,7 @@ class AgentRuntime:
             runtime.action_id = resume_action.action_id
             graph_input = Command(resume={"decisions": [{"type": decision}]})
         if hasattr(target_agent, "astream"):
+            answer_parser = IncrementalJsonStringFieldParser("answer")
             async for chunk in target_agent.astream(
                 graph_input,
                 config=self._agent_invoke_config(
@@ -2184,12 +2205,13 @@ class AgentRuntime:
                     if not content:
                         continue
                     model_buffer, delta = self._merge_stream_text(model_buffer, content)
-                    partial_answer = self._partial_answer(model_buffer)
-                    if delta and partial_answer and len(partial_answer) > emitted_answer_length:
-                        await emit("token", {"delta": partial_answer[emitted_answer_length:]})
-                        emitted_answer_length = len(partial_answer)
+                    answer_delta = answer_parser.feed(delta)
+                    if answer_delta:
+                        await emit("token", {"delta": answer_delta})
+                        if stream_progress is not None:
+                            stream_progress.emitted = True
                         if partial_writer is not None:
-                            await partial_writer.update(partial_answer)
+                            await partial_writer.update(answer_parser.value)
             if durable_resume and not model_buffer:
                 snapshot = await target_agent.aget_state(
                     self._agent_invoke_config(
@@ -2245,8 +2267,6 @@ class AgentRuntime:
             request.grade, request.theme, memory_context, request,
             turn.turn_id if turn else None,
         )
-        if emitted_answer_length < len(response.answer):
-            await self._emit_answer_chunks(response.answer[emitted_answer_length:], emit)
         if partial_writer is not None:
             await partial_writer.update(response.answer, force=True)
         await self._finalize_resumed_action(resume_action, runtime.executions, emit)
@@ -2641,16 +2661,6 @@ class AgentRuntime:
         if not parsed.answer.strip():
             raise ValueError("invalid_model_output")
         return parsed
-
-    def _partial_answer(self, content: str) -> str:
-        """从尚未完成的 JSON 流中提取当前可验证的 ``answer``，无法验证时保持静默。"""
-        payload = ModelGateway.parse_json(content)
-        if payload is None:
-            return ""
-        try:
-            return AgentModelOutput.model_validate(payload).answer
-        except (ValueError, TypeError):
-            return ""
 
     @staticmethod
     def _plain_text_answer(content: str) -> str:
